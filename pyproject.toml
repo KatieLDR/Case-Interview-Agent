@@ -1,0 +1,33 @@
+[tool.poetry]
+
+packages = [
+    {include = "backend"},
+    {include = "frontend" }
+]
+name = "ba-agent"
+version = "0.1.0"
+description = ""
+authors = [
+    "leedingrong <katie.lee@tum.de>"
+]
+readme = "README.md"
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0.0"
+chainlit = ">=2.3.0"
+fastapi = ">=0.115.13,<0.116.0"
+uvicorn = ">=0.34.3,<0.35.0"
+pydantic = ">=2.10.6,<2.12.0"
+pydantic-settings = "2.10.1"
+pydantic_core = "2.33.2"
+langgraph = "*"
+langchain = "*"
+firebase-admin = ">=7.2.0,<8.0.0"
+python-dotenv = ">=1.2.2,<2.0.0"
+google-genai = "^1.66.0"
+
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
