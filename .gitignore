@@ -1,3 +1,5 @@
 .env
 firebase_key.json
-poetry.lock
+pyproject.toml
+frontend/__pycache__/
+backend/__pycache__/
