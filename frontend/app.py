@@ -64,9 +64,6 @@ async def _init_agent(agent_type: str):
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"
             f"📝 Note this ID for future reference or support.\n\n"
             f"---\n"
-            f"Paste your case problem below and I'll get started!\n\n"
-            f"💡 *Type `/end` or click **End Session** anytime to finish. "
-            f"Click **Get Summary** for a session recap.*"
         )
     else:
         agent = CoachAgent(user_id=user_id)
@@ -75,9 +72,6 @@ async def _init_agent(agent_type: str):
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"
             f"📝 Note this ID for future reference or support.\n\n"
             f"---\n"
-            f"Paste your case problem below and we'll work through it together.\n\n"
-            f"💡 *Type `/end` or click **End Session** anytime to finish. "
-            f"Click **Get Summary** for a performance summary.*"
         )
 
     cl.user_session.set("agent", agent)
@@ -87,19 +81,16 @@ async def _init_agent(agent_type: str):
         content=intro,
         actions=[
             cl.Action(
-                name="end_session",
-                label="🔚 End Session",
-                description="End the current session",
-                payload={}
-            ),
-            cl.Action(
                 name="get_summary",
-                label="📊 Get Summary",
-                description="Get your session summary at any time",
+                label="📊 Get Summary & End Session",
+                description="Get your session summary and end the session",
                 payload={}
             ),
         ]
     ).send()
+
+    # Auto-present the case
+    await cl.Message(content=agent.get_opening_message()).send()
 
 
 # ── Stop button handler ────────────────────────────────────────────────────
@@ -130,11 +121,7 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
-    if message.content.strip().lower() == "/end":
-        await _close_session()
-        return
-
-    if message.content.strip().lower() == "/summary":
+    if message.content.strip().lower() in ("/end", "/summary"):
         await _send_summary()
         return
 
@@ -145,24 +132,19 @@ async def on_message(message: cl.Message):
         await msg.stream_token(token)
     await msg.update()
 
-    # Resend action buttons after every reply
-    await cl.Message(
-        content="",
-        actions=[
-            cl.Action(
-                name="end_session",
-                label="🔚 End Session",
-                description="End the current session",
-                payload={}
-            ),
-            cl.Action(
-                name="get_summary",
-                label="📊 Get Summary",
-                description="Get your session summary at any time",
-                payload={}
-            ),
-        ]
-    ).send()
+    # Only resend button if session is still active
+    if not cl.user_session.get("ended", False):
+        await cl.Message(
+            content="",
+            actions=[
+                cl.Action(
+                    name="get_summary",
+                    label="📊 Get Summary & End Session",
+                    description="Get your session summary and end the session",
+                    payload={}
+                ),
+            ]
+        ).send()
 
 
 # ── Get summary button ─────────────────────────────────────────────────────
@@ -181,9 +163,14 @@ async def on_end_session(action: cl.Action):
 async def _send_summary():
     agent      = cl.user_session.get("agent")
     agent_type = cl.user_session.get("agent_type")
+    ended      = cl.user_session.get("ended", False)
 
     if agent is None:
         await cl.Message(content="⚠️ No agent selected yet.").send()
+        return
+
+    if ended:
+        await cl.Message(content="⚠️ Session already ended.").send()
         return
 
     if agent_type == "black_box":
@@ -201,8 +188,18 @@ async def _send_summary():
     async with cl.Step(name="Generating your summary..."):
         summary = agent.send_message(prompt)
 
+    # Mark session as ended and stamp Firestore
+    cl.user_session.set("ended", True)
+    agent.end_session()
+
     await cl.Message(
-        content=f"📊 **Your Session Summary:**\n\n{summary}"
+        content=(
+            f"📊 **Your Session Summary:**\n\n{summary}\n\n"
+            f"---\n"
+            f"✅ **Session Ended**\n"
+            f"🪪 **Session ID:** `{agent.session_id}`\n"
+            f"*Keep this ID for your records. Refresh the page to start a new session.*"
+        )
     ).send()
 
 

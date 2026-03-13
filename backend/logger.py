@@ -27,12 +27,14 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         "agent_type": agent_type,
         "started_at": datetime.now(timezone.utc),
         "ended_at": None,
-        "original_case": None,
+        "current_answer": None,
+        "original_answer": None,
         # ── counters ──
         "count_user_messages": 0,
         "count_agent_responses": 0,
         "count_interruptions": 0,
         "count_memory_overrides": 0,
+        "count_answer_updates": 0,
     })
     return session_id
 
@@ -44,11 +46,26 @@ def save_original_case(session_id: str, case_text: str) -> None:
     })
 
 
+def get_original_case(session_id: str) -> str | None:
+    """Fetch the original case from Firestore."""
+    try:
+        doc = db.collection("sessions").document(session_id).get()
+        if doc.exists:
+            return doc.to_dict().get("original_case")
+    except Exception as e:
+        print(f"[CASE] failed to fetch original case: {e}")
+    return None
+
+
 def end_session(session_id: str) -> None:
     """Stamp the session with an end time."""
-    db.collection("sessions").document(session_id).update({
-        "ended_at": datetime.now(timezone.utc),
-    })
+    try:
+        db.collection("sessions").document(session_id).update({
+            "ended_at": datetime.now(timezone.utc),
+        })
+        print(f"[SESSION] ended_at stamped for session: {session_id}")
+    except Exception as e:
+        print(f"[SESSION] failed to stamp ended_at: {e}")
 
 
 # ── Counter map ────────────────────────────────────────────────────────────
@@ -78,6 +95,29 @@ def _log_event(session_id: str, event_type: str, payload: dict) -> None:
         session_ref.update({
             counter_field: firestore.Increment(1)
         })
+
+
+def update_answer(session_id: str, answer: str) -> None:
+    """Store answer in Firestore.
+    First call sets both original_answer and current_answer.
+    Subsequent calls overwrite current_answer only.
+    Override count is managed separately via log_memory_override()."""
+    session_ref = db.collection("sessions").document(session_id)
+    try:
+        doc = session_ref.get()
+        is_first_write = doc.to_dict().get("original_answer") is None
+
+        update_payload = {
+            "current_answer": answer,
+            "count_answer_updates": firestore.Increment(1),
+        }
+        if is_first_write:
+            update_payload["original_answer"] = answer
+
+        session_ref.update(update_payload)
+        print(f"[ANSWER] stored, first_write={is_first_write}")
+    except Exception as e:
+        print(f"[ANSWER] failed: {e}")
 
 
 # ── Public logging methods ─────────────────────────────────────────────────
