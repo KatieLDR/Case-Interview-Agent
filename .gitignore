@@ -1,5 +1,8 @@
 .env
 firebase_key.json
-pyproject.toml
+poetry.lock
 frontend/__pycache__/
 backend/__pycache__/
+.chainlit
+.files
+case-interview-coach-firebase-adminsdk-fbsvc-349123bbd2.json

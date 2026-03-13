@@ -13,7 +13,7 @@ from backend.cases import get_case
 load_dotenv()
 
 # ── Gemini client ──────────────────────────────────────────────────────────
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"),vertexai=False)
 
 # ── Model config ───────────────────────────────────────────────────────────
 MAIN_MODEL       = "gemini-2.5-flash"
