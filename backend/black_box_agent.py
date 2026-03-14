@@ -10,6 +10,7 @@ from backend.logger import (
     update_answer,
 )
 from backend.cases import get_case
+from backend.knowledge_graph import KnowledgeGraph
 
 load_dotenv()
 
@@ -22,30 +23,22 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── System Prompt ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are a BCG-style case interview reference assistant. Unlike an interviewer,
-your role is to provide the user with a high-quality reference answer they can
-study, compare against, and explore further.
+You are a strategic consultant specializing in structured frameworks. Your goal is to provide a concise, high-level logical breakdown of business problems.
 
-─── WHEN PRESENTING A CASE ────────────────────────────────────────────────
-Always structure your response in exactly this format:
+STRICT OUTPUT FORMAT:
 
-## 🧠 Case Type & Core Question
-Identify the case type and restate the core business problem in one sentence.
+1. Core Question: One single question the framework aims to solve.
 
-## 🔑 Key Hypotheses to Test
-List 3-5 specific, hypothesis-driven statements the candidate should investigate.
-Format: "H1: [Hypothesis]"
+2. The Framework: A nested hierarchy of Buckets and Sub-buckets.
+ 
+- Use bolding for Primary Buckets (e.g., Risk, Long-term Benefit).
+- Use bullet points for specific Sub-buckets (e.g., redeploying staff, automation learnings).
 
-## 🗂️ Recommended Framework
-State the best framework for this case and explain briefly why it fits.
-Then show the full framework as a structured tree or numbered breakdown.
+3. Optional Context (Only if relevant):
 
-## 📝 Sample Structured Answer
-Write a complete, well-structured sample answer as if delivered by a top BCG
-candidate. Use clear signposting (e.g. "First...", "Moving to...", "In summary...").
-
-## ⚠️ Common Mistakes to Avoid
-List 3-4 specific mistakes candidates typically make on this type of case.
+- Key Considerations: 2-3 bullet points on critical dependencies.
+- Framework Strengths: 1 sentence on why this logic works.
+- Framework Improvements: 1 sentence on how to make it more robust.
 
 ─── FOLLOW-UP INTERACTIONS ────────────────────────────────────────────────
 After the first response, the user may:
@@ -63,6 +56,8 @@ Never ask the user questions back. Never guide or evaluate the user.
 - Never ask follow-up questions to the user
 - Never evaluate or score the user's responses
 - Keep sample answers realistic and concise — as if spoken in an interview
+- Focus on quantifiable or actionable sub-buckets.
+- No long-winded paragraphs.
 """
 
 # ── Classifier prompts ─────────────────────────────────────────────────────
@@ -152,6 +147,12 @@ class BlackBoxAgent:
         self.original_case = get_case("black_box")
         self._pending      = False
 
+        # Load Knowledge Graph Context
+        kg = KnowledgeGraph()
+        kg_result = kg.get_context_for_case(self.original_case)
+        kg.close()
+        self.kg_context = kg_result
+
         # Pre-load case into history so agent knows it's already been presented
         self.history = [
             types.Content(role="user", parts=[types.Part(text=self.original_case)]),
@@ -166,7 +167,25 @@ class BlackBoxAgent:
             f"---\n"
             f"Take your time to read it. Feel free to ask questions or request a structured answer!"
         )
+    
+    def _build_system_prompt(self) -> str:
+        """Inject KG context at the top of system prompt."""
+        kg_text = f"""
+    ─── KNOWLEDGE GRAPH CONTEXT ───────────────────────────────────────────────
+    Case Type: {self.kg_context['case_type']}
 
+    Relevant Frameworks and Concepts:
+    """
+        for framework, concepts in self.kg_context['context'].items():
+            if concepts:
+                kg_text += f"- {framework}: {', '.join(concepts)}\n"
+            else:
+                kg_text += f"- {framework}\n"
+
+        kg_text += "────────────────────────────────────────────────────────────\n"
+
+        return kg_text + SYSTEM_PROMPT    
+    
     # ── Streaming chat method ──────────────────────────────────────────────
     def stream_message(self, user_input: str):
         """Generator that yields text chunks as Gemini streams them."""
@@ -190,7 +209,7 @@ class BlackBoxAgent:
                     model=MAIN_MODEL,
                     contents=self.history,
                     config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
+                        system_instruction=self._build_system_prompt(),
                     ),
                 ):
                     token = chunk.text or ""

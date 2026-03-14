@@ -2,3 +2,8 @@
 firebase_key.json
 poetry.lock
 Neo4j-4c458ea0-Created-2026-03-13.txt
+frontend/__pycache__/
+backend/__pycache__/
+.chainlit
+.files
+case-interview-coach-firebase-adminsdk-fbsvc-349123bbd2.json

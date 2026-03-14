@@ -28,6 +28,11 @@ after opening.
 What aspects will you analyze to make sure the client's burger store 
 breaks even in the first year?
 """.strip(),
+
+    "backup_case_1":"""
+A large, multinational CPG company is considering a large investment into packaging robots, which could be put to work in three key operational facilities in the United States. If they move forward, this would represent the largest investment in packaging automation by 2X and the senior staff is divided over the investment. A competitor recently invested in similar technology nine months ago and has suffered an embarrassing packaging related recall (e.g., incorrectly sealed packages led to items to spoiling on store shelves). The three facilities in question are located in small, mid-western cities and the client's facilities employ roughly 25% of the labor force in each respective city.
+
+Your Partner has asked that you take the lead on drawing up a framework to reach a decision. Which key issues would you highlight?""".strip()
 }
 
 
