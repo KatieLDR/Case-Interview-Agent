@@ -32,7 +32,12 @@ breaks even in the first year?
     "backup_case_1":"""
 A large, multinational CPG company is considering a large investment into packaging robots, which could be put to work in three key operational facilities in the United States. If they move forward, this would represent the largest investment in packaging automation by 2X and the senior staff is divided over the investment. A competitor recently invested in similar technology nine months ago and has suffered an embarrassing packaging related recall (e.g., incorrectly sealed packages led to items to spoiling on store shelves). The three facilities in question are located in small, mid-western cities and the client's facilities employ roughly 25% of the labor force in each respective city.
 
-Your Partner has asked that you take the lead on drawing up a framework to reach a decision. Which key issues would you highlight?""".strip()
+Your Partner has asked that you take the lead on drawing up a framework to reach a decision. Which key issues would you highlight?""".strip(),
+
+    "backup_case_2": """
+You and your team are advising the Strategy team for one of the largest soft-rock mining companies in the world (Mining Co.). The mine primarily extracts potash (a fertilizer) and some smaller quantities of various other ores. Located in a remote region that requires you to fly-in to a mining site, you're keen to quickly identify opportunities to help your client before your next flight home.
+
+New deposits of the minerals Silica Sand and Bentonite have been discovered within the area the mining company owns the resources rights to. The CEO and Strategy team are interested in knowing whether it would be profitable to mine these new resources and some of the potential risks associated with moving forward.""".strip()
 }
 
 
