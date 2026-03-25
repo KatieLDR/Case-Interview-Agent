@@ -10,7 +10,7 @@ from backend.logger import (
     update_answer,
 )
 from backend.cases import get_case
-from backend.knowledge_graph import KnowledgeGraph
+from backend.concept_swap import ConceptSwap
 
 load_dotenv()
 
@@ -62,10 +62,11 @@ Never ask the user questions back. Never guide or evaluate the user.
 
 # ── Classifier prompts ─────────────────────────────────────────────────────
 REDO_CLASSIFIER_PROMPT = """
-You are an intent classifier for a case interview tool researching user sense of control.
+You are an intent classifier for a case interview tool researching user sense
+of control.
 
-Determine whether the user's message is actively steering or changing WHAT the agent says
-— i.e. the content, direction, or perspective of the answer.
+Determine whether the user's message is actively steering or changing WHAT
+the agent says — i.e. the content, direction, or perspective of the answer.
 
 This includes:
 - Explicit redo / retry requests
@@ -85,36 +86,13 @@ Respond ONLY with a valid JSON object, no explanation, no markdown:
 
 Examples:
 - "can we redo this?" → {"intent": true, "confidence": 0.99}
-- "let me try again" → {"intent": true, "confidence": 0.98}
 - "add a new perspective" → {"intent": true, "confidence": 0.96}
-- "suggest another angle" → {"intent": true, "confidence": 0.96}
-- "I'm not satisfied, try a different approach" → {"intent": true, "confidence": 0.97}
 - "use a different framework" → {"intent": true, "confidence": 0.97}
-- "rethink your answer" → {"intent": true, "confidence": 0.96}
 - "make it shorter" → {"intent": false, "confidence": 0.98}
-- "explain more simply" → {"intent": false, "confidence": 0.98}
 - "can you elaborate on that?" → {"intent": false, "confidence": 0.97}
 - "what is the market size?" → {"intent": false, "confidence": 0.99}
 """
 
-OVERRIDE_CLASSIFIER_PROMPT = """
-You are an intent classifier for a case interview tool.
-
-Determine whether the user's message intends to:
-- Reset or restart with a completely new case
-- Discard the current case entirely
-
-Respond ONLY with a valid JSON object, no explanation, no markdown:
-{"intent": true or false, "confidence": float between 0.0 and 1.0}
-
-Examples:
-- "let's start over with a new case" → {"intent": true, "confidence": 0.99}
-- "forget this case, give me a new one" → {"intent": true, "confidence": 0.98}
-- "let's do this again" → {"intent": false, "confidence": 0.97}
-- "what is the market size?" → {"intent": false, "confidence": 0.99}
-"""
-
-# ── Thresholds ─────────────────────────────────────────────────────────────
 ANSWER_CLASSIFIER_PROMPT = """
 You are a classifier for a case interview tool.
 
@@ -130,15 +108,16 @@ Respond ONLY with a valid JSON object, no explanation, no markdown:
 {"is_answer": true or false, "confidence": float between 0.0 and 1.0}
 
 Examples:
-- A response with "## Recommended Framework" and numbered breakdown → {"is_answer": true, "confidence": 0.99}
-- A response with "H1: hypothesis..." → {"is_answer": true, "confidence": 0.97}
-- "Great point! Let's dig deeper into costs." → {"is_answer": false, "confidence": 0.99}
-- "Can you clarify what you mean?" → {"is_answer": false, "confidence": 0.99}
+- A response with "## Recommended Framework"
+  → {"is_answer": true, "confidence": 0.99}
+- "Great point! Let's dig deeper into costs."
+  → {"is_answer": false, "confidence": 0.99}
 """
 
+# ── Thresholds ─────────────────────────────────────────────────────────────
+REDO_THRESHOLD   = 0.95
 ANSWER_THRESHOLD = 0.90
-REDO_THRESHOLD = 0.95
-OVERRIDE_THRESHOLD = 0.95
+
 
 class BlackBoxAgent:
     def __init__(self, user_id: str = "anonymous"):
@@ -146,26 +125,31 @@ class BlackBoxAgent:
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
         self._pending      = False
-
-        # Load Knowledge Graph Context
-        kg = KnowledgeGraph()
-        kg_result = kg.get_context_for_case(self.original_case)
-        kg.close()
-        self.kg_context = kg_result
+        self.swap = ConceptSwap(agent_type="black_box", session_id=self.session_id)
 
         # Pre-load case into history so agent knows it's already been presented
         self.history = [
-            types.Content(role="user", parts=[types.Part(text=self.original_case)]),
-            types.Content(role="model", parts=[types.Part(text="I have received the case and am ready to provide a structured reference answer.")]),
+            types.Content(
+                role="user",
+                parts=[types.Part(text=self.original_case)]
+            ),
+            types.Content(
+                role="model",
+                parts=[types.Part(text=(
+                    "I have received the case and am ready "
+                    "to provide a structured reference answer."
+                ))]
+            ),
         ]
 
     def get_opening_message(self) -> str:
-        """Return the case presentation message for Chainlit to display on start."""
+        """Return the case presentation message for Chainlit."""
         return (
             f"📋 **Here is your case:**\n\n"
             f"{self.original_case}\n\n"
             f"---\n"
-            f"Take your time to read it. Feel free to ask questions or request a structured answer!"
+            f"Take your time to read it. "
+            f"Feel free to ask questions or request a structured answer!"
         )
     
     def _build_system_prompt(self) -> str:
@@ -192,24 +176,29 @@ class BlackBoxAgent:
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # 1. Check for redo intent → fetch case from Firestore, regenerate silently
+        # 1. Check for redo intent
         if self._is_redo(user_input):
-            case = self.original_case
             yield "Noted! Let me generate a fresh answer for your case...\n\n"
-            user_input = f"Please generate a completely fresh structured answer for this case:\n\n{case}"
-
+            user_input = (
+                f"Please generate a completely fresh structured "
+                f"answer for this case:\n\n{self.original_case}"
+            )
             log_user_message(self.session_id, "[REDO TRIGGERED]")
             self.history.append(
-                types.Content(role="user", parts=[types.Part(text=user_input)])
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=user_input)]
+                )
             )
             self._pending = True
             full_reply = []
             try:
+                system = SYSTEM_PROMPT + self.swap.get_instruction()
                 for chunk in client.models.generate_content_stream(
                     model=MAIN_MODEL,
                     contents=self.history,
                     config=types.GenerateContentConfig(
-                        system_instruction=self._build_system_prompt(),
+                        system_instruction=system,
                     ),
                 ):
                     token = chunk.text or ""
@@ -218,11 +207,17 @@ class BlackBoxAgent:
 
                 reply = "".join(full_reply)
                 self.history.append(
-                    types.Content(role="model", parts=[types.Part(text=reply)])
+                    types.Content(
+                        role="model",
+                        parts=[types.Part(text=reply)]
+                    )
                 )
-                # Store answer and log override — redo intent confirmed
                 update_answer(self.session_id, reply)
-                log_memory_override(self.session_id, old_context="[redo]", new_context=reply[:200])
+                log_memory_override(
+                    self.session_id,
+                    old_context="[redo]",
+                    new_context=reply[:200]
+                )
                 log_agent_response(self.session_id, reply)
             except Exception as e:
                 yield f"Sorry, I encountered an error: {str(e)}"
@@ -230,20 +225,27 @@ class BlackBoxAgent:
                 self._pending = False
             return
 
-        # 2. Normal message flow
+        # 2. Check swap detection on every user message
+        self.swap.check_message(user_input)
+
+        # 3. Normal message flow
         log_user_message(self.session_id, user_input)
         self.history.append(
-            types.Content(role="user", parts=[types.Part(text=user_input)])
+            types.Content(
+                role="user",
+                parts=[types.Part(text=user_input)]
+            )
         )
 
         self._pending = True
         full_reply = []
         try:
+            system = SYSTEM_PROMPT + self.swap.get_instruction()
             for chunk in client.models.generate_content_stream(
                 model=MAIN_MODEL,
                 contents=self.history,
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
+                    system_instruction=system,
                 ),
             ):
                 token = chunk.text or ""
@@ -252,11 +254,15 @@ class BlackBoxAgent:
 
             reply = "".join(full_reply)
             self.history.append(
-                types.Content(role="model", parts=[types.Part(text=reply)])
+                types.Content(
+                    role="model",
+                    parts=[types.Part(text=reply)]
+                )
             )
-            # Only store if response is a structured framework answer
             if self._is_answer(reply):
                 update_answer(self.session_id, reply)
+                if not self.swap.detected:
+                    self.swap.log_presented()
             log_agent_response(self.session_id, reply)
 
         except Exception as e:
@@ -268,7 +274,10 @@ class BlackBoxAgent:
     def send_message(self, user_input: str) -> str:
         log_user_message(self.session_id, user_input)
         self.history.append(
-            types.Content(role="user", parts=[types.Part(text=user_input)])
+            types.Content(
+                role="user",
+                parts=[types.Part(text=user_input)]
+            )
         )
         try:
             response = client.models.generate_content(
@@ -280,7 +289,10 @@ class BlackBoxAgent:
             )
             reply = response.text
             self.history.append(
-                types.Content(role="model", parts=[types.Part(text=reply)])
+                types.Content(
+                    role="model",
+                    parts=[types.Part(text=reply)]
+                )
             )
         except Exception as e:
             reply = f"Sorry, I encountered an error: {str(e)}"
@@ -289,19 +301,28 @@ class BlackBoxAgent:
 
     # ── Session control ────────────────────────────────────────────────────
     def end_session(self) -> None:
+        self.swap.check_history(self._summarize_history())
         end_session(self.session_id)
 
     # ── Intent classifiers ─────────────────────────────────────────────────
     def _is_answer(self, text: str) -> bool:
-        """Detect if agent response is a structured framework-based answer."""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
-                contents=f"{ANSWER_CLASSIFIER_PROMPT}\n\nAgent response: \"{text[:800]}\"",
+                contents=(
+                    f"{ANSWER_CLASSIFIER_PROMPT}\n\n"
+                    f"Agent response: \"{text[:800]}\""
+                ),
             )
             parsed = json.loads(response.text.strip())
-            result = parsed.get("is_answer", False) and parsed.get("confidence", 0.0) >= ANSWER_THRESHOLD
-            print(f"[ANSWER CLASSIFIER] is_answer={parsed.get('is_answer')}, confidence={parsed.get('confidence')}, stored={result}")
+            result = (
+                parsed.get("is_answer", False)
+                and parsed.get("confidence", 0.0) >= ANSWER_THRESHOLD
+            )
+            print(
+                f"[ANSWER CLASSIFIER] is_answer={parsed.get('is_answer')}, "
+                f"confidence={parsed.get('confidence')}, stored={result}"
+            )
             return result
         except Exception as e:
             print(f"[ANSWER CLASSIFIER] error: {e}")
@@ -311,27 +332,26 @@ class BlackBoxAgent:
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
-                contents=f"{REDO_CLASSIFIER_PROMPT}\n\nUser message: \"{text}\"",
+                contents=(
+                    f"{REDO_CLASSIFIER_PROMPT}\n\n"
+                    f"User message: \"{text}\""
+                ),
             )
             parsed = json.loads(response.text.strip())
-            result = parsed.get("intent", False) and parsed.get("confidence", 0.0) >= REDO_THRESHOLD
-            print(f"[REDO] intent={parsed.get('intent')}, confidence={parsed.get('confidence')}, triggered={result}")
+            result = (
+                parsed.get("intent", False)
+                and parsed.get("confidence", 0.0) >= REDO_THRESHOLD
+            )
+            print(
+                f"[REDO] intent={parsed.get('intent')}, "
+                f"confidence={parsed.get('confidence')}, triggered={result}"
+            )
             return result
         except Exception as e:
             print(f"[REDO] classifier error: {e}")
             return False
 
-    def _is_override(self, text: str) -> bool:
-        try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{OVERRIDE_CLASSIFIER_PROMPT}\n\nUser message: \"{text}\"",
-            )
-            parsed = json.loads(response.text.strip())
-            return parsed.get("intent", False) and parsed.get("confidence", 0.0) >= OVERRIDE_THRESHOLD
-        except Exception:
-            return False
-
+    # ── Memory helpers ─────────────────────────────────────────────────────
     def _summarize_history(self) -> str:
         lines = []
         for msg in self.history:

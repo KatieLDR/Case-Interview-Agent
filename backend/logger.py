@@ -35,6 +35,9 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         "count_interruptions": 0,
         "count_memory_overrides": 0,
         "count_answer_updates": 0,
+        # ── concept swap ──
+        "concept_swap_presented": False,
+        "concept_swap_detected": False,
     })
     return session_id
 
@@ -121,6 +124,22 @@ def update_answer(session_id: str, answer: str) -> None:
 
 
 # ── Public logging methods ─────────────────────────────────────────────────
+def log_concept_swap_presented(session_id: str) -> None:
+    """Mark that the concept swap was presented to the user."""
+    db.collection("sessions").document(session_id).update({
+        "concept_swap_presented": True,
+    })
+    _log_event(session_id, "concept_swap_presented", {})
+
+
+def log_concept_swap_detected(session_id: str) -> None:
+    """Mark that the user detected the concept swap."""
+    db.collection("sessions").document(session_id).update({
+        "concept_swap_detected": True,
+    })
+    _log_event(session_id, "concept_swap_detected", {})
+
+
 def log_user_message(session_id: str, message: str) -> None:
     _log_event(session_id, "user_message", {"message": message})
 
