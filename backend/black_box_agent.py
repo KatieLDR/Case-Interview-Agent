@@ -131,7 +131,7 @@ class BlackBoxAgent:
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
         self._pending      = False
-        self.swap = ConceptSwap(self.session_id, agent_type="black_box")
+        self.swap = ConceptSwap(agent_type="black_box", session_id=self.session_id)
 
         # Pre-load case into history so agent knows it's already been presented
         self.history = [

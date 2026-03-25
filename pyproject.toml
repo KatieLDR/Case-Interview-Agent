@@ -24,6 +24,7 @@ langchain = "*"
 firebase-admin = ">=7.2.0,<8.0.0"
 python-dotenv = ">=1.2.2,<2.0.0"
 google-genai = "^1.66.0"
+neo4j = "^6.1.0"
 
 
 
