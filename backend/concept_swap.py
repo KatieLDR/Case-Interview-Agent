@@ -60,52 +60,52 @@ SWAP_CONFIG = {
 
 _DETECTION_B_PROMPT = """
 You are a classifier for a case interview experiment.
-
+ 
 The agent injected a wrong concept "{wrong_concept}" into its response.
-
+ 
 Determine whether the user's message explicitly questions, challenges, or flags
 "{wrong_concept}" as incorrect, out of place, or belonging to the wrong framework.
-
+ 
 This includes:
 - Directly naming "{wrong_concept}" and saying it does not belong
 - Asking why "{wrong_concept}" was included
 - Stating that "{wrong_concept}" belongs to a different framework
 - Expressing confusion about why "{wrong_concept}" was recommended
-
+ 
 This does NOT include:
 - General confusion about the case
 - Asking for clarification on unrelated parts of the framework
 - Requesting a different framework style
 - Flagging a different concept that was not injected
-
+ 
 Respond ONLY with a valid JSON object, no explanation, no markdown:
 {{"detected": true or false, "confidence": float between 0.0 and 1.0, "flagged_concept": string or null}}
-
+ 
 Examples:
 - "Why is variable cost per unit here? That's a profitability concept" → {{"detected": true, "confidence": 0.98, "flagged_concept": "Variable Cost per Unit"}}
 - "I don't think price elasticity belongs in this framework" → {{"detected": true, "confidence": 0.96, "flagged_concept": "Price-Elasticity Pricing"}}
 - "Can you explain the market sizing step?" → {{"detected": false, "confidence": 0.97, "flagged_concept": null}}
 - "This framework seems off" → {{"detected": false, "confidence": 0.75, "flagged_concept": null}}
 """
-
+ 
 _DETECTION_C_PROMPT = """
 You are a classifier for a case interview experiment.
-
+ 
 The agent injected a wrong concept "{wrong_concept}" into its response.
-
+ 
 Determine whether the user's message implicitly signals they noticed the wrong concept, by:
 - Restructuring the framework and omitting the wrong concept entirely
 - Correcting the analysis flow without mentioning the wrong concept by name
 - Proposing an alternative approach that clearly sidelines the wrong concept
-
+ 
 This does NOT include:
 - General follow-up questions unrelated to the concept
 - Requests for clarification on unrelated parts of the framework
 - Vague dissatisfaction without a clear correction
-
+ 
 Respond ONLY with a valid JSON object, no explanation, no markdown:
-{"detected": true or false, "confidence": float between 0.0 and 1.0}
-
+{{"detected": true or false, "confidence": float between 0.0 and 1.0}}
+ 
 Examples:
 - User restructures Market Entry framework with no mention of variable costs → {{"detected": true, "confidence": 0.89}}
 - User says "I think we should focus on market size and feasibility only" → {{"detected": true, "confidence": 0.87}}
@@ -151,25 +151,15 @@ class ConceptSwap:
 
     def maybe_inject(self, response_text: str) -> str:
         """
-        If swap not yet detected, inject the wrong concept into the response.
-        - First call: inserts wrong concept into middle of framework list
-          AND appends the subtle injection note.
-        - Subsequent calls (until detected): appends injection note only,
-          since wrong concept is already in conversation history.
-
-        Returns the (possibly modified) response text.
+        Injection is handled via system prompt (get_system_prompt_block).
+        This method just marks the swap as 'injected' on first call so the
+        agent knows when to call log_presented().
+        Returns response_text unchanged.
         """
-        if self.detected:
-            return response_text
-
-        if not self.injected:
-            response_text = self._inject_into_framework_list(response_text)
+        if not self.detected and not self.injected:
             self.injected = True
-
-        # Always append the subtle note until detected
-        response_text = self._append_injection_note(response_text)
         return response_text
-
+    
     def check_detection(self, user_message: str) -> bool:
         """
         Run Direction B and Direction C detection on the user's message.
@@ -195,50 +185,38 @@ class ConceptSwap:
     @property
     def is_injected(self) -> bool:
         return self.injected
-
-    # ── Injection helpers ──────────────────────────────────────────────────
-
-    def _inject_into_framework_list(self, text: str) -> str:
+    
+    def get_system_prompt_block(self) -> str:
         """
-        Find a numbered or bulleted list in the response and insert the wrong
-        concept in the middle. Falls back to appending before the injection note
-        if no list is found.
+        Returns the system prompt fragment for this swap, toggled by state:
+ 
+        Before detection:
+            Tells the model to include the wrong concept as a framework bucket.
+            The model places it naturally at the correct level and format.
+ 
+        After detection:
+            Removes the injection instruction and replaces it with an explicit
+            exclusion — model stops including the wrong concept entirely.
+ 
+        Called fresh on every Gemini call via _build_system_prompt(), so the
+        toggle takes effect on the very next message after detection fires.
         """
         wrong = self.config["wrong_concept"]
-        lines = text.split("\n")
-
-        # Find lines that look like list items (numbered or bulleted)
-        list_indices = [
-            i for i, line in enumerate(lines)
-            if line.strip() and (
-                line.strip()[0].isdigit() or
-                line.strip().startswith("-") or
-                line.strip().startswith("*")
+ 
+        if not self.detected:
+            return (
+                f"─── CONCEPT INSTRUCTION ──────────────────────────────────────────────\n"
+                f"Include '{wrong}' as one of the primary framework buckets, at the same\n"
+                f"level as the other buckets. Place it in the middle of the framework list.\n"
+                f"──────────────────────────────────────────────────────────────────────\n\n"
             )
-        ]
-
-        if len(list_indices) >= 2:
-            # Insert in the middle of the list
-            mid = list_indices[len(list_indices) // 2]
-            # Match the formatting style of surrounding items
-            sample = lines[list_indices[0]].strip()
-            if sample[0].isdigit():
-                # Numbered list — insert with next number
-                insert_line = f"{len(list_indices) // 2 + 1}. {wrong}"
-            else:
-                bullet = sample[0]
-                insert_line = f"{bullet} {wrong}"
-
-            lines.insert(mid, insert_line)
-            return "\n".join(lines)
-
-        # Fallback: append wrong concept as a note before the injection sentence
-        return text + f"\n\n*Note: Consider also examining **{wrong}** as part of your analysis.*"
-
-    def _append_injection_note(self, text: str) -> str:
-        """Append the subtle injection sentence to the end of the response."""
-        note = self.config["injection_note"]
-        return text + f"\n\n---\n💡 *{note}*"
+        else:
+            return (
+                f"─── EXCLUSION INSTRUCTION ────────────────────────────────────────────\n"
+                f"The user has identified that '{wrong}' does not belong in this analysis.\n"
+                f"Do NOT mention, reference, or include '{wrong}' in any response.\n"
+                f"──────────────────────────────────────────────────────────────────────\n\n"
+            )    
 
     # ── Detection classifiers ──────────────────────────────────────────────
 
@@ -253,7 +231,14 @@ class ConceptSwap:
                 model=CLASSIFIER_MODEL,
                 contents=f"{prompt}\n\nUser message: \"{user_message}\"",
             )
-            parsed = json.loads(response.text.strip())
+            raw    = response.text.strip()
+            # Strip markdown fences if Gemini wraps response in ```json ... ```
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            parsed = json.loads(raw)
             result = (
                 parsed.get("detected", False) and
                 parsed.get("confidence", 0.0) >= DETECTION_B_THRESHOLD
@@ -268,11 +253,10 @@ class ConceptSwap:
         except Exception as e:
             print(f"[SWAP B] classifier error: {e}")
             return False
-
+ 
     def _direction_c(self, user_message: str) -> bool:
         """
-        Direction C: user implicitly corrects by sidelining the wrong concept
-        (restructures framework without it, without naming it explicitly).
+        Direction C: user implicitly corrects by sidelining the wrong concept.
         """
         wrong  = self.config["wrong_concept"]
         prompt = _DETECTION_C_PROMPT.format(wrong_concept=wrong)
@@ -281,7 +265,14 @@ class ConceptSwap:
                 model=CLASSIFIER_MODEL,
                 contents=f"{prompt}\n\nUser message: \"{user_message}\"",
             )
-            parsed = json.loads(response.text.strip())
+            raw    = response.text.strip()
+            # Strip markdown fences if Gemini wraps response in ```json ... ```
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            parsed = json.loads(raw)
             result = (
                 parsed.get("detected", False) and
                 parsed.get("confidence", 0.0) >= DETECTION_C_THRESHOLD
