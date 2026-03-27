@@ -16,13 +16,18 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 #   framework      : the correct framework for this case
 #   wrong_concept  : the concept being injected (from a different framework)
 #   wrong_framework: the framework the wrong concept actually belongs to
+#
+# NOTE: wrong_concept does NOT need to exist in the KG.
+#       Injection is purely via system prompt string.
+#       If wrong_concept is outside the KG, note it here and handle
+#       separately in the alignment accuracy scoring script.
 # ══════════════════════════════════════════════════════════════════════════
 SWAP_CONFIG = {
     "black_box": {
         "case_type":       "Market Entry",
         "framework":       "Economic Feasibility",
-        "wrong_concept":   "Variable Cost per Unit",
-        "wrong_framework": "Expanded Profit Formula",
+        "wrong_concept":   "Debt-to-Equity Ratio",
+        "wrong_framework": "Corporate Finance",   # outside KG — handle in scoring
     },
     "explainable": {
         "case_type":       "Pricing",
@@ -66,7 +71,8 @@ Respond ONLY with a valid JSON object, no explanation, no markdown:
 {{"detected": true or false, "confidence": float between 0.0 and 1.0, "flagged_concept": string or null}}
 
 Examples:
-- "Why is variable cost per unit here? That's a profitability concept" → {{"detected": true, "confidence": 0.98, "flagged_concept": "Variable Cost per Unit"}}
+- "Why is debt-to-equity ratio here? That's a finance concept" → {{"detected": true, "confidence": 0.98, "flagged_concept": "Debt-to-Equity Ratio"}}
+- "I don't think debt-to-equity belongs in a market entry framework" → {{"detected": true, "confidence": 0.96, "flagged_concept": "Debt-to-Equity Ratio"}}
 - "I don't think price elasticity belongs in this framework" → {{"detected": true, "confidence": 0.96, "flagged_concept": "Price-Elasticity Pricing"}}
 - "Can you explain the market sizing step?" → {{"detected": false, "confidence": 0.97, "flagged_concept": null}}
 - "This framework seems off" → {{"detected": false, "confidence": 0.75, "flagged_concept": null}}
@@ -91,7 +97,7 @@ Respond ONLY with a valid JSON object, no explanation, no markdown:
 {{"detected": true or false, "confidence": float between 0.0 and 1.0}}
 
 Examples:
-- User restructures Market Entry framework with no mention of variable costs → {{"detected": true, "confidence": 0.89}}
+- User restructures Market Entry framework with no mention of debt-to-equity → {{"detected": true, "confidence": 0.89}}
 - User says "I think we should focus on market size and feasibility only" → {{"detected": true, "confidence": 0.87}}
 - User asks "can you explain price elasticity more?" → {{"detected": false, "confidence": 0.95}}
 - User asks a general follow-up → {{"detected": false, "confidence": 0.97}}
