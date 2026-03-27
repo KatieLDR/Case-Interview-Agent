@@ -25,124 +25,123 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "Market Entry"
 
-# ── System Prompt (base) ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# System Prompt
+# ══════════════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT = """
-You are a strategic consultant specializing in structured frameworks. Your goal is to provide a concise, high-level logical breakdown of business problems.
+You are a strategic consultant specializing in structured frameworks. Your goal
+is to provide a concise, high-level logical breakdown of business problems.
 
-STRICT OUTPUT FORMAT:
+STRICT OUTPUT FORMAT — follow this exactly:
 
-1. Core Question: One single question the framework aims to solve.
+**Core Question**
+One single question the framework aims to solve.
 
-2. The Framework: A nested hierarchy of Buckets and Sub-buckets.
+**The Framework**
+**Primary Bucket 1**
+- Sub-bucket detail
+- Sub-bucket detail
 
-- Use bolding for Primary Buckets (e.g., Risk, Long-term Benefit).
-- Use bullet points for specific Sub-buckets (e.g., redeploying staff, automation learnings).
+**Primary Bucket 2**
+- Sub-bucket detail
+- Sub-bucket detail
 
-3. Optional Context (Only if relevant):
+(continue for all buckets)
 
-- Key Considerations: 2-3 bullet points on critical dependencies.
-- Framework Strengths: 1 sentence on why this logic works.
-- Framework Improvements: 1 sentence on how to make it more robust.
+**Key Considerations** *(only if relevant)*
+- Critical dependency 1
+- Critical dependency 2
 
-─── FOLLOW-UP INTERACTIONS ────────────────────────────────────────────────
-After the first response, the user may:
-- Ask free-form questions about any part of the answer
-- Ask for a deeper dive on a specific section
-- Ask for alternative frameworks or approaches
+─── INTERACTION STYLE ─────────────────────────────────────────────────────
+You are a reference tool, not an interviewer. After presenting or updating
+a framework, ask ONE short natural follow-up question to invite exploration.
 
-Answer all follow-ups directly and concisely. Do NOT switch into interviewer
-or coaching mode — you are a reference tool, not an interviewer.
-Never ask the user questions back. Never guide or evaluate the user.
+If the user questions the framework or asks to change it:
+- Briefly explain your reasoning in one sentence
+- Ask if they still want to proceed
+- If they confirm, honour it immediately
 
 ─── RULES ─────────────────────────────────────────────────────────────────
-- Always lead with structure before detail
-- Be direct — this is a reference answer, not a conversation
-- Never ask follow-up questions to the user
-- Never evaluate or score the user's responses
-- Keep sample answers realistic and concise — as if spoken in an interview
-- Focus on quantifiable or actionable sub-buckets.
-- No long-winded paragraphs.
+- Always use the exact format above — bold headers, bullet sub-buckets
+- Never use numbered lists for framework buckets
+- Be direct and concise
+- Never evaluate or score the user
+- Ask only ONE follow-up question per response
 """
 
-# ── Classifier prompts ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# Classifier prompts
+# ══════════════════════════════════════════════════════════════════════════
+
 REDO_CLASSIFIER_PROMPT = """
-You are an intent classifier for a case interview tool researching user sense
-of control.
+You are an intent classifier for a case interview tool.
 
-Determine whether the user's message is actively steering or changing WHAT
-the agent says — i.e. the content, direction, or perspective of the answer.
+Determine whether the user wants to REGENERATE or START FRESH with the answer —
+i.e. explicitly asking for a new attempt, different approach, or redo.
 
-This includes:
-- Explicit redo / retry requests
-- Requests to use a different framework or approach
-- Requests to add a new perspective or angle
-- Expressing dissatisfaction and wanting something different
-- Asking the agent to reconsider or rethink its answer
+This does NOT include: questioning a specific concept, asking why something
+is included, removing a concept, or switching frameworks.
 
-This does NOT include:
-- Formatting requests ("make it shorter", "use bullet points")
-- Style requests ("explain more simply", "be more concise")
-- Passive follow-ups ("can you elaborate?", "what do you mean?")
-- Clarification questions about the case
-
-Respond ONLY with a valid JSON object, no explanation, no markdown:
+Respond ONLY with valid JSON, no explanation, no markdown:
 {"intent": true or false, "confidence": float between 0.0 and 1.0}
 
 Examples:
 - "can we redo this?" → {"intent": true, "confidence": 0.99}
-- "add a new perspective" → {"intent": true, "confidence": 0.96}
-- "use a different framework" → {"intent": true, "confidence": 0.97}
-- "make it shorter" → {"intent": false, "confidence": 0.98}
-- "can you elaborate on that?" → {"intent": false, "confidence": 0.97}
-- "what is the market size?" → {"intent": false, "confidence": 0.99}
+- "try a completely different approach" → {"intent": true, "confidence": 0.97}
+- "why is variable cost per unit here?" → {"intent": false, "confidence": 0.99}
+- "remove market share" → {"intent": false, "confidence": 0.99}
+- "use profitability framework" → {"intent": false, "confidence": 0.98}
+- "can you elaborate?" → {"intent": false, "confidence": 0.97}
 """
 
 ANSWER_CLASSIFIER_PROMPT = """
 You are a classifier for a case interview tool.
 
-Determine whether the following agent response contains a structured,
-framework-based answer to a business case. It must include at least one of:
-- A recommended framework (e.g. MECE tree, profitability tree, issue tree)
-- Key hypotheses laid out in a structured format
-- A structured sample answer with clear signposting
+Determine whether the agent response contains a structured framework answer
+with clear primary buckets and sub-buckets.
 
-Short follow-up replies, clarifying questions, or feedback messages do NOT qualify.
+Short replies, clarifications, questions, or discussion do NOT qualify.
 
-Respond ONLY with a valid JSON object, no explanation, no markdown:
+Respond ONLY with valid JSON, no explanation, no markdown:
 {"is_answer": true or false, "confidence": float between 0.0 and 1.0}
-
-Examples:
-- A response with "## Recommended Framework"
-  → {"is_answer": true, "confidence": 0.99}
-- "Great point! Let's dig deeper into costs."
-  → {"is_answer": false, "confidence": 0.99}
 """
 
-EXCLUDE_CLASSIFIER_PROMPT = """
-You are a classifier for a case interview tool.
+OVERRIDE_CLASSIFIER_PROMPT = """
+You are a classifier for a case interview research tool.
 
-Determine whether the user's message explicitly asks to remove, exclude, or
-not include a specific concept or element from the framework or analysis.
+Determine whether the user's message is attempting to steer or change the
+agent's output — i.e. the content, structure, or direction of the framework.
 
-If detected, extract the exact concept or topic name the user wants excluded.
+If yes, classify the type:
+- "redo"               : wants a fresh answer or complete regeneration ("redo", "try again", "start over", "different approach")
+- "concept_excluded"   : wants to remove a specific concept or bucket ("remove X", "exclude X", "don't include X")
+- "framework_switch"   : wants to use a specific named different framework ("use profitability framework", "switch to market sizing")
+- "none"               : not steering the output
 
-Respond ONLY with a valid JSON object, no explanation, no markdown:
-{"excluded": true or false, "concept": string or null, "confidence": float between 0.0 and 1.0}
+This does NOT include:
+- Asking for a framework for the first time ("give me a framework", "show me the framework")
+- Asking follow-up questions ("can you elaborate?", "why is X here?")
+- General questions about the case
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}
 
 Examples:
-- "don't include profit per unit" → {"excluded": true, "concept": "Profit per Unit", "confidence": 0.98}
-- "remove market share from the analysis" → {"excluded": true, "concept": "Market Share", "confidence": 0.97}
-- "exclude distribution challenges" → {"excluded": true, "concept": "Distribution Challenges", "confidence": 0.96}
-- "I don't think we need fixed costs here" → {"excluded": true, "concept": "Fixed Costs", "confidence": 0.88}
-- "can you elaborate on market size?" → {"excluded": false, "concept": null, "confidence": 0.98}
-- "use a different framework" → {"excluded": false, "concept": null, "confidence": 0.96}
-- "what is the market size?" → {"excluded": false, "concept": null, "confidence": 0.99}
+- "redo this" → {"override": true, "type": "redo", "detail": null, "confidence": 0.99}
+- "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "confidence": 0.97}
+- "remove profit per unit" → {"override": true, "type": "concept_excluded", "detail": "Profit per Unit", "confidence": 0.97}
+- "use profitability framework" → {"override": true, "type": "framework_switch", "detail": "profitability", "confidence": 0.96}
+- "give me a framework" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "show me the framework" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "why is variable cost here?" → {"override": false, "type": "none", "detail": null, "confidence": 0.95}
+- "can you elaborate?" → {"override": false, "type": "none", "detail": null, "confidence": 0.98}
 """
 
-# ── Thresholds ─────────────────────────────────────────────────────────────
-REDO_THRESHOLD    = 0.95
-ANSWER_THRESHOLD  = 0.90
-EXCLUDE_THRESHOLD = 0.85
+# ══════════════════════════════════════════════════════════════════════════
+# Thresholds
+# ══════════════════════════════════════════════════════════════════════════
+ANSWER_THRESHOLD   = 0.90
+OVERRIDE_THRESHOLD = 0.85
 
 
 class BlackBoxAgent:
@@ -151,17 +150,23 @@ class BlackBoxAgent:
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
         self._pending      = False
-        self.swap          = ConceptSwap(agent_type="black_box", session_id=self.session_id)
+
+        # ── Concept Swap experiment ────────────────────────────────────────
+        # Injects wrong concept via system prompt, detects when user notices.
+        # Completely independent of everything else.
+        self.concept_swap = ConceptSwap(
+            agent_type="black_box",
+            session_id=self.session_id
+        )
 
         # ── KG context ────────────────────────────────────────────────────
-        # Fetched once at init for the default case type.
-        # Re-fetched per message if user mentions a different framework.
+        # Updated immediately when user mentions a different framework.
+        # Model handles the discussion naturally via history.
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
         print(f"[KG INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
               f"concepts={self.kg_context['concepts']}")
 
-        # Keyword map for fast per-message framework detection (no LLM needed)
         self._kg_framework_keywords = {
             "Economic Feasibility":    ["economic feasibility", "market entry", "market potential"],
             "Expanded Profit Formula": ["profit formula", "profitability", "revenue", "cost tree"],
@@ -170,7 +175,6 @@ class BlackBoxAgent:
             "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
         }
 
-        # Pre-load case into history so agent knows it's already been presented
         self.history = [
             types.Content(
                 role="user",
@@ -190,15 +194,16 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _fetch_kg_context(self, case_type: str) -> dict:
-        """Fetch framework + ordered concepts from Neo4j for the given case type."""
         framework = kg.get_framework_for_case(case_type) or "Unknown Framework"
         concepts  = kg.get_ordered_concepts(framework) if framework else []
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
-    def _maybe_update_kg_context(self, user_input: str) -> None:
+    def _update_kg_if_framework_mentioned(self, user_input: str) -> None:
         """
         Keyword match user message against known framework names.
-        If a different framework is mentioned, re-fetch KG context.
+        If a different framework is mentioned, update KG context immediately.
+        Model handles the discussion naturally — no pending state needed.
+        If framework not in KG, concepts = [] so model uses own knowledge.
         """
         lowered = user_input.lower()
         for framework_name, keywords in self._kg_framework_keywords.items():
@@ -210,21 +215,14 @@ class BlackBoxAgent:
                         "framework": framework_name,
                         "concepts":  concepts,
                     }
-                    print(f"[KG UPDATE] switched to framework={framework_name}, "
-                          f"concepts={concepts}")
+                    print(f"[KG UPDATE] switched to '{framework_name}', "
+                          f"{'concepts from KG' if concepts else 'model fallback'}")
                 break
 
     def _build_system_prompt(self) -> str:
         """
-        Assemble system prompt fresh on every Gemini call:
-          1. KG context block — correct framework + ordered concepts
-          2. Swap exclusion block — only injected after swap is detected
-          3. Base SYSTEM_PROMPT
-
-        User concept exclusions (e.g. "don't include Profit per Unit") are NOT
-        injected here. The model handles them naturally via conversation history.
-        Only the swap concept needs an explicit exclusion instruction because it
-        was injected outside the model's awareness.
+        Assembles system prompt fresh on every call:
+          KG context + Concept Swap block + base SYSTEM_PROMPT
         """
         concepts_str = " → ".join(self.kg_context["concepts"]) \
                        if self.kg_context["concepts"] else "N/A"
@@ -234,15 +232,13 @@ class BlackBoxAgent:
             f"Case Type : {self.kg_context['case_type']}\n"
             f"Framework : {self.kg_context['framework']}\n"
             f"Concepts  : {concepts_str}\n"
-            f"(These are the CORRECT, ordered concepts for this case. "
-            f"Ground your answer in this structure.)\n"
+            f"(These are the correct ordered concepts. Ground your answer here.)\n"
             f"──────────────────────────────────────────────────────────────────────\n\n"
         )
 
-        # Swap block toggles automatically:
-        # before detection → injection instruction (include wrong concept)
-        # after detection  → exclusion instruction (never mention it again)
-        swap_block = self.swap.get_system_prompt_block()
+        # Concept Swap block: injection instruction before detection,
+        # exclusion instruction after detection
+        swap_block = self.concept_swap.get_system_prompt_block()
 
         return kg_block + swap_block + SYSTEM_PROMPT
 
@@ -265,102 +261,54 @@ class BlackBoxAgent:
 
     def stream_message(self, user_input: str):
         """
-        Generator that yields text chunks as Gemini streams them.
-
-        Per-message order:
-          1. check_detection   — did user catch the swap?
-                                 if yes: clean history immediately
-          2. _extract_excluded — did user ask to remove any concept?
-                                 if yes: log memory_override only
-          3. _is_redo          — does user want a fresh answer?
-          4. _maybe_update_kg  — did user mention a different framework?
-          5. stream → maybe_inject → append to history → log
+        Per-message flow:
+          1. Concept Swap detection (always)
+          2. Override detection → log memory_override with intent
+          3. KG context update if framework mentioned
+          4. Stream response
+          5. Post-stream: concept swap injection tracking + log
         """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # ── 1. Swap detection ──────────────────────────────────────────────
-        # History stays intact — model needs full context to understand
-        # the conversation arc around the swap concept.
-        # System prompt switches to exclusion instruction automatically
-        # on the next call via get_system_prompt_block().
-        just_detected = self.swap.check_detection(user_input)
-        if just_detected:
-            print(f"[SWAP] detected — exclusion instruction active from next response")
-
-        # ── 2. Concept exclusion — log only ────────────────────────────────
-        # User exclusions are handled naturally by the model via history.
-        # We only log here for the memory_override research metric.
-        excluded = self._extract_excluded_concept(user_input)
-        if excluded:
+        # ── 1. Concept Swap detection ──────────────────────────────────────
+        cs_detected = self.concept_swap.check_detection(user_input)
+        if cs_detected:
             log_memory_override(
                 self.session_id,
-                old_context=f"included: {excluded}",
-                new_context=f"excluded: {excluded}",
+                old_context=f"included: {self.concept_swap.config['wrong_concept']}",
+                new_context=f"user rejected: {self.concept_swap.config['wrong_concept']}",
             )
-            print(f"[EXCLUDE] logged user exclusion: '{excluded}'")
+            print(f"[CONCEPT SWAP] detected — exclusion active from next response")
 
-        # ── 3. Redo intent ─────────────────────────────────────────────────
-        if self._is_redo(user_input):
-            yield "Noted! Let me generate a fresh answer for your case...\n\n"
-            log_user_message(self.session_id, "[REDO TRIGGERED]")
-
-            redo_input = (
-                f"Please generate a completely fresh structured "
-                f"answer for this case:\n\n{self.original_case}"
+        # ── 2. Override detection → log for research ───────────────────────
+        override = self._detect_override(user_input)
+        if override:
+            log_memory_override(
+                self.session_id,
+                old_context=f"override_type: {override['type']}",
+                new_context=f"detail: {override['detail'] or 'n/a'}",
             )
-            self.history.append(
-                types.Content(role="user", parts=[types.Part(text=redo_input)])
-            )
-            self._pending = True
-            full_reply = []
-            try:
-                for chunk in client.models.generate_content_stream(
-                    model=MAIN_MODEL,
-                    contents=self.history,
-                    config=types.GenerateContentConfig(
-                        system_instruction=self._build_system_prompt(),
-                    ),
-                ):
-                    token = chunk.text or ""
-                    full_reply.append(token)
-                    yield token
+            print(f"[OVERRIDE] type={override['type']}, "
+                  f"detail={override['detail']}, "
+                  f"confidence={override['confidence']}")
 
-                reply = "".join(full_reply)
-
-                # Inject swap (skips if already detected).
-                # Yield the injected tail so the user sees it.
-                was_injected_before = self.swap.is_injected
-                injected_reply = self.swap.maybe_inject(reply)
-                if injected_reply != reply:
-                    tail = injected_reply[len(reply):]
-                    yield tail
-                reply = injected_reply
-
-                if self.swap.is_injected and not was_injected_before:
-                    self.swap.log_presented()
-
-                self.history.append(
-                    types.Content(role="model", parts=[types.Part(text=reply)])
+            # If redo — strip concept swap from history and regenerate
+            if override["type"] == "redo":
+                if self.concept_swap.is_detected:
+                    self.history = self._strip_concept_swap_from_history()
+                yield "Noted! Let me generate a fresh answer...\n\n"
+                user_input = (
+                    f"Please generate a completely fresh structured "
+                    f"answer for this case:\n\n{self.original_case}"
                 )
-                update_answer(self.session_id, reply)
-                log_memory_override(
-                    self.session_id,
-                    old_context="[redo triggered]",
-                    new_context=reply[:200],
-                )
-                log_agent_response(self.session_id, reply)
+                log_user_message(self.session_id, "[REDO TRIGGERED]")
 
-            except Exception as e:
-                yield f"Sorry, I encountered an error: {str(e)}"
-            finally:
-                self._pending = False
-            return
+        # ── 3. KG context update ───────────────────────────────────────────
+        # Update immediately — model handles discussion naturally via history.
+        self._update_kg_if_framework_mentioned(user_input)
 
-        # ── 4. KG context update ───────────────────────────────────────────
-        self._maybe_update_kg_context(user_input)
-
-        # ── 5. Normal message flow ─────────────────────────────────────────
+        # ── 4. Stream response ─────────────────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
@@ -382,17 +330,15 @@ class BlackBoxAgent:
 
             reply = "".join(full_reply)
 
-            # Inject swap into completed response (skips if already detected).
-            # If injection added content, yield it so the user sees it too.
-            was_injected_before = self.swap.is_injected
-            injected_reply = self.swap.maybe_inject(reply)
+            # ── 5. Concept Swap injection tracking + yield tail ────────────
+            was_injected   = self.concept_swap.is_injected
+            injected_reply = self.concept_swap.maybe_inject(reply)
             if injected_reply != reply:
-                tail = injected_reply[len(reply):]
-                yield tail
+                yield injected_reply[len(reply):]
             reply = injected_reply
 
-            if self.swap.is_injected and not was_injected_before:
-                self.swap.log_presented()
+            if self.concept_swap.is_injected and not was_injected:
+                self.concept_swap.log_presented()
 
             self.history.append(
                 types.Content(role="model", parts=[types.Part(text=reply)])
@@ -407,13 +353,26 @@ class BlackBoxAgent:
             self._pending = False
 
     # ══════════════════════════════════════════════════════════════════════
-    # Non-streaming fallback (used for summary)
+    # Non-streaming fallback (summary)
     # ══════════════════════════════════════════════════════════════════════
 
     def send_message(self, user_input: str) -> str:
+        """Non-streaming fallback used for summary."""
         log_user_message(self.session_id, user_input)
+
+        # For summary — build a focused prompt showing only the final state
+        summary_prompt = (
+            f"Based on our conversation, provide a summary in this exact format:\n\n"
+            f"**Final Framework: [Framework Name]**\n\n"
+            f"**The Framework:**\n"
+            f"- Use bolding for Primary Buckets\n"
+            f"- Use bullet points for specific Sub-buckets under each bucket\n\n"
+            f"Then in 2-3 sentences: note any concepts the user removed and any "
+            f"framework switches made during the session."
+        )
+
         self.history.append(
-            types.Content(role="user", parts=[types.Part(text=user_input)])
+            types.Content(role="user", parts=[types.Part(text=summary_prompt)])
         )
         try:
             response = client.models.generate_content(
@@ -437,13 +396,6 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def end_session(self) -> None:
-        """
-        Called when user clicks 'Get Summary & End Session'.
-        1. Walk history in reverse — find last structured framework response.
-        2. Run one final swap detection pass on it.
-        3. Stamp Firestore: final_framework, swap_detected, swap_detected_at_end.
-        4. Close the session.
-        """
         final_framework = ""
         fallback        = ""
 
@@ -460,22 +412,22 @@ class BlackBoxAgent:
 
         if not final_framework:
             final_framework = fallback
-            print("[END SESSION] no structured framework found — using last model message")
+            print("[END SESSION] no structured framework — using last model message")
 
-        if not self.swap.is_detected:
-            detected_at_end = self.swap.check_detection(final_framework)
-            print(f"[END SESSION] final swap check: detected={detected_at_end}")
+        if not self.concept_swap.is_detected:
+            detected_at_end = self.concept_swap.check_detection(final_framework)
+            print(f"[END SESSION] final concept swap check: detected={detected_at_end}")
         else:
             detected_at_end = True
-            print("[END SESSION] swap already detected during chat")
+            print("[END SESSION] concept swap already detected during chat")
 
         try:
             from firebase_admin import firestore as fs
             db = fs.client()
             db.collection("sessions").document(self.session_id).update({
-                "final_framework":      final_framework[:1000],
-                "swap_detected":        self.swap.is_detected,
-                "swap_detected_at_end": detected_at_end,
+                "final_framework":       final_framework[:1000],
+                "concept_swap_detected": self.concept_swap.is_detected,
+                "swap_detected_at_end":  detected_at_end,
             })
             print(f"[END SESSION] Firestore stamped for session={self.session_id}")
         except Exception as e:
@@ -488,7 +440,6 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _is_answer(self, text: str) -> bool:
-        """Is the agent reply a structured framework answer?"""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -496,8 +447,8 @@ class BlackBoxAgent:
             )
             parsed = json.loads(self._strip_fences(response.text))
             result = (
-                parsed.get("is_answer", False)
-                and parsed.get("confidence", 0.0) >= ANSWER_THRESHOLD
+                parsed.get("is_answer", False) and
+                parsed.get("confidence", 0.0) >= ANSWER_THRESHOLD
             )
             print(f"[ANSWER] is_answer={parsed.get('is_answer')}, "
                   f"confidence={parsed.get('confidence')}, stored={result}")
@@ -506,83 +457,57 @@ class BlackBoxAgent:
             print(f"[ANSWER] error: {e}")
             return False
 
-    def _is_redo(self, text: str) -> bool:
-        """Did the user ask to regenerate or try a different approach?"""
-        try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{REDO_CLASSIFIER_PROMPT}\n\nUser message: \"{text}\"",
-            )
-            parsed = json.loads(self._strip_fences(response.text))
-            result = (
-                parsed.get("intent", False)
-                and parsed.get("confidence", 0.0) >= REDO_THRESHOLD
-            )
-            print(f"[REDO] intent={parsed.get('intent')}, "
-                  f"confidence={parsed.get('confidence')}, triggered={result}")
-            return result
-        except Exception as e:
-            print(f"[REDO] error: {e}")
-            return False
-
-    def _extract_excluded_concept(self, user_input: str) -> str | None:
+    def _detect_override(self, user_input: str) -> dict | None:
         """
-        Did the user ask to remove a specific concept?
-        Returns concept name for logging only.
-        The model handles the actual exclusion via conversation history.
+        Single classifier for all override types.
+        Returns dict with type + detail if override detected, else None.
+        Used only for research logging — model handles the conversation.
         """
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
-                contents=f"{EXCLUDE_CLASSIFIER_PROMPT}\n\nUser message: \"{user_input}\"",
+                contents=f"{OVERRIDE_CLASSIFIER_PROMPT}\n\nUser message: \"{user_input}\"",
             )
             parsed = json.loads(self._strip_fences(response.text))
-            if (parsed.get("excluded", False)
-                    and parsed.get("confidence", 0.0) >= EXCLUDE_THRESHOLD
-                    and parsed.get("concept")):
-                concept = parsed["concept"]
-                print(f"[EXCLUDE] concept='{concept}', "
-                      f"confidence={parsed.get('confidence')}")
-                return concept
+            if (parsed.get("override", False) and
+                    parsed.get("confidence", 0.0) >= OVERRIDE_THRESHOLD and
+                    parsed.get("type", "none") != "none"):
+                return {
+                    "type":       parsed["type"],
+                    "detail":     parsed.get("detail"),
+                    "confidence": parsed["confidence"],
+                }
         except Exception as e:
-            print(f"[EXCLUDE] error: {e}")
+            print(f"[OVERRIDE] error: {e}")
         return None
 
     # ══════════════════════════════════════════════════════════════════════
     # History helpers
     # ══════════════════════════════════════════════════════════════════════
 
-    def _strip_swap_from_history(self) -> list:
+    def _strip_concept_swap_from_history(self) -> list:
         """
-        Remove all traces of the concept swap from in-memory history.
-        Called immediately when swap is detected.
-        Firestore retains the full unmodified record.
-
-        Removes from each model message:
-          1. The injection note tail (from '---\\n💡' onward)
-          2. Any list line containing the wrong concept name
+        Remove Concept Swap traces from history on redo after detection.
+        Removes injection note tail and wrong concept lines from model messages.
         """
         note_marker = "---\n💡"
-        wrong       = self.swap.config["wrong_concept"].lower()
+        wrong       = self.concept_swap.config["wrong_concept"].lower()
         cleaned     = []
 
         for msg in self.history:
             if msg.role == "model" and msg.parts:
                 text = msg.parts[0].text
-
                 if note_marker in text:
                     text = text[:text.index(note_marker)].rstrip()
-
                 lines = [l for l in text.split("\n") if wrong not in l.lower()]
                 text  = "\n".join(lines)
-
-                msg = types.Content(
+                msg   = types.Content(
                     role="model",
                     parts=[types.Part(text=text)]
                 )
             cleaned.append(msg)
 
-        print(f"[STRIP] swap removed from history ({len(cleaned)} messages)")
+        print(f"[STRIP] concept swap removed from history ({len(cleaned)} messages)")
         return cleaned
 
     def _summarize_history(self) -> str:
@@ -599,7 +524,6 @@ class BlackBoxAgent:
 
     @staticmethod
     def _strip_fences(text: str) -> str:
-        """Strip markdown code fences from Gemini classifier responses."""
         text = text.strip()
         if text.startswith("```"):
             text = text.split("```")[1]
