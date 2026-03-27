@@ -112,8 +112,84 @@ Strategy team are interested in knowing whether it would be profitable to mine \
 these new resources and some of the potential risks associated with moving \
 forward.""",
 
-        # TODO: add clarification facts for explainable case
-        "clarification_facts": {},
+        "clarification_facts": {
+            "objective": (
+                "The client's primary objective is to increase profits while diversifying "
+                "their portfolio. They are also interested in sustainable mining practices "
+                "to minimize environmental impact and maintain their social license to operate."
+            ),
+            "market_demand": (
+                "The global market for Silica Sand is approximately 350 million metric tons "
+                "per year, growing at 5.5% annually. Bentonite demand is smaller at around "
+                "20 million metric tons per year, growing at a similar rate. Key end uses "
+                "include construction, glass manufacturing, and drilling fluids."
+            ),
+            "pricing": (
+                "The current selling price for Silica Sand is around $70 per ton and $90 per "
+                "ton for Bentonite. Prices are expected to increase at 3% annually due to "
+                "growing demand and limited supply. Historically, prices have been relatively "
+                "stable with minor fluctuations."
+            ),
+            "costs": (
+                "The cost per ton for Silica Sand is approximately $50, including equipment, "
+                "labor, and transportation. Bentonite is slightly higher at $60 per ton due "
+                "to its more complex extraction process. Transportation to end markets adds "
+                "approximately $20 per ton for Silica Sand and $25 per ton for Bentonite."
+            ),
+            "deposits": (
+                "The Silica Sand deposit is estimated at 50 million metric tons with a lifespan "
+                "of approximately 10 years at current demand. The Bentonite deposit is around "
+                "10 million metric tons with a lifespan of approximately 30 years. Both deposits "
+                "are relatively accessible — close to the surface with moderate terrain complexity. "
+                "Quality and purity are comparable to market standards."
+            ),
+            "competition": (
+                "The Silica Sand market is fragmented, with multiple suppliers worldwide. "
+                "The Bentonite market is more concentrated, with a few key players dominating. "
+                "Specific competitor names are not information I have available for this case."
+            ),
+            "infrastructure": (
+                "The company already has existing transport routes that can be utilized. "
+                "Transportation costs to end markets are approximately $20-25 per ton. "
+                "Distance to key customers or ports is not information I have available."
+            ),
+            "operations": (
+                "The company has some capacity to mine these resources with current equipment "
+                "and labor, but would need to invest in additional equipment and training to "
+                "fully exploit the deposits. The estimated investment required is around "
+                "$10 million. The fly-in remote setup increases labor costs due to transportation "
+                "and accommodation needs, and may create challenges in recruiting and retaining "
+                "skilled workers."
+            ),
+            "regulatory": (
+                "Regulatory requirements are stringent, with strict environmental and safety "
+                "standards. Potential environmental impacts include water pollution and habitat "
+                "destruction, which could lead to fines and sanctions if not properly managed. "
+                "Specific permits, approvals, and reclamation obligations apply but detailed "
+                "specifics are not available for this case."
+            ),
+            "risks": (
+                "Key risks include commodity price swings — if demand weakens, oversupply could "
+                "reduce selling prices and compress margins. Execution risks include the $10 million "
+                "capex requirement, remote location labor challenges, and environmental compliance. "
+                "The client is also exposed to cost overruns given the complex extraction process "
+                "for Bentonite."
+            ),
+            "timeline": (
+                "The client is looking to make a decision within the next 3 months and aims to "
+                "start production within 6 months if the project is deemed feasible."
+            ),
+            "sustainability": (
+                "The client is interested in sustainable mining practices to minimize environmental "
+                "impact and maintain their social license to operate. Community and indigenous "
+                "stakeholder considerations are part of their overall objective."
+            ),
+            "scope": (
+                "The client is interested in knowing whether it would be profitable to mine both "
+                "Silica Sand and Bentonite. They are open to mining both minerals but also want "
+                "to understand the potential risks of moving forward."
+            ),
+        },
     },
 
     "hitl": {
