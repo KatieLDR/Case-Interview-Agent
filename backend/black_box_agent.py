@@ -9,7 +9,7 @@ from backend.logger import (
     log_interruption, log_memory_override,
     update_answer,
 )
-from backend.cases import get_case
+from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
 from backend import knowledge_graph as kg
 
@@ -26,8 +26,33 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 CASE_TYPE = "Market Entry"
 
 # ══════════════════════════════════════════════════════════════════════════
-# System Prompt
+# System Prompts
 # ══════════════════════════════════════════════════════════════════════════
+
+# ── Clarification phase system prompt ─────────────────────────────────────
+# Used only during self.phase == "clarification".
+# Agent answers strictly from the facts sheet, infers when related,
+# deflects politely when out of scope.
+CLARIFICATION_SYSTEM_PROMPT = """
+You are a BCG case interviewer conducting the clarification round before the
+candidate begins their structured analysis.
+
+You have a fixed information sheet for this case. Your job is to answer the
+candidate's questions based strictly on that sheet.
+
+─── RULES ─────────────────────────────────────────────────────────────────
+- Answer ONLY from the facts provided in the CASE INFORMATION SHEET below
+- If the question is closely related to a fact on the sheet, infer naturally
+  from it — but do not introduce new information that is not on the sheet
+- If the question is outside the scope of the sheet, respond with:
+  "I'm afraid I don't have that information for this case."
+- Keep answers concise and professional — one to three sentences per answer
+- Never reveal the framework or hint at the structure the candidate should use
+- Never evaluate or coach the candidate during this phase
+- Do not ask questions back to the candidate
+"""
+
+# ── Main phase system prompt ───────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are a strategic consultant specializing in structured frameworks. Your goal
 is to provide a concise, high-level logical breakdown of business problems.
@@ -72,27 +97,6 @@ If the user questions the framework or asks to change it:
 # ══════════════════════════════════════════════════════════════════════════
 # Classifier prompts
 # ══════════════════════════════════════════════════════════════════════════
-
-REDO_CLASSIFIER_PROMPT = """
-You are an intent classifier for a case interview tool.
-
-Determine whether the user wants to REGENERATE or START FRESH with the answer —
-i.e. explicitly asking for a new attempt, different approach, or redo.
-
-This does NOT include: questioning a specific concept, asking why something
-is included, removing a concept, or switching frameworks.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{"intent": true or false, "confidence": float between 0.0 and 1.0}
-
-Examples:
-- "can we redo this?" → {"intent": true, "confidence": 0.99}
-- "try a completely different approach" → {"intent": true, "confidence": 0.97}
-- "why is variable cost per unit here?" → {"intent": false, "confidence": 0.99}
-- "remove market share" → {"intent": false, "confidence": 0.99}
-- "use profitability framework" → {"intent": false, "confidence": 0.98}
-- "can you elaborate?" → {"intent": false, "confidence": 0.97}
-"""
 
 ANSWER_CLASSIFIER_PROMPT = """
 You are a classifier for a case interview tool.
@@ -151,17 +155,20 @@ class BlackBoxAgent:
         self.original_case = get_case("black_box")
         self._pending      = False
 
+        # ── Clarification phase ────────────────────────────────────────────
+        # Phase starts as "clarification" and switches to "main" when the
+        # user clicks "I'm Ready". Facts sheet is loaded from cases.py.
+        self.phase               = "clarification"
+        self.clarification_facts = get_clarification_facts("black_box")
+
         # ── Concept Swap experiment ────────────────────────────────────────
-        # Injects wrong concept via system prompt, detects when user notices.
-        # Completely independent of everything else.
+        # Active only during main phase. Injected via system prompt.
         self.concept_swap = ConceptSwap(
             agent_type="black_box",
             session_id=self.session_id
         )
 
         # ── KG context ────────────────────────────────────────────────────
-        # Updated immediately when user mentions a different framework.
-        # Model handles the discussion naturally via history.
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
         print(f"[KG INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
@@ -175,6 +182,8 @@ class BlackBoxAgent:
             "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
         }
 
+        # ── Conversation history ───────────────────────────────────────────
+        # Pre-load case so agent knows it's been presented.
         self.history = [
             types.Content(
                 role="user",
@@ -183,8 +192,8 @@ class BlackBoxAgent:
             types.Content(
                 role="model",
                 parts=[types.Part(text=(
-                    "I have received the case and am ready "
-                    "to provide a structured reference answer."
+                    "I have received the case. We are now in the clarification round. "
+                    "Please feel free to ask any questions about the case before you begin."
                 ))]
             ),
         ]
@@ -199,12 +208,7 @@ class BlackBoxAgent:
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
     def _update_kg_if_framework_mentioned(self, user_input: str) -> None:
-        """
-        Keyword match user message against known framework names.
-        If a different framework is mentioned, update KG context immediately.
-        Model handles the discussion naturally — no pending state needed.
-        If framework not in KG, concepts = [] so model uses own knowledge.
-        """
+        """Keyword match — update KG context if user mentions a different framework."""
         lowered = user_input.lower()
         for framework_name, keywords in self._kg_framework_keywords.items():
             if any(kw in lowered for kw in keywords):
@@ -219,9 +223,35 @@ class BlackBoxAgent:
                           f"{'concepts from KG' if concepts else 'model fallback'}")
                 break
 
+    def _build_clarification_system_prompt(self) -> str:
+        """
+        Builds the system prompt for the clarification phase.
+        Injects the facts sheet so the agent answers strictly from it.
+        """
+        if self.clarification_facts:
+            facts_lines = "\n".join(
+                f"- {topic.upper()}: {answer}"
+                for topic, answer in self.clarification_facts.items()
+            )
+            facts_block = (
+                f"─── CASE INFORMATION SHEET ───────────────────────────────────────────\n"
+                f"{facts_lines}\n"
+                f"──────────────────────────────────────────────────────────────────────\n\n"
+            )
+        else:
+            facts_block = (
+                f"─── CASE INFORMATION SHEET ───────────────────────────────────────────\n"
+                f"No additional facts are available for this case.\n"
+                f"Deflect all clarification questions with: "
+                f"\"I'm afraid I don't have that information for this case.\"\n"
+                f"──────────────────────────────────────────────────────────────────────\n\n"
+            )
+
+        return facts_block + CLARIFICATION_SYSTEM_PROMPT
+
     def _build_system_prompt(self) -> str:
         """
-        Assembles system prompt fresh on every call:
+        Builds the main phase system prompt:
           KG context + Concept Swap block + base SYSTEM_PROMPT
         """
         concepts_str = " → ".join(self.kg_context["concepts"]) \
@@ -236,8 +266,6 @@ class BlackBoxAgent:
             f"──────────────────────────────────────────────────────────────────────\n\n"
         )
 
-        # Concept Swap block: injection instruction before detection,
-        # exclusion instruction after detection
         swap_block = self.concept_swap.get_system_prompt_block()
 
         return kg_block + swap_block + SYSTEM_PROMPT
@@ -251,8 +279,52 @@ class BlackBoxAgent:
             f"📋 **Here is your case:**\n\n"
             f"{self.original_case}\n\n"
             f"---\n"
-            f"Take your time to read it. "
-            f"Feel free to ask questions or request a structured answer!"
+            f"Take your time to read it. Feel free to ask any clarifying questions "
+            f"before you begin your analysis.\n\n"
+            f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase transition — called by app.py when user clicks "I'm Ready"
+    # ══════════════════════════════════════════════════════════════════════
+
+    def start_main_phase(self) -> str:
+        """
+        Transitions agent from clarification → main phase.
+        Injects a system marker into history so the model knows the phase changed.
+        Returns a confirmation message for Chainlit to display.
+        """
+        if self.phase == "main":
+            return "⚠️ The session is already in progress."
+
+        self.phase = "main"
+
+        # Inject explicit handover marker into history
+        self.history.append(
+            types.Content(
+                role="user",
+                parts=[types.Part(text=(
+                    "[SYSTEM: The clarification round has ended. "
+                    "The candidate is now ready to begin their structured analysis. "
+                    "Switch to reference consultant mode and wait for the candidate "
+                    "to present their framework or ask for one.]"
+                ))]
+            )
+        )
+        self.history.append(
+            types.Content(
+                role="model",
+                parts=[types.Part(text=(
+                    "Understood. The clarification round is now closed. "
+                    "I'm ready for your structured analysis."
+                ))]
+            )
+        )
+
+        print(f"[PHASE] clarification → main for session={self.session_id}")
+        return (
+            "✅ **Clarification round closed.**\n\n"
+            "You can now present your structured framework or ask for a reference answer!"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -261,16 +333,75 @@ class BlackBoxAgent:
 
     def stream_message(self, user_input: str):
         """
-        Per-message flow:
-          1. Concept Swap detection (always)
-          2. Override detection → log memory_override with intent
-          3. KG context update if framework mentioned
-          4. Stream response
-          5. Post-stream: concept swap injection tracking + log
+        Routes to clarification or main flow based on self.phase.
+
+        Clarification phase:
+          - Answers strictly from facts sheet
+          - No concept swap, no override detection, no KG update
+          - Uses CLARIFICATION_SYSTEM_PROMPT
+
+        Main phase:
+          - Full flow: concept swap + override detection + KG + streaming
+          - Uses _build_system_prompt()
         """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
+        # ── Route by phase ─────────────────────────────────────────────────
+        if self.phase == "clarification":
+            yield from self._stream_clarification(user_input)
+        else:
+            yield from self._stream_main(user_input)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Clarification phase streaming
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_clarification(self, user_input: str):
+        """Answer from facts sheet only. No swap, no override, no KG."""
+        log_user_message(self.session_id, f"[CLARIFICATION] {user_input}")
+        self.history.append(
+            types.Content(role="user", parts=[types.Part(text=user_input)])
+        )
+
+        self._pending = True
+        full_reply = []
+        try:
+            for chunk in client.models.generate_content_stream(
+                model=MAIN_MODEL,
+                contents=self.history,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._build_clarification_system_prompt(),
+                ),
+            ):
+                token = chunk.text or ""
+                full_reply.append(token)
+                yield token
+
+            reply = "".join(full_reply)
+            self.history.append(
+                types.Content(role="model", parts=[types.Part(text=reply)])
+            )
+            log_agent_response(self.session_id, f"[CLARIFICATION] {reply}")
+
+        except Exception as e:
+            yield f"Sorry, I encountered an error: {str(e)}"
+        finally:
+            self._pending = False
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Main phase streaming
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_main(self, user_input: str):
+        """
+        Full main phase flow:
+          1. Concept Swap detection
+          2. Override detection → log for research
+          3. KG context update
+          4. Stream response
+          5. Post-stream: concept swap injection tracking
+        """
         # ── 1. Concept Swap detection ──────────────────────────────────────
         cs_detected = self.concept_swap.check_detection(user_input)
         if cs_detected:
@@ -293,7 +424,6 @@ class BlackBoxAgent:
                   f"detail={override['detail']}, "
                   f"confidence={override['confidence']}")
 
-            # If redo — strip concept swap from history and regenerate
             if override["type"] == "redo":
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
@@ -305,7 +435,6 @@ class BlackBoxAgent:
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
 
         # ── 3. KG context update ───────────────────────────────────────────
-        # Update immediately — model handles discussion naturally via history.
         self._update_kg_if_framework_mentioned(user_input)
 
         # ── 4. Stream response ─────────────────────────────────────────────
@@ -330,7 +459,7 @@ class BlackBoxAgent:
 
             reply = "".join(full_reply)
 
-            # ── 5. Concept Swap injection tracking + yield tail ────────────
+            # ── 5. Concept Swap injection tracking ─────────────────────────
             was_injected   = self.concept_swap.is_injected
             injected_reply = self.concept_swap.maybe_inject(reply)
             if injected_reply != reply:
@@ -360,7 +489,6 @@ class BlackBoxAgent:
         """Non-streaming fallback used for summary."""
         log_user_message(self.session_id, user_input)
 
-        # For summary — build a focused prompt showing only the final state
         summary_prompt = (
             f"Based on our conversation, provide a summary in this exact format:\n\n"
             f"**Final Framework: [Framework Name]**\n\n"
@@ -458,11 +586,7 @@ class BlackBoxAgent:
             return False
 
     def _detect_override(self, user_input: str) -> dict | None:
-        """
-        Single classifier for all override types.
-        Returns dict with type + detail if override detected, else None.
-        Used only for research logging — model handles the conversation.
-        """
+        """Single classifier for all override types. Used for research logging only."""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -486,10 +610,7 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _strip_concept_swap_from_history(self) -> list:
-        """
-        Remove Concept Swap traces from history on redo after detection.
-        Removes injection note tail and wrong concept lines from model messages.
-        """
+        """Remove Concept Swap traces from history on redo after detection."""
         note_marker = "---\n💡"
         wrong       = self.concept_swap.config["wrong_concept"].lower()
         cleaned     = []

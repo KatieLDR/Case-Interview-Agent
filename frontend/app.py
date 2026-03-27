@@ -12,7 +12,6 @@ async def on_chat_start():
     cl.user_session.set("agent_type", None)
     cl.user_session.set("ended", False)
 
-    # Ask user to pick an agent — no hints about what each one does
     await cl.Message(
         content=(
             f"👋 Welcome to the **Case Interview Assistant**!\n\n"
@@ -48,7 +47,6 @@ async def on_select_agent_2(action: cl.Action):
 
 # ── Shared agent initialisation ────────────────────────────────────────────
 async def _init_agent(agent_type: str):
-    # Block re-selection if agent already chosen
     if cl.user_session.get("agent") is not None:
         await cl.Message(
             content="⚠️ You have already selected an agent for this session."
@@ -77,8 +75,40 @@ async def _init_agent(agent_type: str):
     cl.user_session.set("agent", agent)
     cl.user_session.set("agent_type", agent_type)
 
+    await cl.Message(content=intro).send()
+
+    # Present case + clarification prompt
     await cl.Message(
-        content=intro,
+        content=agent.get_opening_message(),
+        actions=[
+            cl.Action(
+                name="start_main_phase",
+                label="✅ I'm Ready — Let's Start",
+                description="End clarification and begin your structured analysis",
+                payload={}
+            ),
+        ]
+    ).send()
+
+
+# ── "I'm Ready" button — transitions clarification → main ─────────────────
+@cl.action_callback("start_main_phase")
+async def on_start_main_phase(action: cl.Action):
+    agent  = cl.user_session.get("agent")
+    ended  = cl.user_session.get("ended", False)
+
+    if agent is None:
+        await cl.Message(content="⚠️ No agent selected yet.").send()
+        return
+
+    if ended:
+        await cl.Message(content="⚠️ This session has already ended.").send()
+        return
+
+    confirmation = agent.start_main_phase()
+
+    await cl.Message(
+        content=confirmation,
         actions=[
             cl.Action(
                 name="get_summary",
@@ -88,9 +118,6 @@ async def _init_agent(agent_type: str):
             ),
         ]
     ).send()
-
-    # Auto-present the case
-    await cl.Message(content=agent.get_opening_message()).send()
 
 
 # ── Stop button handler ────────────────────────────────────────────────────
@@ -105,10 +132,9 @@ async def on_stop():
 # ── Incoming messages ──────────────────────────────────────────────────────
 @cl.on_message
 async def on_message(message: cl.Message):
-    agent    = cl.user_session.get("agent")
-    ended    = cl.user_session.get("ended", False)
+    agent  = cl.user_session.get("agent")
+    ended  = cl.user_session.get("ended", False)
 
-    # Guard: agent not yet selected
     if agent is None:
         await cl.Message(
             content="⚠️ Please select an agent first by clicking **Agent 1** or **Agent 2** above."
@@ -132,19 +158,34 @@ async def on_message(message: cl.Message):
         await msg.stream_token(token)
     await msg.update()
 
-    # Only resend button if session is still active
+    # Reattach buttons based on current phase
     if not cl.user_session.get("ended", False):
-        await cl.Message(
-            content="",
-            actions=[
-                cl.Action(
-                    name="get_summary",
-                    label="📊 Get Summary & End Session",
-                    description="Get your session summary and end the session",
-                    payload={}
-                ),
-            ]
-        ).send()
+        if hasattr(agent, "phase") and agent.phase == "clarification":
+            # Still in clarification — keep "I'm Ready" button visible
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(
+                        name="start_main_phase",
+                        label="✅ I'm Ready — Let's Start",
+                        description="End clarification and begin your structured analysis",
+                        payload={}
+                    ),
+                ]
+            ).send()
+        else:
+            # Main phase — show summary button
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(
+                        name="get_summary",
+                        label="📊 Get Summary & End Session",
+                        description="Get your session summary and end the session",
+                        payload={}
+                    ),
+                ]
+            ).send()
 
 
 # ── Get summary button ─────────────────────────────────────────────────────
@@ -188,7 +229,6 @@ async def _send_summary():
     async with cl.Step(name="Generating your summary..."):
         summary = agent.send_message(prompt)
 
-    # Mark session as ended and stamp Firestore
     cl.user_session.set("ended", True)
     agent.end_session()
 
