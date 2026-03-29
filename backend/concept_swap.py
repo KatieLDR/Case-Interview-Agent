@@ -30,8 +30,8 @@ SWAP_CONFIG = {
         "wrong_framework": "Corporate Finance",   # outside KG — handle in scoring
     },
     "explainable": {
-        "case_type":       "Pricing",
-        "framework":       "Four-Pronged Strategy",
+        "case_type":       "Profitability",
+        "framework":       "Expanded Profit Formula",
         "wrong_concept":   "Price-Elasticity Pricing",
         "wrong_framework": "Four-Pronged Strategy",
     },

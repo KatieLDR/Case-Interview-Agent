@@ -2,6 +2,7 @@ import uuid
 import chainlit as cl
 from backend.black_box_agent import BlackBoxAgent
 from backend.coach_agent import CoachAgent
+from backend.explainable_agent import ExplainableAgent
 
 # ── Session startup ────────────────────────────────────────────────────────
 @cl.on_chat_start
@@ -30,6 +31,12 @@ async def on_chat_start():
                 description="Select Agent 2",
                 payload={}
             ),
+            # cl.Action(
+            #     name="select_agent_3",
+            #     label="🤖 Agent 3",
+            #     description="Select Agent 3",
+            #     payload={}
+            # )
         ]
     ).send()
 
@@ -39,10 +46,12 @@ async def on_chat_start():
 async def on_select_agent_1(action: cl.Action):
     await _init_agent("black_box")
 
-
 @cl.action_callback("select_agent_2")
-async def on_select_agent_2(action: cl.Action):
-    await _init_agent("coach")
+async def on_select_agent_1(action: cl.Action):
+    await _init_agent("explainable")
+# @cl.action_callback("select_agent_2")
+# async def on_select_agent_2(action: cl.Action):
+#     await _init_agent("coach")
 
 
 # ── Shared agent initialisation ────────────────────────────────────────────
@@ -63,14 +72,22 @@ async def _init_agent(agent_type: str):
             f"📝 Note this ID for future reference or support.\n\n"
             f"---\n"
         )
-    else:
-        agent = CoachAgent(user_id=user_id)
+    elif agent_type == "explainable":
+        agent = ExplainableAgent(user_id=user_id)
         intro = (
             f"✅ **Agent 2 selected!**\n\n"
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"
             f"📝 Note this ID for future reference or support.\n\n"
             f"---\n"
         )
+    # else:
+    #     agent = CoachAgent(user_id=user_id)
+    #     intro = (
+    #         f"✅ **Agent 2 selected!**\n\n"
+    #         f"🪪 **Your Session ID:** `{agent.session_id}`\n"
+    #         f"📝 Note this ID for future reference or support.\n\n"
+    #         f"---\n"
+    #     )
 
     cl.user_session.set("agent", agent)
     cl.user_session.set("agent_type", agent_type)
