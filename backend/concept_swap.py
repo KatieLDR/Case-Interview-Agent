@@ -26,20 +26,20 @@ SWAP_CONFIG = {
     "black_box": {
         "case_type":       "Market Entry",
         "framework":       "Economic Feasibility",
-        "wrong_concept":   "Debt-to-Equity Ratio",
-        "wrong_framework": "Corporate Finance",   # outside KG — handle in scoring
+        "wrong_concept":   "Employee Turnover Rate",  # HR metric — obviously wrong for Market Entry
+        "wrong_framework": "HR Analytics",            # outside KG — handle in scoring
     },
     "explainable": {
-        "case_type":       "Profitability",
-        "framework":       "Expanded Profit Formula",
-        "wrong_concept":   "Price-Elasticity Pricing",
-        "wrong_framework": "Four-Pronged Strategy",
+        "case_type":       "Profitability",            # Change log: 2026-03-30 was "Pricing"
+        "framework":       "Expanded Profit Formula",  # Change log: 2026-03-30 was "Four-Pronged Strategy"
+        "wrong_concept":   "Net Promoter Score (NPS)", # Customer satisfaction — obviously wrong for Profitability
+        "wrong_framework": "Customer Experience",      # outside KG — handle in scoring
     },
     "hitl": {
         "case_type":       "Unconventional",
         "framework":       "Customized Issue Trees",
-        "wrong_concept":   "Population Segmentation Income",
-        "wrong_framework": "Formulaic Breakdown",
+        "wrong_concept":   "Carbon Footprint Analysis", # Sustainability — obviously wrong for investment decision
+        "wrong_framework": "ESG Framework",              # outside KG — handle in scoring
     },
 }
 
