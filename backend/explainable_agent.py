@@ -72,7 +72,7 @@ CONCEPT_QA_PROMPT = """
 You are a strategic consultant who just introduced one concept from a framework.
 The user has a question about it.
 
-Answer in 2–3 sentences. Stay grounded in the Mining Co. case context.
+Answer in 2–3 sentences. Stay grounded in the current case context.
 Plain language only — no jargon, no technical terms.
 
 After answering, use the closing specified in CLOSING INSTRUCTION below.
@@ -611,42 +611,41 @@ class ExplainableAgent(BlackBoxAgent):
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
 
-            elif override["type"] == "framework_switch" and override.get("detail"):
-                # Resolve user's mention to KG framework(s) via LLM + live KG query.
-                # Change log: 2026-03-30 — replaced keyword map with _resolve_framework()
-                matches = self._resolve_framework(override["detail"])
-
-                if len(matches) == 1:
-                    # Unambiguous — switch silently, tell user
-                    new_framework = matches[0]
-                    new_context   = self._fetch_kg_context_by_framework(new_framework)
-                    if new_context:
-                        from_fw = self.kg_context["framework"]
-                        self.kg_context = new_context
-                        if self.walkthrough_active:
-                            self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
-                            logging.info(f"[FRAMEWORK SWITCH] mid-walkthrough → {new_framework}")
-                        else:
-                            # Pre-walkthrough: log the switch even though rebuild not needed
-                            log_framework_switched(
-                                session_id     = self.session_id,
-                                from_framework = from_fw,
-                                to_framework   = new_framework,
-                                switch_index   = 0,
-                            )
-                            logging.info(f"[FRAMEWORK SWITCH] pre-walkthrough → {new_framework}")
-                    # Response will naturally confirm the switch via _stream_concept
-
-                elif len(matches) >= 2:
-                    # Ambiguous — ask user to pick; pause walkthrough routing
-                    override = {"type": "framework_clarification", "matches": matches,
-                                "detail": override["detail"]}
-                    logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
-
+            elif override["type"] == "framework_switch":
+                if not override.get("detail"):
+                    # No framework named — ask what they have in mind first
+                    override = {"type": "framework_unspecified"}
+                    logging.info("[FRAMEWORK SWITCH] no framework specified — asking user")
                 else:
-                    # No match — tell user what's available; pause routing
-                    override = {"type": "framework_not_found", "detail": override["detail"]}
-                    logging.info(f"[FRAMEWORK SWITCH] no match for '{override['detail']}'")
+                    # Resolve user mention to KG framework(s)
+                    matches = self._resolve_framework(override["detail"])
+                    if len(matches) == 1:
+                        # Unambiguous — switch silently
+                        new_framework = matches[0]
+                        new_context   = self._fetch_kg_context_by_framework(new_framework)
+                        if new_context:
+                            from_fw = self.kg_context["framework"]
+                            self.kg_context = new_context
+                            if self.walkthrough_active:
+                                self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
+                                logging.info(f"[FRAMEWORK SWITCH] mid-walkthrough → {new_framework}")
+                            else:
+                                log_framework_switched(
+                                    session_id     = self.session_id,
+                                    from_framework = from_fw,
+                                    to_framework   = new_framework,
+                                    switch_index   = 0,
+                                )
+                                logging.info(f"[FRAMEWORK SWITCH] pre-walkthrough → {new_framework}")
+                    elif len(matches) >= 2:
+                        # Ambiguous — ask user to pick
+                        override = {"type": "framework_clarification", "matches": matches,
+                                    "detail": override["detail"]}
+                        logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
+                    else:
+                        # No match — list available
+                        override = {"type": "framework_not_found", "detail": override["detail"]}
+                        logging.info(f"[FRAMEWORK SWITCH] no match for '{override['detail']}'")
 
             elif override["type"] == "concept_excluded" and override.get("detail"):
                 excl = override["detail"]
@@ -696,14 +695,32 @@ class ExplainableAgent(BlackBoxAgent):
             )
 
         elif override and override["type"] == "framework_not_found":
-            # No match — tell user what's available
+            # Unrecognised framework — strictly redirect to KG options for research validity.
+            # Change log: 2026-03-30 — removed "work with it together" option.
+            # Research rationale: unknown frameworks break alignment accuracy scoring.
+            # Revisit after pilot study.
+            available = self._format_framework_list()
+            detail    = override.get("detail") or "that framework"
+            yield from self._stream_with_instruction(
+                instruction=(
+                    f"The user mentioned '{detail}' as a framework. "
+                    f"Respond in 2 short sentences: "
+                    f"(1) Say you don't recognise '{detail}' in your knowledge base "
+                    f"— keep it brief and neutral, no apology. "
+                    f"(2) Ask which of these they'd like to use instead: {available}. "
+                    f"Do not present any concept yet. Do not offer to work with '{detail}'."
+                )
+            )
+
+        elif override and override["type"] == "framework_unspecified":
+            # User wants to switch but didn't name a framework — ask what they have in mind
             available = self._format_framework_list()
             yield from self._stream_with_instruction(
                 instruction=(
-                    f"The user asked for a framework that isn't in our knowledge base. "
-                    f"Tell them in one friendly sentence that you don't have that framework, "
-                    f"and list these available options: {available}. "
-                    f"Ask which they'd like to use."
+                    f"The user wants to switch frameworks but hasn't named one. "
+                    f"Ask in one friendly sentence: do they have a specific framework "
+                    f"in mind? If not, suggest they try one of these: {available}. "
+                    f"Do not present any concept yet."
                 )
             )
 
@@ -810,7 +827,7 @@ class ExplainableAgent(BlackBoxAgent):
             f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
             f"Current concept: **{concept}**\n"
             f"On swap concept: {on_swap}\n"
-            f"Case: Mining Co. — Silica Sand & Bentonite profitability analysis\n"
+            f"Framework: {self.kg_context['framework']} | Case: {self.kg_context['case_type']}\n"
             f"─────────────────────────────────────────────────────────────────────\n"
         )
 
@@ -847,7 +864,7 @@ class ExplainableAgent(BlackBoxAgent):
             f"{SUMMARY_PROMPT}\n\n"
             f"─── CONCEPTS TO INCLUDE (in order) ──────────────────────────────────\n"
             f"{', '.join(active_concepts)}\n"
-            f"Case: Mining Co. — Silica Sand & Bentonite profitability analysis\n"
+            f"Framework: {self.kg_context['framework']} | Case: {self.kg_context['case_type']}\n"
             f"─────────────────────────────────────────────────────────────────────\n"
         )
         yield from self._stream_with_instruction(instruction=instruction, store_answer=True)
