@@ -944,6 +944,24 @@ class ExplainableAgent(BlackBoxAgent):
     # _build_system_prompt — minimal fallback used by inherited send_message
     # ══════════════════════════════════════════════════════════════════════
 
+
+    def end_session(self) -> None:
+        # Override: skip Direction C on summary text (false positives).
+        # Change log: 2026-03-30 — fix end_session false positive.
+        from backend.logger import end_session as _end_session
+        try:
+            from firebase_admin import firestore as fs
+            db = fs.client()
+            db.collection('sessions').document(self.session_id).update({
+                'concept_swap_detected': self.concept_swap.is_detected,
+                'swap_detected_at_end':  self.concept_swap.is_detected,
+            })
+            logging.info(f'[END SESSION] stamped session={self.session_id}, '
+                         f'swap_detected={self.concept_swap.is_detected}')
+        except Exception as e:
+            logging.warning(f'[END SESSION] Firestore stamp failed: {e}')
+        _end_session(self.session_id)
+
     def _build_system_prompt(self) -> str:
         concepts_str = " → ".join(self.kg_context["concepts"]) \
                        if self.kg_context["concepts"] else "N/A"
