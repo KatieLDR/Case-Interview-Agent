@@ -139,6 +139,37 @@ def log_concept_swap_detected(session_id: str) -> None:
     })
     _log_event(session_id, "concept_swap_detected", {})
 
+def log_framework_switched(
+    session_id: str,
+    from_framework: str,
+    to_framework: str,
+    switch_index: int,
+) -> None:
+    """
+    Log a framework switch event to Firestore.
+ 
+    Sets framework_switched=True on the session document and logs
+    the event with full context for research analysis.
+ 
+    Args:
+        session_id:     current session
+        from_framework: framework before switch
+        to_framework:   framework after switch
+        switch_index:   walkthrough_index when switch occurred
+    """
+    try:
+        db.collection("sessions").document(session_id).update({
+            "framework_switched": True,
+        })
+        _log_event(session_id, "framework_switched", {
+            "from_framework": from_framework,
+            "to_framework":   to_framework,
+            "at_index":       switch_index,
+        })
+        print(f"[FRAMEWORK SWITCH] logged: {from_framework} → {to_framework} "
+              f"at index={switch_index}")
+    except Exception as e:
+        print(f"[FRAMEWORK SWITCH] failed to log: {e}")
 
 def log_user_message(session_id: str, message: str) -> None:
     _log_event(session_id, "user_message", {"message": message})

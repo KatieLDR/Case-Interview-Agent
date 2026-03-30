@@ -1,4 +1,5 @@
 import json
+import logging
 from google.genai import types
 from backend.black_box_agent import (
     BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
@@ -9,11 +10,20 @@ from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
+    log_framework_switched,
 )
 from backend import knowledge_graph as kg
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "Profitability"
+
+# ── Swap injection position ───────────────────────────────────────────────
+# Computed dynamically as len(base_concepts) // 2 (true midpoint) so the
+# swap always appears in the middle of whatever framework is active.
+# This keeps injection timing consistent even when the user switches framework.
+# Change log: 2026-03-29 — replaced SwapState enum with SWAP_POSITION constant.
+# Change log: 2026-03-29 — replaced fixed SWAP_POSITION=3 with dynamic
+#   then to len // 2 (true midpoint) — cleaner placement.
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
@@ -65,8 +75,7 @@ The user has a question about it.
 Answer in 2–3 sentences. Stay grounded in the Mining Co. case context.
 Plain language only — no jargon, no technical terms.
 
-After answering, end with exactly:
-*Shall we move on to the next concept?*
+After answering, use the closing specified in CLOSING INSTRUCTION below.
 """
 
 SUMMARY_PROMPT = """
@@ -98,10 +107,14 @@ Respond by:
 1. Acknowledging their catch warmly (one sentence)
 2. Explaining in plain language why that concept belongs to a different type
    of analysis — no jargon, no technical terms
-3. Confirming you are skipping it and moving forward
-4. End with: *Shall we move on to the next concept?*
+3. One short closing sentence confirming you are moving on — then STOP
 
-Do NOT re-introduce the wrong concept anywhere after this point.
+STRICT RULES:
+- Do NOT end with a question
+- Do NOT say "shall we move on"
+- Do NOT introduce, name, or preview the next concept
+- Do NOT present any new framework bucket in this response
+- Your response ends after the closing sentence — next concept follows separately
 """
 
 ADVANCE_CLASSIFIER_PROMPT = """
@@ -125,7 +138,88 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {"advance": true or false, "confidence": float between 0.0 and 1.0}
 """
 
-ADVANCE_THRESHOLD = 0.80
+ADVANCE_THRESHOLD = 0.75
+
+# ── Framework resolver prompt ──────────────────────────────────────────────
+# Used by _resolve_framework() to map user's free-text mention to a KG
+# framework name. Frameworks are fetched live from KG — not hardcoded here.
+# Change log: 2026-03-30 — replaces brittle keyword map for framework_switch
+FRAMEWORK_RESOLVER_PROMPT = """
+You are a classifier for a case interview tool.
+
+The user mentioned they want to use a specific framework. Your job is to match
+their mention to the available frameworks listed below.
+
+Return a JSON list of framework names that match. Rules:
+- Include a framework if the user's mention clearly refers to it
+- Include a framework if the user's mention is a reasonable synonym or abbreviation
+- If two frameworks are plausibly intended, include both
+- If nothing matches, return an empty list []
+- Do NOT invent framework names — only return names from the list below
+
+Respond ONLY with a valid JSON array of strings, no explanation, no markdown:
+["Framework Name"] or ["Name 1", "Name 2"] or []
+
+Examples (given frameworks: Economic Feasibility, Expanded Profit Formula,
+Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
+- "pricing" → ["Four-Pronged Strategy"]
+- "profitability" → ["Expanded Profit Formula"]
+- "market entry" → ["Economic Feasibility"]
+- "cost framework" → ["Expanded Profit Formula"]
+- "guesstimate" → ["Formulaic Breakdown"]
+- "issue tree" → ["Customized Issue Trees"]
+- "profit and pricing" → ["Expanded Profit Formula", "Four-Pronged Strategy"]
+- "blockchain framework" → []
+- "supply chain" → []
+"""
+
+# ── Walkthrough-aware override classifier prompt ───────────────────────────
+# Overrides BlackBoxAgent's OVERRIDE_CLASSIFIER_PROMPT during active walkthrough.
+# Key difference: "move on", "next", "continue", "yes" are NOT redo signals —
+# they are advance signals handled by the advance classifier.
+# Redo requires explicit restart language during walkthrough.
+# Change log: 2026-03-30 — added to fix "move on" being misclassified as redo.
+# Root cause: BlackBoxAgent's OVERRIDE_CLASSIFIER_PROMPT has no walkthrough
+# context, so advance signals collide with redo detection.
+WALKTHROUGH_OVERRIDE_PROMPT = """
+You are a classifier for a case interview walkthrough tool.
+
+The agent is currently walking the user through a framework one concept at a time.
+Determine whether the user's message is attempting to steer or change the agent's output.
+
+If yes, classify the type:
+- "redo"               : user wants to RESTART the entire walkthrough from scratch
+                         ("start over", "restart", "begin again", "let's start fresh",
+                          "redo this", "try again from the beginning")
+- "concept_excluded"   : user wants to remove a specific concept
+                         ("remove X", "exclude X", "don't include X", "skip X",
+                          "I don't want X", "drop X")
+- "framework_switch"   : user wants to use a specific different framework
+                         ("use Market Entry framework", "switch to profitability")
+- "none"               : not steering the output
+
+CRITICAL — these are NOT redo during an active walkthrough:
+- "move on" → none (means advance to next concept)
+- "next" → none
+- "continue" → none
+- "yes" / "ok" / "sure" → none
+- "let's move on" → none
+- "proceed" / "got it" → none
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}
+
+Examples:
+- "start over" → {"override": true, "type": "redo", "detail": null, "confidence": 0.99}
+- "restart from scratch" → {"override": true, "type": "redo", "detail": null, "confidence": 0.98}
+- "move on" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "let's move on to the next one" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "next concept please" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "remove Variable Cost per Unit" → {"override": true, "type": "concept_excluded", "detail": "Variable Cost per Unit", "confidence": 0.97}
+- "use Market Entry framework" → {"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}
+- "yes" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "makes sense, continue" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+"""
 
 
 class ExplainableAgent(BlackBoxAgent):
@@ -165,7 +259,7 @@ class ExplainableAgent(BlackBoxAgent):
 
         # ── KG context ────────────────────────────────────────────────────
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
-        print(f"[KG INIT] case_type={CASE_TYPE}, "
+        logging.info(f"[KG INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
               f"concepts={self.kg_context['concepts']}")
 
@@ -183,6 +277,12 @@ class ExplainableAgent(BlackBoxAgent):
         self.walkthrough_active   = False # True after first concept shown
         self.walkthrough_done     = False # True after summary shown
         self.excluded_concepts    = []    # removed by user override or swap detection
+        # swap_presented: True once the wrong concept block has been streamed to user.
+        # Detection only activates after this is True.
+        self.swap_presented       = False
+        # swap_position: computed as len(concepts) // 2 (true midpoint) when walkthrough is built.
+        # Recomputed on framework switch. Stored for invariant check and semantic logs.
+        self.swap_position        = 0
 
         # ── Conversation history ───────────────────────────────────────────
         self.history = [
@@ -220,15 +320,56 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _build_walkthrough_concepts(self) -> list:
         """
-        Build ordered concept list for this session.
-        Inserts wrong concept at midpoint (mid-way injection).
+        Build ordered concept list for current framework.
+        Inserts wrong concept at len(base) // 2 (true midpoint).
+        Stores computed position in self.swap_position for invariant checks.
         """
-        base  = list(self.kg_context["concepts"])
-        wrong = self.concept_swap.config["wrong_concept"]
-        mid   = len(base) // 2
-        base.insert(mid, wrong)
-        print(f"[WALKTHROUGH] built={base}, swap_at={mid}")
+        base     = list(self.kg_context["concepts"])
+        wrong    = self.concept_swap.config["wrong_concept"]
+        position = len(base) // 2   # true midpoint — change log: 2026-03-29
+        base.insert(position, wrong)
+        self.swap_position = position
+        logging.info(f"[WALKTHROUGH] built={base}, swap_position={position}, "
+                     f"framework={self.kg_context['framework']}")
         return base
+
+    def _rebuild_walkthrough_on_framework_switch(self, from_framework: str = "") -> None:
+        """
+        Called when user switches framework mid-walkthrough.
+        Rebuilds concept list with new KG context.
+        Logs framework_switched event to Firestore for research analysis.
+
+        Swap re-injection logic:
+          - already caught → don't re-inject (user demonstrated detection)
+          - not yet caught → re-inject at new midpoint (reset swap_presented)
+        Walkthrough restarts from index 0. History preserved so model
+        remembers what was already discussed.
+        """
+        to_framework = self.kg_context["framework"]
+
+        self.walkthrough_concepts = self._build_walkthrough_concepts()
+        self.walkthrough_index    = 0
+        self.excluded_concepts    = []
+
+        # Log framework switch as agency signal — separate from swap detection
+        log_framework_switched(
+            session_id     = self.session_id,
+            from_framework = from_framework,
+            to_framework   = to_framework,
+            switch_index   = self.walkthrough_index,
+        )
+
+        if self.concept_swap.is_detected:
+            wrong = self.concept_swap.config["wrong_concept"]
+            self.excluded_concepts.append(wrong)
+            self.swap_presented = True
+            logging.info(f"[FRAMEWORK SWITCH] swap already caught — "
+                         f"excluded from new walkthrough, framework={to_framework}")
+        else:
+            self.swap_presented = False
+            logging.info(f"[FRAMEWORK SWITCH] swap not yet caught — "
+                         f"re-injecting at position={self.swap_position}, "
+                         f"framework={to_framework}")
 
     def _current_concept(self) -> str | None:
         """
@@ -241,7 +382,7 @@ class ExplainableAgent(BlackBoxAgent):
             concept = self.walkthrough_concepts[self.walkthrough_index]
             if concept.lower() not in excluded_lower:
                 return concept
-            print(f"[WALKTHROUGH] skipping excluded: {concept}")
+            logging.debug(f"[WALKTHROUGH] skipping excluded: {concept}, index={self.walkthrough_index}")
             self.walkthrough_index += 1
         return None
 
@@ -260,12 +401,145 @@ class ExplainableAgent(BlackBoxAgent):
                 parsed.get("advance", False) and
                 parsed.get("confidence", 0.0) >= ADVANCE_THRESHOLD
             )
-            print(f"[ADVANCE] advance={parsed.get('advance')}, "
-                  f"confidence={parsed.get('confidence'):.2f}, proceed={result}")
+            logging.info(f"[ADVANCE] advance={parsed.get('advance')}, confidence={parsed.get('confidence'):.2f}, proceed={result}")
             return result
         except Exception as e:
-            print(f"[ADVANCE] error: {e}")
+            logging.warning(f"[ADVANCE] classifier error: {e}")
             return False
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Framework resolver — LLM-based, KG-grounded
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _fetch_kg_context_by_framework(self, framework_name: str) -> dict | None:
+        """
+        Fetch KG context by framework name directly (not via case_type).
+        Used when user specifies a framework explicitly.
+        """
+        try:
+            concepts = kg.get_ordered_concepts(framework_name)
+            if not concepts:
+                return None
+            # Find case_type for this framework
+            all_fw = kg.get_all_frameworks()
+            case_type = next(
+                (f["case_type"] for f in all_fw if f["framework"] == framework_name),
+                "Unknown"
+            )
+            return {"case_type": case_type, "framework": framework_name, "concepts": concepts}
+        except Exception as e:
+            logging.warning(f"[KG] _fetch_kg_context_by_framework error: {e}")
+            return None
+
+    def _resolve_framework(self, user_mention: str) -> list[str]:
+        """
+        Map user's free-text framework mention to KG framework name(s).
+
+        Fetches available frameworks live from KG (name + case_type + description)
+        so the list automatically reflects any KG updates.
+
+        Returns:
+          [name]       — single unambiguous match → switch silently
+          [n1, n2]     — multiple plausible matches → ask user to pick
+          []           — no match → tell user what's available
+
+        Change log: 2026-03-30 — replaces _update_kg_if_framework_mentioned()
+          keyword map which failed on plain words like "pricing".
+        """
+        try:
+            # Use session-level cache — frameworks don't change within a session.
+            # Change log: 2026-03-30 — added cache to avoid repeated KG queries
+            if not hasattr(self, "_kg_all_frameworks") or not self._kg_all_frameworks:
+                self._kg_all_frameworks = kg.get_all_frameworks()
+                logging.debug(f"[KG CACHE] loaded {len(self._kg_all_frameworks)} frameworks")
+            frameworks = self._kg_all_frameworks
+            if not frameworks:
+                logging.warning("[RESOLVER] no frameworks returned from KG")
+                return []
+
+            # Build framework list for prompt
+            fw_list = "\n".join(
+                f"- {f['framework']} (case: {f['case_type']}): {f['description']}"
+                for f in frameworks
+            )
+
+            prompt = (
+                f"{FRAMEWORK_RESOLVER_PROMPT}\n\n"
+                f"─── AVAILABLE FRAMEWORKS ─────────────────────────────────────────────\n"
+                f"{fw_list}\n"
+                f"──────────────────────────────────────────────────────────────────────\n\n"
+                f"User mentioned: \"{user_mention}\""
+            )
+
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=prompt,
+            )
+            matches = json.loads(self._strip_fences(response.text))
+            if not isinstance(matches, list):
+                matches = []
+
+            # Filter to only valid KG framework names
+            valid_names = {f["framework"] for f in frameworks}
+            matches = [m for m in matches if m in valid_names]
+
+            logging.info(f"[RESOLVER] user_mention='{user_mention}' → matches={matches}")
+            return matches
+
+        except Exception as e:
+            logging.warning(f"[RESOLVER] error: {e}")
+            return []
+
+    def _format_framework_list(self) -> str:
+        """Return available KG frameworks as a readable list for user messages."""
+        try:
+            frameworks = kg.get_all_frameworks()
+            return ", ".join(f["framework"] for f in frameworks)
+        except Exception:
+            return "the available frameworks"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Override detection — walkthrough-aware
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _detect_override(self, user_input: str) -> dict | None:
+        """
+        Overrides BlackBoxAgent._detect_override() to use a walkthrough-aware
+        prompt when the walkthrough is active.
+
+        During active walkthrough: uses WALKTHROUGH_OVERRIDE_PROMPT which
+        explicitly excludes advance signals ("move on", "next", "yes") from
+        being classified as redo. This prevents advance signals from colliding
+        with redo detection.
+
+        Before walkthrough / after summary: falls back to BlackBoxAgent's
+        inherited _detect_override() via super() for standard behaviour.
+        """
+        import json as _json
+        from backend.black_box_agent import OVERRIDE_THRESHOLD as _THRESH
+
+        if not self.walkthrough_active or self.walkthrough_done:
+            # Outside walkthrough — use inherited classifier unchanged
+            return super()._detect_override(user_input)
+
+        # Inside walkthrough — use context-aware prompt
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=f"{WALKTHROUGH_OVERRIDE_PROMPT}\n\nUser message: \"{user_input}\"",
+            )
+            parsed = _json.loads(self._strip_fences(response.text))
+            if (parsed.get("override", False) and
+                    parsed.get("confidence", 0.0) >= _THRESH and
+                    parsed.get("type", "none") != "none"):
+                return {
+                    "type":       parsed["type"],
+                    "detail":     parsed.get("detail"),
+                    "confidence": parsed["confidence"],
+                }
+        except Exception as e:
+            logging.warning(f"[OVERRIDE] walkthrough classifier error: {e}")
+        return None
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
@@ -276,47 +550,109 @@ class ExplainableAgent(BlackBoxAgent):
             log_interruption(self.session_id, context=user_input)
 
         # ── 1. Swap detection ──────────────────────────────────────────────
-        cs_detected = self.concept_swap.check_detection(user_input)
-        if cs_detected:
-            wrong = self.concept_swap.config["wrong_concept"]
-            log_memory_override(
-                self.session_id,
-                old_context=f"included: {wrong}",
-                new_context=f"user rejected: {wrong}",
-            )
-            if wrong not in self.excluded_concepts:
-                self.excluded_concepts.append(wrong)
-            # Advance index past the wrong concept
-            self.walkthrough_index += 1
-            print(f"[SWAP] caught — excluded, index→{self.walkthrough_index}")
+        # Guard: only active after the swap concept has been presented
+        # (swap_presented = True). Prevents early Direction C triggers from
+        # logging a detection before the user has actually seen the swap block.
+        cs_detected = False
+        if self.swap_presented:
+            cs_detected = self.concept_swap.check_detection(user_input)
+            if cs_detected:
+                wrong = self.concept_swap.config["wrong_concept"]
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"included: {wrong}",
+                    new_context=f"user rejected: {wrong}",
+                )
+                if wrong not in self.excluded_concepts:
+                    self.excluded_concepts.append(wrong)
+                self.walkthrough_index += 1
+                logging.info(f"[SWAP] caught — index→{self.walkthrough_index}, "
+                             f"swap_position={self.swap_position}")
+        elif self.walkthrough_active:
+            logging.debug(f"[SWAP] detection skipped — swap not yet presented, "
+                          f"index={self.walkthrough_index}, swap_position={self.swap_position}")
+
+        # ── 1b. Invariant check ────────────────────────────────────────────
+        # If index has passed SWAP_POSITION but swap was never presented,
+        # rewind to force presentation. Prevents silent bad sessions.
+        if (self.walkthrough_active
+                and self.walkthrough_index > self.swap_position
+                and not self.swap_presented):
+            logging.error(f"[INVARIANT VIOLATION] index={self.walkthrough_index} "
+                          f"past swap_position={self.swap_position} but swap_presented=False "
+                          f"— rewinding to swap_position to force presentation")
+            self.walkthrough_index = self.swap_position
 
         # ── 2. Override detection ──────────────────────────────────────────
-        override = self._detect_override(user_input)
+        # Skip if swap was just caught — the swap detection already logged a
+        # memory_override. Running override detection too would double-count
+        # the same user action (e.g. "Price-Elasticity doesn't belong here"
+        # fires both swap B detection AND concept_excluded override).
+        override = None if cs_detected else self._detect_override(user_input)
         if override:
             log_memory_override(
                 self.session_id,
                 old_context=f"override_type: {override['type']}",
                 new_context=f"detail: {override['detail'] or 'n/a'}",
             )
-            print(f"[OVERRIDE] {override['type']} — {override['detail']}")
+            logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}, "
+                         f"index={self.walkthrough_index}, swap_presented={self.swap_presented}")
 
             if override["type"] == "redo":
-                # Full reset
                 self.walkthrough_active   = False
                 self.walkthrough_done     = False
                 self.walkthrough_index    = 0
                 self.walkthrough_concepts = []
                 self.excluded_concepts    = []
+                self.swap_presented       = False
+                self.swap_position        = 0
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
 
+            elif override["type"] == "framework_switch" and override.get("detail"):
+                # Resolve user's mention to KG framework(s) via LLM + live KG query.
+                # Change log: 2026-03-30 — replaced keyword map with _resolve_framework()
+                matches = self._resolve_framework(override["detail"])
+
+                if len(matches) == 1:
+                    # Unambiguous — switch silently, tell user
+                    new_framework = matches[0]
+                    new_context   = self._fetch_kg_context_by_framework(new_framework)
+                    if new_context:
+                        from_fw = self.kg_context["framework"]
+                        self.kg_context = new_context
+                        if self.walkthrough_active:
+                            self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
+                            logging.info(f"[FRAMEWORK SWITCH] mid-walkthrough → {new_framework}")
+                        else:
+                            # Pre-walkthrough: log the switch even though rebuild not needed
+                            log_framework_switched(
+                                session_id     = self.session_id,
+                                from_framework = from_fw,
+                                to_framework   = new_framework,
+                                switch_index   = 0,
+                            )
+                            logging.info(f"[FRAMEWORK SWITCH] pre-walkthrough → {new_framework}")
+                    # Response will naturally confirm the switch via _stream_concept
+
+                elif len(matches) >= 2:
+                    # Ambiguous — ask user to pick; pause walkthrough routing
+                    override = {"type": "framework_clarification", "matches": matches,
+                                "detail": override["detail"]}
+                    logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
+
+                else:
+                    # No match — tell user what's available; pause routing
+                    override = {"type": "framework_not_found", "detail": override["detail"]}
+                    logging.info(f"[FRAMEWORK SWITCH] no match for '{override['detail']}'")
+
             elif override["type"] == "concept_excluded" and override.get("detail"):
                 excl = override["detail"]
                 if excl not in self.excluded_concepts:
                     self.excluded_concepts.append(excl)
-                print(f"[OVERRIDE] concept excluded: {excl}")
+                logging.info(f"[OVERRIDE] concept excluded: {excl}")
 
         # ── 3. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -324,24 +660,63 @@ class ExplainableAgent(BlackBoxAgent):
             types.Content(role="user", parts=[types.Part(text=user_input)])
         )
 
-        # ── 4. Route ───────────────────────────────────────────────────────
+        # ── 4. Semantic routing log ────────────────────────────────────────
+        logging.info(f"[ROUTE] active={self.walkthrough_active}, "
+                     f"done={self.walkthrough_done}, "
+                     f"swap_presented={self.swap_presented}, "
+                     f"index={self.walkthrough_index}, "
+                     f"swap_position={self.swap_position}, "
+                     f"cs_detected={cs_detected}")
+
+        # ── 5. Route ───────────────────────────────────────────────────────
         if not self.walkthrough_active:
-            # First framework request
             self.walkthrough_concepts = self._build_walkthrough_concepts()
             self.walkthrough_active   = True
             self.walkthrough_index    = 0
+            self.swap_presented       = False
             yield from self._stream_concept(is_first=True)
 
         elif self.walkthrough_done:
-            # Post-summary free Q&A
             yield from self._stream_freeform(cs_detected)
 
+        elif override and override["type"] == "framework_switch":
+            # Single match — walkthrough rebuilt above, present first concept
+            yield from self._stream_concept(is_first=True)
+
+        elif override and override["type"] == "framework_clarification":
+            # Multiple plausible matches — ask user to pick
+            matches   = override["matches"]
+            match_str = " or ".join(f"**{m}**" for m in matches)
+            yield from self._stream_with_instruction(
+                instruction=(
+                    f"The user mentioned switching frameworks. Based on what they said, "
+                    f"it could mean {match_str}. Ask them which one they meant in one "
+                    f"short, friendly sentence. Do not present any concept yet."
+                )
+            )
+
+        elif override and override["type"] == "framework_not_found":
+            # No match — tell user what's available
+            available = self._format_framework_list()
+            yield from self._stream_with_instruction(
+                instruction=(
+                    f"The user asked for a framework that isn't in our knowledge base. "
+                    f"Tell them in one friendly sentence that you don't have that framework, "
+                    f"and list these available options: {available}. "
+                    f"Ask which they'd like to use."
+                )
+            )
+
         elif cs_detected:
-            # Swap caught mid-walkthrough — acknowledge and re-ask
+            # Swap caught — acknowledge then immediately present next concept
             yield from self._stream_swap_caught()
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._stream_summary()
+            else:
+                yield from self._stream_concept(is_first=False)
 
         elif self._is_ready_to_advance(user_input):
-            # Advance to next concept
             self.walkthrough_index += 1
             concept = self._current_concept()
             if concept is None:
@@ -350,7 +725,6 @@ class ExplainableAgent(BlackBoxAgent):
                 yield from self._stream_concept(is_first=False)
 
         else:
-            # User has a question about current concept
             yield from self._stream_concept_qa()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -384,6 +758,10 @@ class ExplainableAgent(BlackBoxAgent):
 
         prefix = "Here is how I would structure the analysis:\n\n" if is_first else ""
 
+        # Capture BEFORE streaming — maybe_inject() inside _stream_with_instruction
+        # will set is_injected=True, so we must read the flag before that happens.
+        already_logged = self.concept_swap.is_injected if is_wrong else False
+
         yield from self._stream_with_instruction(
             instruction=instruction,
             prefix=prefix,
@@ -392,16 +770,54 @@ class ExplainableAgent(BlackBoxAgent):
             store_answer=False,
         )
 
+        # After streaming: mark swap as presented so detection activates next turn.
+        # Guard log_presented() — only call once even on framework switch re-injection.
+        if is_wrong:
+            self.swap_presented = True
+            if not already_logged:
+                self.concept_swap.log_presented()
+                logging.info(f"[SWAP] concept presented at position={self.swap_position} — "
+                             f"detection active from next turn")
+            else:
+                logging.info(f"[SWAP] concept re-presented after framework switch — "
+                             f"log_presented() skipped (already logged), "
+                             f"position={self.swap_position}")
+
     def _stream_concept_qa(self):
-        """Answer a question about current concept, re-ask to advance."""
-        concept = self._current_concept() or "the current concept"
+        """
+        Answer a question about current concept, re-ask to advance.
+        Special case: if we are on the swap concept turn, end with an
+        explicit keep-or-remove prompt to force a clear user decision.
+        This gives Direction B/C a cleaner signal on the next turn.
+        """
+        concept    = self._current_concept() or "the current concept"
+        on_swap    = (self.walkthrough_index == self.swap_position
+                      and self.swap_presented
+                      and not self.concept_swap.is_detected)
+
+        closing = (
+            "End with exactly:\n"
+            "*I can see why you'd question this — shall we include it or move on without it?*"
+            if on_swap else
+            "End with exactly:\n"
+            "*Shall we move on to the next concept?*"
+        )
+
         instruction = (
             f"{CONCEPT_QA_PROMPT}\n\n"
+            f"─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
+            f"{closing}\n"
             f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
             f"Current concept: **{concept}**\n"
+            f"On swap concept: {on_swap}\n"
             f"Case: Mining Co. — Silica Sand & Bentonite profitability analysis\n"
             f"─────────────────────────────────────────────────────────────────────\n"
         )
+
+        if on_swap:
+            logging.info(f"[SWAP QA] user questioning swap concept at "
+                         f"index={self.walkthrough_index} — using explicit keep/remove prompt")
+
         yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_swap_caught(self):
@@ -419,7 +835,9 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _stream_summary(self):
         """Present the full framework summary of non-excluded concepts."""
-        self.walkthrough_done  = True
+        self.walkthrough_done = True
+        if self.swap_presented and not self.concept_swap.is_detected:
+            logging.info(f"[SWAP] summary reached — swap was presented but not caught")
         excluded_lower         = [e.lower() for e in self.excluded_concepts]
         active_concepts        = [
             c for c in self.walkthrough_concepts
@@ -504,10 +922,9 @@ class ExplainableAgent(BlackBoxAgent):
 
             # Track swap injection if this is the wrong concept
             if track_swap:
-                was_injected = self.concept_swap.is_injected
+                # maybe_inject marks is_injected=True (once only — safe to call again)
                 self.concept_swap.maybe_inject(reply)
-                if self.concept_swap.is_injected and not was_injected:
-                    self.concept_swap.log_presented()
+                # log_presented() is handled in _stream_concept after streaming completes
 
             self.history.append(
                 types.Content(role="model", parts=[types.Part(text=reply)])

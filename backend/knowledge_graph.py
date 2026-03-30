@@ -173,6 +173,37 @@ def get_framework_for_case(case_type: str) -> str | None:
     return rows[0]["framework"] if rows else None
 
 
+# Change log: 2026-03-30 — added for _resolve_framework() in explainable_agent.py
+
+
+def get_all_frameworks() -> list[dict]:
+    """
+    Return all frameworks in the KG with their case type and description.
+    Used by ExplainableAgent._resolve_framework() to resolve user's framework
+    mention to a KG framework name via LLM matching.
+
+    Returns list of dicts:
+        [{"framework": str, "case_type": str, "description": str}, ...]
+
+    Falls back gracefully if description field is not yet set on nodes.
+    """
+    rows = _run(
+        """
+        MATCH (ct:CaseType)-[:USES_FRAMEWORK]->(f:Framework)
+        RETURN f.name        AS framework,
+               ct.name       AS case_type,
+               f.description AS description
+        ORDER BY f.name
+        """
+    )
+    return [
+        {
+            "framework":   r["framework"],
+            "case_type":   r["case_type"],
+            "description": r.get("description") or "",
+        }
+        for r in rows
+    ]
 # ── Quick smoke test (run directly: python -m backend.knowledge_graph) ─────
 if __name__ == "__main__":
     print("=== get_concepts(Market Entry) ===")
