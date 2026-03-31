@@ -11,35 +11,35 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ══════════════════════════════════════════════════════════════════════════
 # Per-agent swap config
-# Each entry defines:
-#   case_type      : the CaseType node in the KG
-#   framework      : the correct framework for this case
+#
+# Fields:
 #   wrong_concept  : the concept being injected (from a different framework)
 #   wrong_framework: the framework the wrong concept actually belongs to
+#                    Used in _stream_swap_caught() context block.
+#
+# Removed fields (change log: 2026-03-31):
+#   case_type  — was never read by any method; removed to avoid misleading
+#   framework  — was never read by any method; the active framework is now
+#                read dynamically from self.kg_context["framework"] in the
+#                agent. Hardcoding it here broke when users switched frameworks.
 #
 # NOTE: wrong_concept does NOT need to exist in the KG.
 #       Injection is purely via system prompt string.
-#       If wrong_concept is outside the KG, note it here and handle
-#       separately in the alignment accuracy scoring script.
+#       All wrong concepts are currently outside the KG — handle separately
+#       in the Framework Alignment Accuracy scoring script.
 # ══════════════════════════════════════════════════════════════════════════
 SWAP_CONFIG = {
     "black_box": {
-        "case_type":       "Market Entry",
-        "framework":       "Economic Feasibility",
-        "wrong_concept":   "Employee Turnover Rate",  # HR metric — obviously wrong for Market Entry
-        "wrong_framework": "HR Analytics",            # outside KG — handle in scoring
+        "wrong_concept":   "Employee Turnover Rate",  # HR metric — outside KG
+        "wrong_framework": "HR Analytics",
     },
     "explainable": {
-        "case_type":       "Profitability",            # Change log: 2026-03-30 was "Pricing"
-        "framework":       "Expanded Profit Formula",  # Change log: 2026-03-30 was "Four-Pronged Strategy"
-        "wrong_concept":   "Net Promoter Score (NPS)", # Customer satisfaction — obviously wrong for Profitability
-        "wrong_framework": "Customer Experience",      # outside KG — handle in scoring
+        "wrong_concept":   "Net Promoter Score (NPS)", # Customer satisfaction — outside KG
+        "wrong_framework": "Customer Experience",
     },
     "hitl": {
-        "case_type":       "Unconventional",
-        "framework":       "Customized Issue Trees",
-        "wrong_concept":   "Carbon Footprint Analysis", # Sustainability — obviously wrong for investment decision
-        "wrong_framework": "ESG Framework",              # outside KG — handle in scoring
+        "wrong_concept":   "Carbon Footprint Analysis", # Sustainability — outside KG
+        "wrong_framework": "ESG Framework",
     },
 }
 

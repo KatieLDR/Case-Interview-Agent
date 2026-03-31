@@ -13,6 +13,7 @@ from backend.logger import (
     log_framework_switched,
 )
 from backend import knowledge_graph as kg
+from backend.rag_explainer import build_and_check_citation
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "Profitability"
@@ -141,9 +142,6 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 ADVANCE_THRESHOLD = 0.75
 
 # ── Framework resolver prompt ──────────────────────────────────────────────
-# Used by _resolve_framework() to map user's free-text mention to a KG
-# framework name. Frameworks are fetched live from KG — not hardcoded here.
-# Change log: 2026-03-30 — replaces brittle keyword map for framework_switch
 FRAMEWORK_RESOLVER_PROMPT = """
 You are a classifier for a case interview tool.
 
@@ -174,13 +172,6 @@ Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
 """
 
 # ── Walkthrough-aware override classifier prompt ───────────────────────────
-# Overrides BlackBoxAgent's OVERRIDE_CLASSIFIER_PROMPT during active walkthrough.
-# Key difference: "move on", "next", "continue", "yes" are NOT redo signals —
-# they are advance signals handled by the advance classifier.
-# Redo requires explicit restart language during walkthrough.
-# Change log: 2026-03-30 — added to fix "move on" being misclassified as redo.
-# Root cause: BlackBoxAgent's OVERRIDE_CLASSIFIER_PROMPT has no walkthrough
-# context, so advance signals collide with redo detection.
 WALKTHROUGH_OVERRIDE_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
 
@@ -550,9 +541,6 @@ class ExplainableAgent(BlackBoxAgent):
             log_interruption(self.session_id, context=user_input)
 
         # ── 1. Swap detection ──────────────────────────────────────────────
-        # Guard: only active after the swap concept has been presented
-        # (swap_presented = True). Prevents early Direction C triggers from
-        # logging a detection before the user has actually seen the swap block.
         cs_detected = False
         if self.swap_presented:
             cs_detected = self.concept_swap.check_detection(user_input)
@@ -573,8 +561,6 @@ class ExplainableAgent(BlackBoxAgent):
                           f"index={self.walkthrough_index}, swap_position={self.swap_position}")
 
         # ── 1b. Invariant check ────────────────────────────────────────────
-        # If index has passed SWAP_POSITION but swap was never presented,
-        # rewind to force presentation. Prevents silent bad sessions.
         if (self.walkthrough_active
                 and self.walkthrough_index > self.swap_position
                 and not self.swap_presented):
@@ -584,10 +570,6 @@ class ExplainableAgent(BlackBoxAgent):
             self.walkthrough_index = self.swap_position
 
         # ── 2. Override detection ──────────────────────────────────────────
-        # Skip if swap was just caught — the swap detection already logged a
-        # memory_override. Running override detection too would double-count
-        # the same user action (e.g. "Price-Elasticity doesn't belong here"
-        # fires both swap B detection AND concept_excluded override).
         override = None if cs_detected else self._detect_override(user_input)
         if override:
             log_memory_override(
@@ -613,14 +595,11 @@ class ExplainableAgent(BlackBoxAgent):
 
             elif override["type"] == "framework_switch":
                 if not override.get("detail"):
-                    # No framework named — ask what they have in mind first
                     override = {"type": "framework_unspecified"}
                     logging.info("[FRAMEWORK SWITCH] no framework specified — asking user")
                 else:
-                    # Resolve user mention to KG framework(s)
                     matches = self._resolve_framework(override["detail"])
                     if len(matches) == 1:
-                        # Unambiguous — switch silently
                         new_framework = matches[0]
                         new_context   = self._fetch_kg_context_by_framework(new_framework)
                         if new_context:
@@ -638,12 +617,10 @@ class ExplainableAgent(BlackBoxAgent):
                                 )
                                 logging.info(f"[FRAMEWORK SWITCH] pre-walkthrough → {new_framework}")
                     elif len(matches) >= 2:
-                        # Ambiguous — ask user to pick
                         override = {"type": "framework_clarification", "matches": matches,
                                     "detail": override["detail"]}
                         logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
                     else:
-                        # No match — list available
                         override = {"type": "framework_not_found", "detail": override["detail"]}
                         logging.info(f"[FRAMEWORK SWITCH] no match for '{override['detail']}'")
 
@@ -679,11 +656,9 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._stream_freeform(cs_detected)
 
         elif override and override["type"] == "framework_switch":
-            # Single match — walkthrough rebuilt above, present first concept
             yield from self._stream_concept(is_first=True)
 
         elif override and override["type"] == "framework_clarification":
-            # Multiple plausible matches — ask user to pick
             matches   = override["matches"]
             match_str = " or ".join(f"**{m}**" for m in matches)
             yield from self._stream_with_instruction(
@@ -695,10 +670,6 @@ class ExplainableAgent(BlackBoxAgent):
             )
 
         elif override and override["type"] == "framework_not_found":
-            # Unrecognised framework — strictly redirect to KG options for research validity.
-            # Change log: 2026-03-30 — removed "work with it together" option.
-            # Research rationale: unknown frameworks break alignment accuracy scoring.
-            # Revisit after pilot study.
             available = self._format_framework_list()
             detail    = override.get("detail") or "that framework"
             yield from self._stream_with_instruction(
@@ -713,7 +684,6 @@ class ExplainableAgent(BlackBoxAgent):
             )
 
         elif override and override["type"] == "framework_unspecified":
-            # User wants to switch but didn't name a framework — ask what they have in mind
             available = self._format_framework_list()
             yield from self._stream_with_instruction(
                 instruction=(
@@ -725,7 +695,6 @@ class ExplainableAgent(BlackBoxAgent):
             )
 
         elif cs_detected:
-            # Swap caught — acknowledge then immediately present next concept
             yield from self._stream_swap_caught()
             next_concept = self._current_concept()
             if next_concept is None:
@@ -749,7 +718,15 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_concept(self, is_first: bool):
-        """Present the concept at current walkthrough_index."""
+        """
+        Present the concept at current walkthrough_index.
+
+        After streaming completes:
+          - If a correct KG concept: run faithfulness check + stream citation block
+          - If the wrong concept (swap): skip citation entirely
+        
+        Change log: 2026-03-31 — added citation block via rag_explainer.py
+        """
         concept = self._current_concept()
         if concept is None:
             yield from self._stream_summary()
@@ -767,7 +744,6 @@ class ExplainableAgent(BlackBoxAgent):
             f"─────────────────────────────────────────────────────────────────────\n"
         )
 
-        # Explicit task injection — overrides the model tendency to summarize
         task_injection = (
             f"[Present only the **{concept}** concept now using the exact format. "
             f"No intro. No other concepts. Start directly with **{concept}**.]"
@@ -775,20 +751,25 @@ class ExplainableAgent(BlackBoxAgent):
 
         prefix = "Here is how I would structure the analysis:\n\n" if is_first else ""
 
-        # Capture BEFORE streaming — maybe_inject() inside _stream_with_instruction
-        # will set is_injected=True, so we must read the flag before that happens.
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
-        yield from self._stream_with_instruction(
+        # ── Stream the concept block ───────────────────────────────────────
+        # Capture full reply for faithfulness check — _stream_with_instruction
+        # yields tokens AND appends to history internally. We need the full
+        # text for the citation pipeline, so we capture while yielding.
+        full_concept_reply = []
+
+        for token in self._stream_with_instruction(
             instruction=instruction,
             prefix=prefix,
             task_injection=task_injection,
             track_swap=is_wrong,
             store_answer=False,
-        )
+        ):
+            full_concept_reply.append(token)
+            yield token
 
-        # After streaming: mark swap as presented so detection activates next turn.
-        # Guard log_presented() — only call once even on framework switch re-injection.
+        # ── Swap tracking ──────────────────────────────────────────────────
         if is_wrong:
             self.swap_presented = True
             if not already_logged:
@@ -799,13 +780,29 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.info(f"[SWAP] concept re-presented after framework switch — "
                              f"log_presented() skipped (already logged), "
                              f"position={self.swap_position}")
+            # No citation for the wrong concept — skip
+            return
+
+        # ── Citation block — correct KG concepts only ──────────────────────
+        # Change log: 2026-03-31 — faithfulness check + KG citation
+        # Runs after streaming so it doesn't block the concept text appearing.
+        concept_block = "".join(full_concept_reply)
+        try:
+            citation = build_and_check_citation(
+                concept_name  = concept,
+                framework     = self.kg_context["framework"],
+                concept_block = concept_block,
+            )
+            yield citation
+        except Exception as e:
+            # Citation failure must never break the walkthrough
+            logging.warning(f"[CITATION] failed for concept='{concept}': {e}")
 
     def _stream_concept_qa(self):
         """
         Answer a question about current concept, re-ask to advance.
         Special case: if we are on the swap concept turn, end with an
         explicit keep-or-remove prompt to force a clear user decision.
-        This gives Direction B/C a cleaner signal on the next turn.
         """
         concept    = self._current_concept() or "the current concept"
         on_swap    = (self.walkthrough_index == self.swap_position
@@ -838,14 +835,23 @@ class ExplainableAgent(BlackBoxAgent):
         yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_swap_caught(self):
-        """Acknowledge swap catch, explain, skip, re-ask to advance."""
-        wrong = self.concept_swap.config["wrong_concept"]
+        """
+        Acknowledge swap catch, explain, skip, re-ask to advance.
+
+        Change log: 2026-03-31 — replaced hardcoded framework strings with
+        dynamic context from self.kg_context and concept_swap.config.
+        Hardcoded strings broke if user switched framework mid-walkthrough.
+        """
+        wrong       = self.concept_swap.config["wrong_concept"]
+        wrong_fw    = self.concept_swap.config["wrong_framework"]
+        active_fw   = self.kg_context["framework"]
+        active_case = self.kg_context["case_type"]
         instruction = (
             f"{SWAP_CAUGHT_PROMPT}\n\n"
             f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
             f"Wrong concept flagged: **{wrong}**\n"
-            f"It belongs to: Four-Pronged Strategy (Pricing analysis)\n"
-            f"This case is: Profitability analysis — Expanded Profit Formula\n"
+            f"It belongs to: {wrong_fw} (a different type of analysis)\n"
+            f"This case is: {active_case} analysis — {active_fw}\n"
             f"─────────────────────────────────────────────────────────────────────\n"
         )
         yield from self._stream_with_instruction(instruction=instruction)
@@ -855,8 +861,8 @@ class ExplainableAgent(BlackBoxAgent):
         self.walkthrough_done = True
         if self.swap_presented and not self.concept_swap.is_detected:
             logging.info(f"[SWAP] summary reached — swap was presented but not caught")
-        excluded_lower         = [e.lower() for e in self.excluded_concepts]
-        active_concepts        = [
+        excluded_lower  = [e.lower() for e in self.excluded_concepts]
+        active_concepts = [
             c for c in self.walkthrough_concepts
             if c.lower() not in excluded_lower
         ]
@@ -913,7 +919,6 @@ class ExplainableAgent(BlackBoxAgent):
         if prefix:
             yield prefix
 
-        # Build contents — inject task turn if provided (ephemeral, not saved)
         contents = self.history
         if task_injection:
             contents = self.history + [
@@ -937,11 +942,8 @@ class ExplainableAgent(BlackBoxAgent):
 
             reply = "".join(full_reply)
 
-            # Track swap injection if this is the wrong concept
             if track_swap:
-                # maybe_inject marks is_injected=True (once only — safe to call again)
                 self.concept_swap.maybe_inject(reply)
-                # log_presented() is handled in _stream_concept after streaming completes
 
             self.history.append(
                 types.Content(role="model", parts=[types.Part(text=reply)])
@@ -960,7 +962,6 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # _build_system_prompt — minimal fallback used by inherited send_message
     # ══════════════════════════════════════════════════════════════════════
-
 
     def end_session(self) -> None:
         # Override: skip Direction C on summary text (false positives).
