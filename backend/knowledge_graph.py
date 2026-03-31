@@ -388,6 +388,117 @@ def get_also_drives(concept_name: str, framework: str) -> list[str]:
     return [r["concept"] for r in rows]
 
 
+def get_concept_full_data(concept_name: str, framework: str) -> dict:
+    """
+    Return all concept data needed by rag_explainer.py in a single KG query.
+    Replaces the previous pattern of 5 separate query calls in build_kg_data().
+
+    Returns dict with keys:
+      description, parent, siblings, children, is_branch
+
+    Falls back to empty/None values if concept not found.
+
+    Change log: 2026-03-31 — added to batch KG queries and reduce round-trips.
+      Previously build_kg_data() made 5 sequential Neo4j calls per concept,
+      adding latency before anything streamed to the user.
+    """
+    rows = _run(
+        """
+        MATCH (c:Concept {name: $concept_name, framework: $framework})
+
+        // Parent — could be Concept or Framework node
+        OPTIONAL MATCH (parent)-[:HAS_CHILD]->(c)
+
+        // Siblings — other children of same parent, same framework
+        OPTIONAL MATCH (parent)-[:HAS_CHILD]->(sibling:Concept {framework: $framework})
+        WHERE sibling.name <> $concept_name
+
+        // Children
+        OPTIONAL MATCH (c)-[:HAS_CHILD]->(child:Concept)
+
+        RETURN
+            coalesce(c.description, '')   AS description,
+            coalesce(c.branch, false)     AS is_branch,
+            parent.name                   AS parent,
+            collect(DISTINCT sibling.name) AS siblings,
+            collect(DISTINCT child.name)   AS children
+        LIMIT 1
+        """,
+        concept_name=concept_name,
+        framework=framework,
+    )
+    if not rows:
+        return {
+            "description": "",
+            "parent":      None,
+            "siblings":    [],
+            "children":    [],
+            "is_branch":   False,
+        }
+    r = rows[0]
+    return {
+        "description": r["description"] or "",
+        "parent":      r["parent"],
+        "siblings":    r["siblings"] or [],
+        "children":    r["children"] or [],
+        "is_branch":   r["is_branch"] or False,
+    }
+
+
+def get_concept_description(concept_name: str, framework: str) -> str:
+    """
+    Return the description of a concept node.
+    Returns empty string if description not yet set.
+
+    Change log: 2026-03-31 — added to support faithfulness classifier grounding.
+    Descriptions added via add_concept_descriptions.cypher.
+
+    Example:
+        get_concept_description("Price per Unit", "Expanded Profit Formula")
+        → "The selling price charged per unit of output. Analytical scope: ..."
+    """
+    rows = _run(
+        """
+        MATCH (c:Concept {name: $concept_name, framework: $framework})
+        RETURN coalesce(c.description, '') AS description
+        LIMIT 1
+        """,
+        concept_name=concept_name,
+        framework=framework,
+    )
+    return rows[0]["description"] if rows else ""
+
+
+def get_concept_siblings(concept_name: str, framework: str) -> list[str]:
+    """
+    Return the sibling concepts — other children of the same parent.
+    Excludes the concept itself.
+
+    Change log: 2026-03-31 — added to support faithfulness classifier grounding.
+    Helps classifier understand what analytical territory belongs to adjacent
+    concepts vs. the current one.
+
+    Example:
+        get_concept_siblings("Price per Unit", "Expanded Profit Formula")
+        → ["Units Sold"]
+
+        get_concept_siblings("Fixed Cost", "Expanded Profit Formula")
+        → ["Variable Cost"]
+    """
+    # Find parent first, then get all its children except this concept
+    rows = _run(
+        """
+        MATCH (parent)-[:HAS_CHILD]->(c:Concept {name: $concept_name, framework: $framework})
+        MATCH (parent)-[:HAS_CHILD]->(sibling:Concept {framework: $framework})
+        WHERE sibling.name <> $concept_name
+        RETURN sibling.name AS concept
+        """,
+        concept_name=concept_name,
+        framework=framework,
+    )
+    return [r["concept"] for r in rows]
+
+
 def is_branch_node(concept_name: str, framework: str) -> bool:
     """
     Return True if the concept is an intermediate branch node (not a leaf).

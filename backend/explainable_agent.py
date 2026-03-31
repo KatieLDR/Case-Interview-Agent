@@ -13,7 +13,7 @@ from backend.logger import (
     log_framework_switched,
 )
 from backend import knowledge_graph as kg
-from backend.rag_explainer import build_and_check_citation
+from backend.rag_explainer import build_citation_header, check_and_append_warning, build_and_check_citation
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "Profitability"
@@ -33,33 +33,28 @@ CASE_TYPE = "Profitability"
 SINGLE_CONCEPT_PROMPT = """
 You are a strategic consultant walking a user through a framework ONE concept at a time.
 
-YOUR ONLY JOB RIGHT NOW: Present the single concept named in CONCEPT TO PRESENT NOW.
-Nothing else. No other concepts. No full framework. No numbered lists.
+The concept name and rationale have already been presented to the user above.
+YOUR ONLY JOB: Output the sub-bullets and closing question — nothing else.
 
 EXACT OUTPUT FORMAT — copy this structure precisely:
 
-**[Concept Name]**
-Based on consulting best practices, [one sentence, specific to Mining Co. and the
-Silica Sand & Bentonite decision — not a generic statement].
 - [sub-bucket, 5–7 words, specific to this case]
 - [sub-bucket, 5–7 words, specific to this case]
 - [sub-bucket, 5–7 words, specific to this case]
 
 *Shall we move on to the next concept?*
 
-─── EXAMPLE (for Volume) ──────────────────────────────────────────────────
-**Volume**
-Based on consulting best practices, understanding how much ore Mining Co. can
-realistically extract and sell determines whether this venture is worth pursuing.
-- Annual extraction capacity for Silica Sand
-- Estimated market demand from key buyers
-- Production constraints from remote site logistics
+─── EXAMPLE (for Price per Unit) ────────────────────────────────────────────
+- Current market rates for industrial Silica Sand
+- Global Bentonite pricing trends and forecasts
+- Negotiating power with potential buyers
 
 *Shall we move on to the next concept?*
 ─────────────────────────────────────────────────────────────────────────────
 
 ─── STRICT RULES ────────────────────────────────────────────────────────────
-- Output ONLY the concept block above — nothing before, nothing after
+- Do NOT repeat the concept name as a header — it is already shown above
+- Do NOT write a rationale sentence — it is already shown above
 - Do NOT write an intro paragraph
 - Do NOT list other concepts or buckets
 - Do NOT say "here is the framework" or "I recommend"
@@ -303,6 +298,21 @@ class ExplainableAgent(BlackBoxAgent):
             f"before you begin. When you're ready, I'll walk you through the framework "
             f"one concept at a time — you can ask questions at each step.\n\n"
             f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
+        )
+
+    def start_main_phase(self) -> str:
+        """
+        Override to append a summary hint to the phase transition message.
+        The hint tells users they can request a summary at any time —
+        important for UX since the walkthrough can feel open-ended.
+
+        Change log: 2026-03-31 — added summary hint.
+        """
+        base_message = super().start_main_phase()
+        return (
+            f"{base_message}\n\n"
+            f"💡 *You can click **📊 Get Summary & End Session** at any time "
+            f"to see your full framework and close the session.*"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -696,6 +706,7 @@ class ExplainableAgent(BlackBoxAgent):
 
         elif cs_detected:
             yield from self._stream_swap_caught()
+            yield "\n\n"
             next_concept = self._current_concept()
             if next_concept is None:
                 yield from self._stream_summary()
@@ -721,11 +732,16 @@ class ExplainableAgent(BlackBoxAgent):
         """
         Present the concept at current walkthrough_index.
 
-        After streaming completes:
-          - If a correct KG concept: run faithfulness check + stream citation block
-          - If the wrong concept (swap): skip citation entirely
-        
-        Change log: 2026-03-31 — added citation block via rag_explainer.py
+        Order (change log: 2026-03-31):
+          1. For correct KG concepts: stream citation header + NL justification FIRST
+          2. Stream concept block
+          3. Run faithfulness check on concept block
+          4. If unfaithful: stream warning line
+
+        Wrong concept (swap): skip citation entirely — no KG node exists for it.
+
+        Change log: 2026-03-31 — citation integrated
+        Change log: 2026-03-31 — reordered: source block before concept text
         """
         concept = self._current_concept()
         if concept is None:
@@ -739,26 +755,62 @@ class ExplainableAgent(BlackBoxAgent):
             f"{swap_block}"
             f"{SINGLE_CONCEPT_PROMPT}\n\n"
             f"─── CONCEPT TO PRESENT NOW ───────────────────────────────────────────\n"
-            f"Present ONLY this concept: **{concept}**\n"
-            f"Do not write an intro paragraph. Start directly with **{concept}**.\n"
+            f"Concept: **{concept}**\n"
+            f"Output ONLY the sub-bullets and closing question for this concept.\n"
+            f"Do NOT repeat the concept name. Do NOT write a rationale sentence.\n"
             f"─────────────────────────────────────────────────────────────────────\n"
         )
 
         task_injection = (
-            f"[Present only the **{concept}** concept now using the exact format. "
-            f"No intro. No other concepts. Start directly with **{concept}**.]"
+            f"[Output only the sub-bullets and closing question for **{concept}**. "
+            f"Do not repeat the concept name or rationale — those are already shown above.]"
         )
-
-        prefix = "Here is how I would structure the analysis:\n\n" if is_first else ""
 
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
-        # ── Stream the concept block ───────────────────────────────────────
-        # Capture full reply for faithfulness check — _stream_with_instruction
-        # yields tokens AND appends to history internally. We need the full
-        # text for the citation pipeline, so we capture while yielding.
-        full_concept_reply = []
+        # ── Step 1: Citation header + concept name + justification as prefix ─
+        # Change log: 2026-03-31 — source-first presentation order.
+        # For correct KG concepts: citation header → concept name → NL justification
+        # all appear BEFORE the model streams sub-bullets.
+        # For wrong concept: skip citation, use simple concept name prefix only.
+        kg_data = None
+        if not is_wrong:
+            try:
+                citation_header, kg_data = build_citation_header(
+                    concept_name = concept,
+                    framework    = self.kg_context["framework"],
+                )
+                # citation_header already contains the 📚 line + justification
+                # We extract the justification and rebuild the prefix in the
+                # correct order: citation → concept name → justification → bullets
+                # build_citation_header returns:
+                #   "---\n📚 **Source:** ...\n{justification}\n\n"
+                # We want:
+                #   "📚 **Source:** ...\n\n**{concept}**\n{justification}\n"
+                lines = citation_header.strip().split("\n")
+                # lines[0] = "📚 **Source:...", lines[1] = justification
+                source_line   = lines[0] if len(lines) > 0 else ""
+                justification = lines[1] if len(lines) > 1 else ""
+                prefix = (
+                    f"{source_line}\n\n"
+                    f"**{concept}**\n"
+                    f"{justification}\n"
+                )
+                if is_first:
+                    prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
+            except Exception as e:
+                logging.warning(f"[CITATION] header failed for concept='{concept}': {e}")
+                prefix = f"**{concept}**\n"
+                if is_first:
+                    prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
+        else:
+            # Wrong concept — no citation, simple name prefix
+            prefix = f"**{concept}**\n"
+            if is_first:
+                prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
 
+        # ── Step 2: Stream concept block ───────────────────────────────────
+        full_concept_reply = []
         for token in self._stream_with_instruction(
             instruction=instruction,
             prefix=prefix,
@@ -769,7 +821,7 @@ class ExplainableAgent(BlackBoxAgent):
             full_concept_reply.append(token)
             yield token
 
-        # ── Swap tracking ──────────────────────────────────────────────────
+        # ── Step 3: Swap tracking ──────────────────────────────────────────
         if is_wrong:
             self.swap_presented = True
             if not already_logged:
@@ -780,23 +832,18 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.info(f"[SWAP] concept re-presented after framework switch — "
                              f"log_presented() skipped (already logged), "
                              f"position={self.swap_position}")
-            # No citation for the wrong concept — skip
+            # No faithfulness check or warning for wrong concept
             return
 
-        # ── Citation block — correct KG concepts only ──────────────────────
-        # Change log: 2026-03-31 — faithfulness check + KG citation
-        # Runs after streaming so it doesn't block the concept text appearing.
-        concept_block = "".join(full_concept_reply)
-        try:
-            citation = build_and_check_citation(
-                concept_name  = concept,
-                framework     = self.kg_context["framework"],
-                concept_block = concept_block,
-            )
-            yield citation
-        except Exception as e:
-            # Citation failure must never break the walkthrough
-            logging.warning(f"[CITATION] failed for concept='{concept}': {e}")
+        # ── Step 4: Faithfulness check → warning if needed ────────────────
+        if kg_data is not None:
+            try:
+                concept_block = "".join(full_concept_reply)
+                warning = check_and_append_warning(concept, concept_block, kg_data)
+                if warning:
+                    yield warning
+            except Exception as e:
+                logging.warning(f"[FAITHFULNESS] warning check failed for '{concept}': {e}")
 
     def _stream_concept_qa(self):
         """
@@ -857,15 +904,38 @@ class ExplainableAgent(BlackBoxAgent):
         yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_summary(self):
-        """Present the full framework summary of non-excluded concepts."""
+        """
+        Present the full framework summary of non-excluded concepts.
+
+        Inclusion logic:
+        - If swap was caught (is_detected=True): exclude wrong concept — user
+          rejected it, so it should not appear in their final framework
+        - If swap was NOT caught: include wrong concept — user accepted it,
+          which is the experimental outcome we are measuring. Removing it
+          silently would invalidate the Agency Delta metric.
+        - Always exclude concepts in self.excluded_concepts (user-initiated
+          removals via override detection)
+
+        Change log: 2026-03-31 — reverted over-aggressive KG filtering.
+          Original fix excluded all non-KG concepts from summary, which broke
+          the experimental design — NPS must appear in summary if not caught.
+        """
         self.walkthrough_done = True
         if self.swap_presented and not self.concept_swap.is_detected:
             logging.info(f"[SWAP] summary reached — swap was presented but not caught")
-        excluded_lower  = [e.lower() for e in self.excluded_concepts]
+
+        wrong          = self.concept_swap.config["wrong_concept"].lower()
+        excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong] \
+                         if self.concept_swap.is_detected else \
+                         [e.lower() for e in self.excluded_concepts]
+
         active_concepts = [
             c for c in self.walkthrough_concepts
             if c.lower() not in excluded_lower
         ]
+
+        logging.info(f"[SUMMARY] active_concepts={active_concepts}")
+
         instruction = (
             f"{SUMMARY_PROMPT}\n\n"
             f"─── CONCEPTS TO INCLUDE (in order) ──────────────────────────────────\n"

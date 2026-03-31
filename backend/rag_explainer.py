@@ -12,7 +12,11 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
 CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── Faithfulness threshold ─────────────────────────────────────────────────
-# Consistent with other classifiers in the system.
+# Kept at 0.85 — classifier must be highly confident before flagging unfaithful.
+# The safe fallback (default faithful=True when confidence < threshold) protects
+# against false positives on legitimate consulting elaboration.
+# Change log: 2026-03-31 — reverted 0.70 experiment; root cause is prompt
+#   over-sensitivity, not threshold. Prompt tightened instead.
 FAITHFULNESS_THRESHOLD = 0.85
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -22,9 +26,8 @@ FAITHFULNESS_THRESHOLD = 0.85
 _FAITHFULNESS_PROMPT = """
 You are a grounding classifier for a knowledge-graph-backed case interview system.
 
-Your job is to check whether an agent's concept block stays within the bounds
-of the provided Knowledge Graph data — or whether it introduces claims, sub-buckets,
-or rationale that go beyond what the KG data supports.
+Your job is to check whether an agent's concept block stays within the analytical
+scope defined by the Knowledge Graph data below.
 
 ─── KNOWLEDGE GRAPH DATA ──────────────────────────────────────────────────
 {kg_data_block}
@@ -34,17 +37,20 @@ or rationale that go beyond what the KG data supports.
 {concept_block}
 ───────────────────────────────────────────────────────────────────────────
 
-Determine:
-- Is every claim in the concept block directly supported by or reasonably
-  inferable from the KG data above?
-- Are there sub-buckets or rationale sentences that introduce new concepts
-  not present in the KG data?
+Mark as NOT faithful if the concept block:
+- Introduces concepts from a completely different framework
+  (e.g. NPS or market sizing in a cost analysis block)
+- Makes claims that clearly contradict the concept's Description or scope
+- Introduces analytical lenses not mentioned in the concept's Description
 
-Rules:
-- Minor elaboration that stays consistent with the KG data is ACCEPTABLE
-- Sub-buckets that name concepts from a completely different framework are NOT acceptable
-- Generic consulting language ("based on best practices") is ACCEPTABLE as framing
-- New quantitative claims or named metrics not in KG data are NOT acceptable
+Mark as FAITHFUL if:
+- The block stays within the analytical scope described in the Description field
+- The block uses case-specific elaboration consistent with the concept's scope
+- The block references sibling or parent concepts in passing — this is normal
+  consulting practice and does NOT indicate unfaithfulness
+- The block uses consulting framing language without introducing new domains
+
+When in doubt, mark as faithful.
 
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"faithful": true or false, "confidence": float between 0.0 and 1.0}}
@@ -84,15 +90,19 @@ def build_kg_data(concept_name: str, framework: str) -> dict:
     Returns a dict with:
       concept     : str
       framework   : str
-      parent      : str | None  — parent concept or framework name in HAS_CHILD tree
-      children    : list[str]   — direct children (empty for leaf concepts)
-      is_branch   : bool        — True if intermediate branch node
-      all_concepts: list[str]   — full leaf concept list for this framework
+      description : str   — concept scope and meaning (from KG description field)
+      parent      : str | None
+      siblings    : list[str] — other children of the same parent
+      children    : list[str]
+      is_branch   : bool
+      all_concepts: list[str]
 
     Change log: 2026-03-31 — initial implementation
     Change log: 2026-03-31 — replaced predecessor/successor with parent/children
-      to reflect real consulting tree structure. predecessor/successor implied
-      linear sequence across parallel branches which is analytically incorrect.
+    Change log: 2026-03-31 — added description and siblings for richer
+      faithfulness classifier grounding. Without descriptions, classifier had
+      insufficient data to distinguish legitimate elaboration from out-of-scope
+      claims, leading to false positives on clean concept blocks.
     """
     try:
         ordered = kg.get_ordered_concepts(framework)
@@ -100,26 +110,33 @@ def build_kg_data(concept_name: str, framework: str) -> dict:
         logging.warning(f"[RAG] build_kg_data failed to fetch ordered concepts: {e}")
         ordered = []
 
-    # Tree-aware fields — only populated for concepts in the KG
-    parent    = None
-    children  = []
-    is_branch = False
+    parent      = None
+    siblings    = []
+    children    = []
+    is_branch   = False
+    description = ""
 
     if concept_name in ordered or _concept_exists_in_kg(concept_name, framework):
         try:
-            parent    = kg.get_concept_parent(concept_name, framework)
-            children  = kg.get_concept_children(concept_name, framework)
-            is_branch = kg.is_branch_node(concept_name, framework)
+            # Single batched KG query — replaces 5 sequential calls
+            # Change log: 2026-03-31 — batched to reduce round-trips
+            full = kg.get_concept_full_data(concept_name, framework)
+            parent      = full["parent"]
+            siblings    = full["siblings"]
+            children    = full["children"]
+            is_branch   = full["is_branch"]
+            description = full["description"]
         except Exception as e:
             logging.warning(f"[RAG] tree data fetch failed for '{concept_name}': {e}")
     else:
-        # Wrong concept (swap) — not in KG
         logging.info(f"[RAG] concept '{concept_name}' not found in KG for framework '{framework}'")
 
     return {
         "concept":      concept_name,
         "framework":    framework,
+        "description":  description,
         "parent":       parent,
+        "siblings":     siblings,
         "children":     children,
         "is_branch":    is_branch,
         "all_concepts": ordered,
@@ -139,19 +156,23 @@ def _format_kg_block(kg_data: dict) -> str:
     Format KG data dict into a readable block for prompt injection.
 
     Change log: 2026-03-31 — replaced predecessor/successor with parent/children
-    to reflect tree structure. Citation NL justification now says
-    "sub-bucket of X" not "follows X", which is analytically accurate.
+    Change log: 2026-03-31 — added description and siblings for richer
+      faithfulness classifier grounding.
     """
-    parent   = kg_data["parent"]   or f"{kg_data['framework']} (top-level bucket)"
-    children = ", ".join(kg_data["children"]) if kg_data["children"] else "None (leaf concept)"
-    all_c    = ", ".join(kg_data["all_concepts"]) if kg_data["all_concepts"] else "N/A"
+    parent    = kg_data["parent"]    or f"{kg_data['framework']} (top-level bucket)"
+    siblings  = ", ".join(kg_data.get("siblings", [])) or "None (no siblings)"
+    children  = ", ".join(kg_data["children"])          or "None (leaf concept)"
+    all_c     = ", ".join(kg_data["all_concepts"])       or "N/A"
     node_type = "Branch node (groups sub-concepts)" if kg_data["is_branch"] else "Leaf concept (analysed directly)"
+    desc      = kg_data.get("description") or "No description available."
 
     return (
         f"Concept     : {kg_data['concept']}\n"
+        f"Description : {desc}\n"
         f"Framework   : {kg_data['framework']}\n"
         f"Node type   : {node_type}\n"
         f"Parent      : {parent}\n"
+        f"Siblings    : {siblings}\n"
         f"Children    : {children}\n"
         f"All concepts: {all_c}"
     )
@@ -261,28 +282,62 @@ def _generate_justification(kg_block: str, concept_name: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Public convenience function — called from explainable_agent.py
+# Public functions — called from explainable_agent.py
 # ══════════════════════════════════════════════════════════════════════════
+
+def build_citation_header(concept_name: str, framework: str) -> tuple[str, dict]:
+    """
+    Build the citation header and NL justification — called BEFORE streaming
+    the concept block so the source appears first in the UI.
+
+    Returns:
+      (citation_header: str, kg_data: dict)
+
+    The kg_data is returned so the caller can pass it directly to
+    check_and_append_warning() after streaming, avoiding a second KG query.
+
+    Change log: 2026-03-31 — added to support source-first presentation order.
+    """
+    kg_data       = build_kg_data(concept_name, framework)
+    entity_id     = f"KG::Concept::{concept_name}"
+    fw_name       = kg_data["framework"]
+    justification = _generate_justification(_format_kg_block(kg_data), concept_name)
+    header = (
+        f"📚 **Source:** `{entity_id}` — {fw_name}\n"
+        f"{justification}\n\n"
+    )
+    return header, kg_data
+
+
+def check_and_append_warning(concept_name: str, concept_block: str, kg_data: dict) -> str | None:
+    """
+    Run faithfulness check on the streamed concept block.
+    Returns the warning string if unfaithful, None if faithful.
+
+    Called AFTER the concept block has finished streaming.
+
+    Change log: 2026-03-31 — added to support source-first presentation order.
+    """
+    result = check_faithfulness(concept_name, concept_block, kg_data)
+    if not result["faithful"]:
+        return "\n⚠️ *I may have added context beyond what the framework specifies — please verify.*"
+    return None
+
 
 def build_and_check_citation(concept_name: str, framework: str, concept_block: str) -> str:
     """
-    Full pipeline: build KG data → check faithfulness → generate citation block.
+    Legacy single-call pipeline — kept for backward compatibility with tests.
+    Returns full citation block (header + justification + optional warning).
 
-    This is the single entry point called from ExplainableAgent._stream_concept().
+    For production use in _stream_concept(), prefer the two-step approach:
+      1. build_citation_header() — before streaming concept
+      2. check_and_append_warning() — after streaming concept
 
-    Args:
-        concept_name  : name of the concept just streamed
-        framework     : current KG framework name
-        concept_block : the full text of the concept block that was streamed
-
-    Returns:
-        Citation block string ready to stream to UI.
-
-    Change log: 2026-03-31 — initial implementation
+    Change log: 2026-03-31 — refactored internals to delegate to new functions.
     """
-    kg_data     = build_kg_data(concept_name, framework)
+    kg_data      = build_kg_data(concept_name, framework)
     faith_result = check_faithfulness(concept_name, concept_block, kg_data)
-    citation    = generate_citation(concept_name, kg_data, faith_result["faithful"])
+    citation     = generate_citation(concept_name, kg_data, faith_result["faithful"])
     return citation
 
 
