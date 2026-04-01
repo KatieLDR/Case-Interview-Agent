@@ -71,6 +71,18 @@ The user has a question about it.
 Answer in 2–3 sentences. Stay grounded in the current case context.
 Plain language only — no jargon, no technical terms.
 
+─── CONDITIONAL FORMAT ───────────────────────────────────────────────────────
+ON SWAP CONCEPT: {on_swap}
+
+IF on_swap is False AND the user is asking WHY this concept matters, WHY it
+is relevant, or WHY it belongs here — structure your answer using this format:
+  "If we don't consider [concept], then [specific consequence for this case].
+   Since [one sentence grounding it in the case], this concept is essential."
+
+IF on_swap is True OR the user is asking anything other than why — answer
+naturally in 2–3 sentences without the if-then format.
+─────────────────────────────────────────────────────────────────────────────
+
 After answering, use the closing specified in CLOSING INSTRUCTION below.
 """
 
@@ -804,8 +816,13 @@ class ExplainableAgent(BlackBoxAgent):
             "*Shall we move on to the next concept?*"
         )
 
+        # Inject on_swap into CONCEPT_QA_PROMPT so counterfactual format
+        # is suppressed when presenting the swap concept.
+        # Change log: 2026-04-01 — counterfactual conditional format added.
+        qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
+
         instruction = (
-            f"{CONCEPT_QA_PROMPT}\n\n"
+            f"{qa_prompt}\n\n"
             f"─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
             f"{closing}\n"
             f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
