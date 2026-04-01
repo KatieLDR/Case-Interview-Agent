@@ -167,6 +167,12 @@ Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
 """
 
 # ── Walkthrough-aware override classifier prompt ───────────────────────────
+# Change log: 2026-04-01 — Option C fix applied.
+# Added {concepts} placeholder injected at call site with self.walkthrough_concepts.
+# Added explicit rule: concept names in discussion context → "none".
+# Added 4 new negative examples covering "let's discuss X", "can we talk about X" etc.
+# Root cause fixed: classifier had no awareness of which names were concepts vs
+# frameworks, so "let's discuss Variable Cost" was firing framework_switch.
 WALKTHROUGH_OVERRIDE_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
 
@@ -180,9 +186,18 @@ If yes, classify the type:
 - "concept_excluded"   : user wants to remove a specific concept
                          ("remove X", "exclude X", "don't include X", "skip X",
                           "I don't want X", "drop X")
-- "framework_switch"   : user wants to use a specific different framework
+- "framework_switch"   : user wants to use a specific different FRAMEWORK
                          ("use Market Entry framework", "switch to profitability")
 - "none"               : not steering the output
+
+─── ACTIVE WALKTHROUGH CONCEPTS ──────────────────────────────────────────────
+{concepts}
+──────────────────────────────────────────────────────────────────────────────
+CRITICAL — if the user mentions any name from the ACTIVE WALKTHROUGH CONCEPTS
+list above in a discussion context ("let's discuss X", "can we talk about X",
+"what about X", "tell me more about X") → classify as "none".
+Only classify as "framework_switch" if the user explicitly names a FRAMEWORK,
+not a concept from the list above.
 
 CRITICAL — these are NOT redo during an active walkthrough:
 - "move on" → none (means advance to next concept)
@@ -193,18 +208,22 @@ CRITICAL — these are NOT redo during an active walkthrough:
 - "proceed" / "got it" → none
 
 Respond ONLY with valid JSON, no explanation, no markdown:
-{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}
+{{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
-Examples:
-- "start over" → {"override": true, "type": "redo", "detail": null, "confidence": 0.99}
-- "restart from scratch" → {"override": true, "type": "redo", "detail": null, "confidence": 0.98}
-- "move on" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "let's move on to the next one" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "next concept please" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "remove Variable Cost per Unit" → {"override": true, "type": "concept_excluded", "detail": "Variable Cost per Unit", "confidence": 0.97}
-- "use Market Entry framework" → {"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}
-- "yes" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "makes sense, continue" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+Examples (assuming concepts include: Volume, Price per Unit, Variable Cost per Unit, Fixed Cost):
+- "start over" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.99}}
+- "restart from scratch" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.98}}
+- "move on" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "let's move on to the next one" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "next concept please" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "remove Variable Cost per Unit" → {{"override": true, "type": "concept_excluded", "detail": "Variable Cost per Unit", "confidence": 0.97}}
+- "use Market Entry framework" → {{"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}}
+- "yes" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "let's discuss Variable Cost per Unit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "can we talk about Price per Unit?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "what about Volume?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "tell me more about Fixed Cost" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 """
 
 
@@ -303,9 +322,6 @@ class ExplainableAgent(BlackBoxAgent):
     def start_main_phase(self) -> str:
         """
         Override to append a summary hint to the phase transition message.
-        The hint tells users they can request a summary at any time —
-        important for UX since the walkthrough can feel open-ended.
-
         Change log: 2026-03-31 — added summary hint.
         """
         base_message = super().start_main_phase()
@@ -323,11 +339,10 @@ class ExplainableAgent(BlackBoxAgent):
         """
         Build ordered concept list for current framework.
         Inserts wrong concept at len(base) // 2 (true midpoint).
-        Stores computed position in self.swap_position for invariant checks.
         """
         base     = list(self.kg_context["concepts"])
         wrong    = self.concept_swap.config["wrong_concept"]
-        position = len(base) // 2   # true midpoint — change log: 2026-03-29
+        position = len(base) // 2
         base.insert(position, wrong)
         self.swap_position = position
         logging.info(f"[WALKTHROUGH] built={base}, swap_position={position}, "
@@ -335,24 +350,12 @@ class ExplainableAgent(BlackBoxAgent):
         return base
 
     def _rebuild_walkthrough_on_framework_switch(self, from_framework: str = "") -> None:
-        """
-        Called when user switches framework mid-walkthrough.
-        Rebuilds concept list with new KG context.
-        Logs framework_switched event to Firestore for research analysis.
-
-        Swap re-injection logic:
-          - already caught → don't re-inject (user demonstrated detection)
-          - not yet caught → re-inject at new midpoint (reset swap_presented)
-        Walkthrough restarts from index 0. History preserved so model
-        remembers what was already discussed.
-        """
         to_framework = self.kg_context["framework"]
 
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_index    = 0
         self.excluded_concepts    = []
 
-        # Log framework switch as agency signal — separate from swap detection
         log_framework_switched(
             session_id     = self.session_id,
             from_framework = from_framework,
@@ -373,11 +376,6 @@ class ExplainableAgent(BlackBoxAgent):
                          f"framework={to_framework}")
 
     def _current_concept(self) -> str | None:
-        """
-        Return concept at current index, skipping excluded ones.
-        Advances index past excluded concepts automatically.
-        Returns None when all concepts are done.
-        """
         excluded_lower = [e.lower() for e in self.excluded_concepts]
         while self.walkthrough_index < len(self.walkthrough_concepts):
             concept = self.walkthrough_concepts[self.walkthrough_index]
@@ -391,7 +389,6 @@ class ExplainableAgent(BlackBoxAgent):
         return concept.lower() == self.concept_swap.config["wrong_concept"].lower()
 
     def _is_ready_to_advance(self, user_input: str) -> bool:
-        """Classify whether user is satisfied and ready for next concept."""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -413,15 +410,10 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
 
     def _fetch_kg_context_by_framework(self, framework_name: str) -> dict | None:
-        """
-        Fetch KG context by framework name directly (not via case_type).
-        Used when user specifies a framework explicitly.
-        """
         try:
             concepts = kg.get_ordered_concepts(framework_name)
             if not concepts:
                 return None
-            # Find case_type for this framework
             all_fw = kg.get_all_frameworks()
             case_type = next(
                 (f["case_type"] for f in all_fw if f["framework"] == framework_name),
@@ -433,23 +425,7 @@ class ExplainableAgent(BlackBoxAgent):
             return None
 
     def _resolve_framework(self, user_mention: str) -> list[str]:
-        """
-        Map user's free-text framework mention to KG framework name(s).
-
-        Fetches available frameworks live from KG (name + case_type + description)
-        so the list automatically reflects any KG updates.
-
-        Returns:
-          [name]       — single unambiguous match → switch silently
-          [n1, n2]     — multiple plausible matches → ask user to pick
-          []           — no match → tell user what's available
-
-        Change log: 2026-03-30 — replaces _update_kg_if_framework_mentioned()
-          keyword map which failed on plain words like "pricing".
-        """
         try:
-            # Use session-level cache — frameworks don't change within a session.
-            # Change log: 2026-03-30 — added cache to avoid repeated KG queries
             if not hasattr(self, "_kg_all_frameworks") or not self._kg_all_frameworks:
                 self._kg_all_frameworks = kg.get_all_frameworks()
                 logging.debug(f"[KG CACHE] loaded {len(self._kg_all_frameworks)} frameworks")
@@ -458,7 +434,6 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.warning("[RESOLVER] no frameworks returned from KG")
                 return []
 
-            # Build framework list for prompt
             fw_list = "\n".join(
                 f"- {f['framework']} (case: {f['case_type']}): {f['description']}"
                 for f in frameworks
@@ -480,7 +455,6 @@ class ExplainableAgent(BlackBoxAgent):
             if not isinstance(matches, list):
                 matches = []
 
-            # Filter to only valid KG framework names
             valid_names = {f["framework"] for f in frameworks}
             matches = [m for m in matches if m in valid_names]
 
@@ -492,7 +466,6 @@ class ExplainableAgent(BlackBoxAgent):
             return []
 
     def _format_framework_list(self) -> str:
-        """Return available KG frameworks as a readable list for user messages."""
         try:
             frameworks = kg.get_all_frameworks()
             return ", ".join(f["framework"] for f in frameworks)
@@ -501,33 +474,29 @@ class ExplainableAgent(BlackBoxAgent):
 
     # ══════════════════════════════════════════════════════════════════════
     # Override detection — walkthrough-aware
+    # Change log: 2026-04-01 — Option C fix:
+    #   inject self.walkthrough_concepts into WALKTHROUGH_OVERRIDE_PROMPT
+    #   via .format(concepts=concepts_str) so classifier can distinguish
+    #   concept names from framework names.
     # ══════════════════════════════════════════════════════════════════════
 
     def _detect_override(self, user_input: str) -> dict | None:
-        """
-        Overrides BlackBoxAgent._detect_override() to use a walkthrough-aware
-        prompt when the walkthrough is active.
-
-        During active walkthrough: uses WALKTHROUGH_OVERRIDE_PROMPT which
-        explicitly excludes advance signals ("move on", "next", "yes") from
-        being classified as redo. This prevents advance signals from colliding
-        with redo detection.
-
-        Before walkthrough / after summary: falls back to BlackBoxAgent's
-        inherited _detect_override() via super() for standard behaviour.
-        """
         import json as _json
         from backend.black_box_agent import OVERRIDE_THRESHOLD as _THRESH
 
         if not self.walkthrough_active or self.walkthrough_done:
-            # Outside walkthrough — use inherited classifier unchanged
             return super()._detect_override(user_input)
 
-        # Inside walkthrough — use context-aware prompt
+        # Inject active concept list so classifier distinguishes
+        # concept names from framework names — Option C fix
+        concepts_str = ", ".join(self.walkthrough_concepts) \
+                       if self.walkthrough_concepts else "none"
+        prompt = WALKTHROUGH_OVERRIDE_PROMPT.format(concepts=concepts_str)
+
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
-                contents=f"{WALKTHROUGH_OVERRIDE_PROMPT}\n\nUser message: \"{user_input}\"",
+                contents=f"{prompt}\n\nUser message: \"{user_input}\"",
             )
             parsed = _json.loads(self._strip_fences(response.text))
             if (parsed.get("override", False) and
@@ -731,17 +700,7 @@ class ExplainableAgent(BlackBoxAgent):
     def _stream_concept(self, is_first: bool):
         """
         Present the concept at current walkthrough_index.
-
-        Order (change log: 2026-03-31):
-          1. For correct KG concepts: stream citation header + NL justification FIRST
-          2. Stream concept block
-          3. Run faithfulness check on concept block
-          4. If unfaithful: stream warning line
-
-        Wrong concept (swap): skip citation entirely — no KG node exists for it.
-
-        Change log: 2026-03-31 — citation integrated
-        Change log: 2026-03-31 — reordered: source block before concept text
+        Change log: 2026-03-31 — citation integrated, source block before concept text.
         """
         concept = self._current_concept()
         if concept is None:
@@ -769,10 +728,6 @@ class ExplainableAgent(BlackBoxAgent):
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
         # ── Step 1: Citation header + concept name + justification as prefix ─
-        # Change log: 2026-03-31 — source-first presentation order.
-        # For correct KG concepts: citation header → concept name → NL justification
-        # all appear BEFORE the model streams sub-bullets.
-        # For wrong concept: skip citation, use simple concept name prefix only.
         kg_data = None
         if not is_wrong:
             try:
@@ -780,15 +735,7 @@ class ExplainableAgent(BlackBoxAgent):
                     concept_name = concept,
                     framework    = self.kg_context["framework"],
                 )
-                # citation_header already contains the 📚 line + justification
-                # We extract the justification and rebuild the prefix in the
-                # correct order: citation → concept name → justification → bullets
-                # build_citation_header returns:
-                #   "---\n📚 **Source:** ...\n{justification}\n\n"
-                # We want:
-                #   "📚 **Source:** ...\n\n**{concept}**\n{justification}\n"
-                lines = citation_header.strip().split("\n")
-                # lines[0] = "📚 **Source:...", lines[1] = justification
+                lines         = citation_header.strip().split("\n")
                 source_line   = lines[0] if len(lines) > 0 else ""
                 justification = lines[1] if len(lines) > 1 else ""
                 prefix = (
@@ -804,7 +751,6 @@ class ExplainableAgent(BlackBoxAgent):
                 if is_first:
                     prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
         else:
-            # Wrong concept — no citation, simple name prefix
             prefix = f"**{concept}**\n"
             if is_first:
                 prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
@@ -832,7 +778,6 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.info(f"[SWAP] concept re-presented after framework switch — "
                              f"log_presented() skipped (already logged), "
                              f"position={self.swap_position}")
-            # No faithfulness check or warning for wrong concept
             return
 
         # ── Step 4: Faithfulness check → warning if needed ────────────────
@@ -846,11 +791,6 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.warning(f"[FAITHFULNESS] warning check failed for '{concept}': {e}")
 
     def _stream_concept_qa(self):
-        """
-        Answer a question about current concept, re-ask to advance.
-        Special case: if we are on the swap concept turn, end with an
-        explicit keep-or-remove prompt to force a clear user decision.
-        """
         concept    = self._current_concept() or "the current concept"
         on_swap    = (self.walkthrough_index == self.swap_position
                       and self.swap_presented
@@ -883,11 +823,8 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _stream_swap_caught(self):
         """
-        Acknowledge swap catch, explain, skip, re-ask to advance.
-
         Change log: 2026-03-31 — replaced hardcoded framework strings with
         dynamic context from self.kg_context and concept_swap.config.
-        Hardcoded strings broke if user switched framework mid-walkthrough.
         """
         wrong       = self.concept_swap.config["wrong_concept"]
         wrong_fw    = self.concept_swap.config["wrong_framework"]
@@ -905,20 +842,9 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _stream_summary(self):
         """
-        Present the full framework summary of non-excluded concepts.
-
-        Inclusion logic:
-        - If swap was caught (is_detected=True): exclude wrong concept — user
-          rejected it, so it should not appear in their final framework
-        - If swap was NOT caught: include wrong concept — user accepted it,
-          which is the experimental outcome we are measuring. Removing it
-          silently would invalidate the Agency Delta metric.
-        - Always exclude concepts in self.excluded_concepts (user-initiated
-          removals via override detection)
-
-        Change log: 2026-03-31 — reverted over-aggressive KG filtering.
-          Original fix excluded all non-KG concepts from summary, which broke
-          the experimental design — NPS must appear in summary if not caught.
+        Change log: 2026-03-31 — corrected swap inclusion logic.
+        If swap caught: exclude from summary.
+        If swap not caught: include (experimental outcome — do not remove silently).
         """
         self.walkthrough_done = True
         if self.swap_presented and not self.concept_swap.is_detected:
@@ -946,7 +872,6 @@ class ExplainableAgent(BlackBoxAgent):
         yield from self._stream_with_instruction(instruction=instruction, store_answer=True)
 
     def _stream_freeform(self, cs_detected: bool):
-        """Post-summary free Q&A."""
         concepts_str = " → ".join(self.kg_context["concepts"])
         instruction  = (
             f"─── FRAMEWORK CONTEXT ────────────────────────────────────────────────\n"
@@ -973,16 +898,6 @@ class ExplainableAgent(BlackBoxAgent):
         track_swap: bool = False,
         store_answer: bool = False,
     ):
-        """
-        Stream a Gemini response using the given system instruction.
-
-        task_injection: if provided, appended as a user-turn into a temporary
-        copy of history before streaming. This forces the model to follow the
-        exact task without relying on the system prompt alone. The injection
-        is NOT saved to self.history — it is ephemeral.
-
-        Handles history append, logging, swap tracking, and answer storage.
-        """
         self._pending = True
         full_reply    = []
 
@@ -1030,12 +945,10 @@ class ExplainableAgent(BlackBoxAgent):
             self._pending = False
 
     # ══════════════════════════════════════════════════════════════════════
-    # _build_system_prompt — minimal fallback used by inherited send_message
+    # Fallback + session
     # ══════════════════════════════════════════════════════════════════════
 
     def end_session(self) -> None:
-        # Override: skip Direction C on summary text (false positives).
-        # Change log: 2026-03-30 — fix end_session false positive.
         from backend.logger import end_session as _end_session
         try:
             from firebase_admin import firestore as fs
