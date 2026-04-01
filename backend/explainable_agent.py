@@ -10,7 +10,7 @@ from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
-    log_framework_switched,
+    log_framework_switched, log_concept_added,
 )
 from backend import knowledge_graph as kg
 from backend.rag_explainer import build_citation_header, check_and_append_warning, build_and_check_citation
@@ -70,6 +70,14 @@ The user has a question about it.
 
 Answer in 2–3 sentences. Stay grounded in the current case context.
 Plain language only — no jargon, no technical terms.
+
+─── STRICT RULE ─────────────────────────────────────────────────────────────
+Answer ONLY about the concept named in CURRENT CONCEPT below.
+If the user mentions a different concept by name:
+- Do NOT answer about it now
+- Briefly acknowledge it in one clause ("we can look at that next")
+- Then answer about the CURRENT CONCEPT only
+─────────────────────────────────────────────────────────────────────────────
 
 ─── CONDITIONAL FORMAT ───────────────────────────────────────────────────────
 ON SWAP CONCEPT: {on_swap}
@@ -198,6 +206,9 @@ If yes, classify the type:
 - "concept_excluded"   : user wants to remove a specific concept
                          ("remove X", "exclude X", "don't include X", "skip X",
                           "I don't want X", "drop X")
+- "concept_added"      : user wants to ADD a new concept to the framework
+                         ("what about X", "can we also consider X", "add X",
+                          "include X", "how about X", "what if we add X")
 - "framework_switch"   : user wants to use a specific different FRAMEWORK
                          ("use Market Entry framework", "switch to profitability")
 - "none"               : not steering the output
@@ -220,7 +231,7 @@ CRITICAL — these are NOT redo during an active walkthrough:
 - "proceed" / "got it" → none
 
 Respond ONLY with valid JSON, no explanation, no markdown:
-{{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
+{{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
 Examples (assuming concepts include: Volume, Price per Unit, Variable Cost per Unit, Fixed Cost):
 - "start over" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.99}}
@@ -229,6 +240,9 @@ Examples (assuming concepts include: Volume, Price per Unit, Variable Cost per U
 - "let's move on to the next one" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "next concept please" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "remove Variable Cost per Unit" → {{"override": true, "type": "concept_excluded", "detail": "Variable Cost per Unit", "confidence": 0.97}}
+- "what about Market Demand?" → {{"override": true, "type": "concept_added", "detail": "Market Demand", "confidence": 0.96}}
+- "can we also consider Risk Analysis?" → {{"override": true, "type": "concept_added", "detail": "Risk Analysis", "confidence": 0.95}}
+- "how about adding Competitor Analysis?" → {{"override": true, "type": "concept_added", "detail": "Competitor Analysis", "confidence": 0.96}}
 - "use Market Entry framework" → {{"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}}
 - "yes" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
@@ -289,17 +303,21 @@ class ExplainableAgent(BlackBoxAgent):
         }
 
         # ── Walkthrough state ──────────────────────────────────────────────
-        self.walkthrough_concepts = []    # ordered list built on first framework request
-        self.walkthrough_index    = 0     # pointer to current concept
-        self.walkthrough_active   = False # True after first concept shown
-        self.walkthrough_done     = False # True after summary shown
-        self.excluded_concepts    = []    # removed by user override or swap detection
-        # swap_presented: True once the wrong concept block has been streamed to user.
-        # Detection only activates after this is True.
+        self.walkthrough_concepts = []
+        self.walkthrough_index    = 0
+        self.walkthrough_active   = False
+        self.walkthrough_done     = False
+        self.excluded_concepts    = []
         self.swap_presented       = False
-        # swap_position: computed as len(concepts) // 2 (true midpoint) when walkthrough is built.
-        # Recomputed on framework switch. Stored for invariant check and semantic logs.
         self.swap_position        = 0
+
+        # ── Pending confirmation states ────────────────────────────────────
+        # Only one can be active at a time. New override while pending → ignored.
+        # None = no pending action. String = name of concept/framework awaiting
+        # user confirmation before committing.
+        # Change log: 2026-04-01 — added for pushback + counterfactual feature.
+        self.pending_excl = None   # concept name awaiting removal confirmation
+        self.pending_fw   = None   # framework name awaiting switch confirmation
 
         # ── Conversation history ───────────────────────────────────────────
         self.history = [
@@ -531,6 +549,19 @@ class ExplainableAgent(BlackBoxAgent):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
+        # ── 0. Resolve pending state ───────────────────────────────────────
+        # Pending takes priority. If pending_excl or pending_fw is active,
+        # check confirmation/decline. If neither, route to _stream_pushback().
+        # New overrides ignored while pending is active.
+        # Change log: 2026-04-01 — added for pushback + counterfactual feature.
+        if self.pending_excl is not None or self.pending_fw is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(
+                types.Content(role="user", parts=[types.Part(text=user_input)])
+            )
+            yield from self._resolve_pending(user_input)
+            return
+
         # ── 1. Swap detection ──────────────────────────────────────────────
         cs_detected = False
         if self.swap_presented:
@@ -579,6 +610,8 @@ class ExplainableAgent(BlackBoxAgent):
                 self.excluded_concepts    = []
                 self.swap_presented       = False
                 self.swap_position        = 0
+                self.pending_excl         = None
+                self.pending_fw           = None
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
@@ -591,35 +624,35 @@ class ExplainableAgent(BlackBoxAgent):
                 else:
                     matches = self._resolve_framework(override["detail"])
                     if len(matches) == 1:
-                        new_framework = matches[0]
-                        new_context   = self._fetch_kg_context_by_framework(new_framework)
-                        if new_context:
-                            from_fw = self.kg_context["framework"]
-                            self.kg_context = new_context
-                            if self.walkthrough_active:
-                                self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
-                                logging.info(f"[FRAMEWORK SWITCH] mid-walkthrough → {new_framework}")
-                            else:
-                                log_framework_switched(
-                                    session_id     = self.session_id,
-                                    from_framework = from_fw,
-                                    to_framework   = new_framework,
-                                    switch_index   = 0,
-                                )
-                                logging.info(f"[FRAMEWORK SWITCH] pre-walkthrough → {new_framework}")
+                        # Set pending — pushback before committing switch
+                        self.pending_fw = matches[0]
+                        override = {"type": "pending_fw_set"}
+                        logging.info(f"[FRAMEWORK SWITCH] pending set → {self.pending_fw}")
                     elif len(matches) >= 2:
                         override = {"type": "framework_clarification", "matches": matches,
                                     "detail": override["detail"]}
                         logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
                     else:
                         override = {"type": "framework_not_found", "detail": override["detail"]}
-                        logging.info(f"[FRAMEWORK SWITCH] no match for '{override['detail']}'")
+                        logging.info("[FRAMEWORK SWITCH] no match for: " + str(override.get("detail")))
 
-            elif override["type"] == "concept_excluded" and override.get("detail"):
-                excl = override["detail"]
-                if excl not in self.excluded_concepts:
-                    self.excluded_concepts.append(excl)
-                logging.info(f"[OVERRIDE] concept excluded: {excl}")
+            elif override["type"] == "concept_excluded":
+                # Infer current concept if user says "remove this" without naming it
+                # Change log: 2026-04-01 — fallback to _current_concept() when detail is None
+                excl = override.get("detail") or self._current_concept()
+                if excl:
+                    self.pending_excl = excl
+                    override = {"type": "pending_excl_set"}
+                    logging.info("[OVERRIDE] concept exclusion pending: " + excl)
+
+            elif override["type"] == "concept_added" and override.get("detail"):
+                # Insert immediately — no confirmation needed for additive changes
+                new_concept = override["detail"]
+                insert_at   = self.walkthrough_index + 1
+                self.walkthrough_concepts.insert(insert_at, new_concept)
+                log_concept_added(self.session_id, new_concept)
+                logging.info(f"[CONCEPT ADDED] '{new_concept}' inserted at index={insert_at}")
+                # _stream_concept_qa handles the acknowledgement this turn
 
         # ── 3. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -646,7 +679,16 @@ class ExplainableAgent(BlackBoxAgent):
         elif self.walkthrough_done:
             yield from self._stream_freeform(cs_detected)
 
+        elif override and override["type"] == "pending_excl_set":
+            # Concept exclusion set to pending — stream pushback this turn
+            yield from self._stream_pushback("concept", self.pending_excl)
+
+        elif override and override["type"] == "pending_fw_set":
+            # Framework switch set to pending — stream pushback this turn
+            yield from self._stream_pushback("framework", self.pending_fw)
+
         elif override and override["type"] == "framework_switch":
+            # Kept for pre-walkthrough switches (no pending needed before walkthrough starts)
             yield from self._stream_concept(is_first=True)
 
         elif override and override["type"] == "framework_clarification":
@@ -708,6 +750,114 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Streaming sub-methods
     # ══════════════════════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Pending resolution + pushback
+    # Change log: 2026-04-01 — added for pushback + counterfactual feature.
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _resolve_pending(self, user_input: str):
+        """
+        Called when pending_excl or pending_fw is active.
+        Confirmation: commit + clear + continue.
+        Not confirmed: keep pending alive, re-stream pushback.
+        Change log: 2026-04-01
+        """
+        confirmed = self._is_ready_to_advance(user_input)
+
+        if self.pending_excl is not None:
+            excl = self.pending_excl
+            if confirmed:
+                if excl not in self.excluded_concepts:
+                    self.excluded_concepts.append(excl)
+                self.pending_excl = None
+                log_memory_override(
+                    self.session_id,
+                    old_context="pending_excl: " + excl,
+                    new_context="confirmed exclusion: " + excl,
+                )
+                logging.info("[PENDING] exclusion confirmed: " + excl)
+                yield "Understood — removing **" + excl + "** from the framework. Let's continue.\n\n"
+                concept = self._current_concept()
+                if concept is None:
+                    yield from self._stream_summary()
+                else:
+                    yield from self._stream_concept(is_first=False)
+            else:
+                logging.info("[PENDING] exclusion not confirmed — continuing: " + excl)
+                yield from self._stream_pushback("concept", excl)
+
+        elif self.pending_fw is not None:
+            fw = self.pending_fw
+            if confirmed:
+                new_context = self._fetch_kg_context_by_framework(fw)
+                if new_context:
+                    from_fw = self.kg_context["framework"]
+                    self.kg_context = new_context
+                    self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
+                self.pending_fw = None
+                log_memory_override(
+                    self.session_id,
+                    old_context="pending_fw: " + fw,
+                    new_context="confirmed switch: " + fw,
+                )
+                logging.info("[PENDING] framework switch confirmed: " + fw)
+                yield "Switching to **" + fw + "**. Let's start from the beginning.\n\n"
+                yield from self._stream_concept(is_first=True)
+            else:
+                logging.info("[PENDING] framework switch not confirmed — continuing: " + fw)
+                yield from self._stream_pushback("framework", fw)
+
+    def _stream_pushback(self, pending_type: str, detail: str):
+        """
+        Counterfactual pushback for concept exclusion or framework switch.
+        Keeps pending alive — user can discuss before deciding.
+        Change log: 2026-04-01
+        """
+        concept = self._current_concept() or "the current concept"
+
+        if pending_type == "concept":
+            instruction = (
+                "You are a strategic consultant. The user wants to remove "
+                "**" + detail + "** from the framework. "
+                "Push back using counterfactual reasoning.\n\n"
+                "─── RESPONSE FORMAT ──────────────────────────────────────────────────────\n"
+                "1. One sentence: If we remove " + detail + ", then [consequence].\n"
+                "2. One sentence grounding it in the case context.\n"
+                "3. End with: Would you still like to remove it?\n\n"
+                "─── RULES ──────────────────────────────────────────────────────────────────\n"
+                "- Consulting reasoning only\n"
+                "- Soft tone — consequence as information, not command\n"
+                "- Do NOT refuse the removal\n"
+                "- Do NOT present any other concept\n"
+                "─── CONTEXT ──────────────────────────────────────────────────────────────────\n"
+                "Concept questioned: **" + detail + "**\n"
+                "Current concept: **" + concept + "**\n"
+                "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
+                "─────────────────────────────────────────────────────────────────────\n"
+            )
+        else:
+            instruction = (
+                "You are a strategic consultant. The user wants to switch to "
+                "**" + detail + "** framework. "
+                "Push back using counterfactual reasoning.\n\n"
+                "─── RESPONSE FORMAT ──────────────────────────────────────────────────────\n"
+                "1. One sentence: If we switch to " + detail + ", we would [consequence].\n"
+                "2. One sentence: why current framework fits this case.\n"
+                "3. End with: Would you still like to switch?\n\n"
+                "─── RULES ──────────────────────────────────────────────────────────────────\n"
+                "- Consulting reasoning only\n"
+                "- Soft tone — consequence as information, not command\n"
+                "- Do NOT refuse the switch\n"
+                "- Do NOT present any concept yet\n"
+                "─── CONTEXT ──────────────────────────────────────────────────────────────────\n"
+                "Proposed: **" + detail + "**\n"
+                "Current: **" + self.kg_context["framework"] + "**\n"
+                "Case: " + self.kg_context["case_type"] + "\n"
+                "─────────────────────────────────────────────────────────────────────\n"
+            )
+
+        yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_concept(self, is_first: bool):
         """

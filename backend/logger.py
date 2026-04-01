@@ -20,7 +20,6 @@ db = firestore.client()
 
 # ── Session ────────────────────────────────────────────────────────────────
 def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> str:
-    """Create a new session document and return the session_id."""
     session_id = str(uuid.uuid4())
     db.collection("sessions").document(session_id).set({
         "user_id": user_id,
@@ -43,14 +42,12 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
 
 
 def save_original_case(session_id: str, case_text: str) -> None:
-    """Store the original case problem on the session document."""
     db.collection("sessions").document(session_id).update({
         "original_case": case_text,
     })
 
 
 def get_original_case(session_id: str) -> str | None:
-    """Fetch the original case from Firestore."""
     try:
         doc = db.collection("sessions").document(session_id).get()
         if doc.exists:
@@ -61,7 +58,6 @@ def get_original_case(session_id: str) -> str | None:
 
 
 def end_session(session_id: str) -> None:
-    """Stamp the session with an end time."""
     try:
         db.collection("sessions").document(session_id).update({
             "ended_at": datetime.now(timezone.utc),
@@ -82,17 +78,12 @@ _COUNTER_MAP = {
 
 # ── Event helpers ──────────────────────────────────────────────────────────
 def _log_event(session_id: str, event_type: str, payload: dict) -> None:
-    """Generic event logger — writes event and increments session counter."""
     session_ref = db.collection("sessions").document(session_id)
-
-    # Write event to subcollection
     session_ref.collection("events").add({
         "type": event_type,
         "timestamp": datetime.now(timezone.utc),
         **payload,
     })
-
-    # Increment counter on session document if applicable
     counter_field = _COUNTER_MAP.get(event_type)
     if counter_field:
         session_ref.update({
@@ -101,22 +92,16 @@ def _log_event(session_id: str, event_type: str, payload: dict) -> None:
 
 
 def update_answer(session_id: str, answer: str) -> None:
-    """Store answer in Firestore.
-    First call sets both original_answer and current_answer.
-    Subsequent calls overwrite current_answer only.
-    Override count is managed separately via log_memory_override()."""
     session_ref = db.collection("sessions").document(session_id)
     try:
         doc = session_ref.get()
         is_first_write = doc.to_dict().get("original_answer") is None
-
         update_payload = {
             "current_answer": answer,
             "count_answer_updates": firestore.Increment(1),
         }
         if is_first_write:
             update_payload["original_answer"] = answer
-
         session_ref.update(update_payload)
         print(f"[ANSWER] stored, first_write={is_first_write}")
     except Exception as e:
@@ -125,7 +110,6 @@ def update_answer(session_id: str, answer: str) -> None:
 
 # ── Public logging methods ─────────────────────────────────────────────────
 def log_concept_swap_presented(session_id: str) -> None:
-    """Mark that the concept swap was presented to the user."""
     db.collection("sessions").document(session_id).update({
         "concept_swap_presented": True,
     })
@@ -133,11 +117,11 @@ def log_concept_swap_presented(session_id: str) -> None:
 
 
 def log_concept_swap_detected(session_id: str) -> None:
-    """Mark that the user detected the concept swap."""
     db.collection("sessions").document(session_id).update({
         "concept_swap_detected": True,
     })
     _log_event(session_id, "concept_swap_detected", {})
+
 
 def log_framework_switched(
     session_id: str,
@@ -145,18 +129,6 @@ def log_framework_switched(
     to_framework: str,
     switch_index: int,
 ) -> None:
-    """
-    Log a framework switch event to Firestore.
- 
-    Sets framework_switched=True on the session document and logs
-    the event with full context for research analysis.
- 
-    Args:
-        session_id:     current session
-        from_framework: framework before switch
-        to_framework:   framework after switch
-        switch_index:   walkthrough_index when switch occurred
-    """
     try:
         db.collection("sessions").document(session_id).update({
             "framework_switched": True,
@@ -171,6 +143,36 @@ def log_framework_switched(
     except Exception as e:
         print(f"[FRAMEWORK SWITCH] failed to log: {e}")
 
+
+# Change log: 2026-04-01 — added log_concept_added().
+# Logs a user-initiated concept addition as both a research event and
+# an override — increments count_memory_overrides since adding a concept
+# is a user override of the original framework structure.
+def log_concept_added(session_id: str, concept_name: str) -> None:
+    """
+    Log a user-initiated concept addition to Firestore.
+
+    Increments count_memory_overrides (via _COUNTER_MAP on memory_override
+    event type) since concept addition is an override of the original
+    framework structure — consistent with concept_excluded and framework_switch.
+
+    Also writes a dedicated concept_added event for granular research analysis.
+    """
+    try:
+        # Log as memory_override to increment count_memory_overrides
+        _log_event(session_id, "memory_override", {
+            "old_context": "framework without user concept",
+            "new_context": f"user added: {concept_name}",
+        })
+        # Log dedicated event for granular analysis
+        _log_event(session_id, "concept_added", {
+            "concept_name": concept_name,
+        })
+        print(f"[CONCEPT ADDED] logged: '{concept_name}' for session={session_id}")
+    except Exception as e:
+        print(f"[CONCEPT ADDED] failed to log: {e}")
+
+
 def log_user_message(session_id: str, message: str) -> None:
     _log_event(session_id, "user_message", {"message": message})
 
@@ -180,12 +182,10 @@ def log_agent_response(session_id: str, response: str) -> None:
 
 
 def log_interruption(session_id: str, context: str = "") -> None:
-    """Call this when user sends a new message before agent finishes."""
     _log_event(session_id, "interruption", {"context": context})
 
 
 def log_memory_override(session_id: str, old_context: str, new_context: str) -> None:
-    """Call this when user resets or corrects the conversation context."""
     _log_event(session_id, "memory_override", {
         "old_context": old_context,
         "new_context": new_context,
