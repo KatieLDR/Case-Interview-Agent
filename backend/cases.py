@@ -193,22 +193,85 @@ forward.""",
     },
 
     "hitl": {
-        "prompt": """A large, multinational CPG company is considering a large investment into \
-packaging robots, which could be put to work in three key operational \
-facilities in the United States. If they move forward, this would represent \
-the largest investment in packaging automation by 2X and the senior staff is \
-divided over the investment. A competitor recently invested in similar \
-technology nine months ago and has suffered an embarrassing packaging related \
-recall (e.g., incorrectly sealed packages led to items to spoiling on store \
-shelves). The three facilities in question are located in small, mid-western \
-cities and the client's facilities employ roughly 25% of the labor force in \
-each respective city.
+        # Change log: 2026-04-02 — replaced CPG Robots case with Rainbow & Gumdrops M&A
+        "prompt": """A global foods maker and marketer, which is based in the US, is contemplating a strategic acquisition of a smaller British confectionery company to bolster its presence in emerging markets and establish a footprint in additional businesses, such as gum and candy. They've hired our team to help them evaluate this potential acquisition and help the senior leadership make a decision. Which key pieces of analysis would you look at to guide them?""",
 
-Your Partner has asked that you take the lead on drawing up a framework to \
-reach a decision. Which key issues would you highlight?""",
-
-        # TODO: add clarification facts for hitl case
-        "clarification_facts": {},
+        "clarification_facts": {
+            "objective": (
+                "The client's primary objective is to diversify their product portfolio and "
+                "establish a stronger presence in the confectionery market. They also see "
+                "potential in leveraging the British company's established brand and distribution "
+                "channels to enter new markets, particularly in Asia and Africa."
+            ),
+            "target_profile": (
+                "The British confectionery company is a mid-sized firm with annual sales of "
+                "around $500 million. They have been profitable for the past five years, with "
+                "a net income margin of around 10%. Their key products include gum, candy, and "
+                "other confectionery items. Growth has been limited by a lack of resources to "
+                "expand into new markets."
+            ),
+            "target_valuation": (
+                "The British confectionery company's valuation is currently estimated at around "
+                "12 times EBITDA."
+            ),
+            "market_size": (
+                "The confectionery market in the emerging markets the client is looking to enter "
+                "is highly competitive but growing rapidly, with a compound annual growth rate "
+                "of 7% over the past five years."
+            ),
+            "competition": (
+                "The market is highly competitive, with several large multinational firms and a "
+                "number of local players. The British confectionery company has a strong brand "
+                "and a loyal customer base."
+            ),
+            "synergies": (
+                "The client sees potential in leveraging the British company's established brand "
+                "and distribution channels to enter new markets, particularly in Asia and Africa. "
+                "Distribution and marketing synergies are the primary value drivers anticipated."
+            ),
+            "integration_risk": (
+                "The client has a mixed track record with acquisitions. They have successfully "
+                "integrated several smaller firms, but also had a couple of acquisitions that "
+                "did not meet expectations due to cultural clashes and integration challenges."
+            ),
+            "client_capabilities": (
+                "The client currently has a small presence in the confectionery market, primarily "
+                "through a line of chocolate bars that account for about 5% of their total sales. "
+                "They do not currently have strong on-the-ground capability in Asia or Africa."
+            ),
+            "deal_structure": (
+                "The client is considering a full acquisition of the British confectionery company "
+                "as part of their strategic growth plan, looking to fully integrate the company "
+                "into their operations."
+            ),
+            "regulatory": (
+                "The regulatory environment in the UK is relatively straightforward. However, the "
+                "emerging markets the client is looking to enter have more complex and unpredictable "
+                "regulatory environments, with potential foreign ownership restrictions and "
+                "antitrust concerns."
+            ),
+            "target_willingness": (
+                "The British confectionery company has not publicly disclosed their willingness "
+                "to sell at this time."
+            ),
+            "competing_bidders": (
+                "The confectionery company does not currently have any known competing bidders "
+                "for acquisition."
+            ),
+            "ip_patents": (
+                "The British confectionery company does not have any significant intellectual "
+                "property, proprietary recipes, or patents that would be considered a key asset "
+                "in this potential acquisition."
+            ),
+            "exit_option": (
+                "The client has not specifically mentioned any plans for a clear exit option "
+                "such as divestment or spin-off for this potential acquisition."
+            ),
+            "financing": (
+                "The client is considering financing options to minimise the impact on their "
+                "cash flow."
+            ),
+        },
     },
 
     # ── Backup / unused cases ──────────────────────────────────────────────
@@ -227,6 +290,25 @@ or busboys — and sell their dishes online only.
 One of the leading food delivery companies has engaged your team to help build \
 an approach to identifying opportunities for potential virtual restaurants, \
 which they can encourage restaurateurs to begin and operate.""",
+
+        "clarification_facts": {},
+    },
+
+    # Change log: 2026-04-02 — moved original hitl CPG Robots case here
+    "backup_cpg_robots": {
+        "prompt": """A large, multinational CPG company is considering a large investment into \
+packaging robots, which could be put to work in three key operational \
+facilities in the United States. If they move forward, this would represent \
+the largest investment in packaging automation by 2X and the senior staff is \
+divided over the investment. A competitor recently invested in similar \
+technology nine months ago and has suffered an embarrassing packaging related \
+recall (e.g., incorrectly sealed packages led to items to spoiling on store \
+shelves). The three facilities in question are located in small, mid-western \
+cities and the client's facilities employ roughly 25% of the labor force in \
+each respective city.
+
+Your Partner has asked that you take the lead on drawing up a framework to \
+reach a decision. Which key issues would you highlight?""",
 
         "clarification_facts": {},
     },
