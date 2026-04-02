@@ -74,9 +74,19 @@ Plain language only — no jargon, no technical terms.
 ─── STRICT RULE ─────────────────────────────────────────────────────────────
 Answer ONLY about the concept named in CURRENT CONCEPT below.
 If the user mentions a different concept by name:
-- Do NOT answer about it now
-- Briefly acknowledge it in one clause ("we can look at that next")
-- Then answer about the CURRENT CONCEPT only
+- Check the FRAMEWORK CONTEXT below for already-planned concepts.
+  Only say a concept is already planned if you are highly confident it
+  matches one from the list — exact name or a clear, unambiguous synonym.
+  If uncertain, do not mention it — just answer about the CURRENT CONCEPT.
+- If it is clearly not in the list, briefly acknowledge it in one clause
+  ("we can look at that next") — then answer about the CURRENT CONCEPT only
+
+If the user wants to remove a specific sub-point or sub-bullet:
+- Acknowledge it clearly in one sentence: "Understood — I'll leave that out
+  of the final summary."
+- Do NOT remove the parent concept
+- Do NOT ask for confirmation — honour it immediately
+- Then end with the normal closing question
 ─────────────────────────────────────────────────────────────────────────────
 
 ─── CONDITIONAL FORMAT ───────────────────────────────────────────────────────
@@ -114,6 +124,13 @@ FORMAT:
 - Include ONLY concepts listed in CONCEPTS TO INCLUDE below
 - No rationale sentences — summary only
 - After the summary, ask ONE short follow-up question to invite exploration
+
+─── SUB-BULLET EXCLUSIONS ────────────────────────────────────────────────
+Review the full conversation history. If the user explicitly asked to remove
+a specific sub-point or sub-bullet during the walkthrough, exclude it from
+the sub-bullets you generate for that concept. Do not mention the exclusion
+— simply omit it.
+─────────────────────────────────────────────────────────────────────────────
 """
 
 SWAP_CAUGHT_PROMPT = """
@@ -592,6 +609,7 @@ class ExplainableAgent(BlackBoxAgent):
             self.walkthrough_index = self.swap_position
 
         # ── 2. Override detection ──────────────────────────────────────────
+        just_added_concept = None  # set if concept_added fires this turn
         override = None if cs_detected else self._detect_override(user_input)
         if override:
             log_memory_override(
@@ -652,7 +670,7 @@ class ExplainableAgent(BlackBoxAgent):
                 self.walkthrough_concepts.insert(insert_at, new_concept)
                 log_concept_added(self.session_id, new_concept)
                 logging.info(f"[CONCEPT ADDED] '{new_concept}' inserted at index={insert_at}")
-                # _stream_concept_qa handles the acknowledgement this turn
+                just_added_concept = new_concept  # passed to _stream_concept_qa
 
         # ── 3. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -745,7 +763,7 @@ class ExplainableAgent(BlackBoxAgent):
                 yield from self._stream_concept(is_first=False)
 
         else:
-            yield from self._stream_concept_qa()
+            yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
     # Streaming sub-methods
@@ -756,18 +774,46 @@ class ExplainableAgent(BlackBoxAgent):
     # Change log: 2026-04-01 — added for pushback + counterfactual feature.
     # ══════════════════════════════════════════════════════════════════════
 
+    def _resolve_to_concept_name(self, name: str) -> str:
+        """
+        Resolve a user-provided name to an actual concept in walkthrough_concepts.
+        Handles two failure cases:
+          1. User named a sub-bullet ("Projected annual Silica Sand sales volume")
+             instead of the concept ("Units Sold") — no match found
+          2. User said "this concept" or "this" — vague reference
+        In both cases: fall back to _current_concept().
+        Change log: 2026-04-02 — added to fix concept exclusion not working
+        when user names sub-bullets or uses vague references.
+        """
+        # Exact match (case-insensitive)
+        for c in self.walkthrough_concepts:
+            if c.lower() == name.lower():
+                return c
+        # No match — fall back to current concept
+        fallback = self._current_concept() or name
+        logging.info(
+            "[RESOLVE] '" + name + "' not in walkthrough_concepts "
+            "— falling back to current concept: '" + fallback + "'"
+        )
+        return fallback
+
     def _resolve_pending(self, user_input: str):
         """
         Called when pending_excl or pending_fw is active.
         Confirmation: commit + clear + continue.
         Not confirmed: keep pending alive, re-stream pushback.
         Change log: 2026-04-01
+        Change log: 2026-04-02 — resolve pending_excl to actual concept name
+          before committing, advance index past excluded concept.
         """
         confirmed = self._is_ready_to_advance(user_input)
 
         if self.pending_excl is not None:
             excl = self.pending_excl
             if confirmed:
+                # Resolve to actual concept name — user may have named a sub-bullet
+                # or used a vague reference like "this concept"
+                excl = self._resolve_to_concept_name(excl)
                 if excl not in self.excluded_concepts:
                     self.excluded_concepts.append(excl)
                 self.pending_excl = None
@@ -777,6 +823,9 @@ class ExplainableAgent(BlackBoxAgent):
                     new_context="confirmed exclusion: " + excl,
                 )
                 logging.info("[PENDING] exclusion confirmed: " + excl)
+                # Advance index past the excluded concept so _current_concept()
+                # skips it correctly on the next call
+                self.walkthrough_index += 1
                 yield "Understood — removing **" + excl + "** from the framework. Let's continue.\n\n"
                 concept = self._current_concept()
                 if concept is None:
@@ -890,6 +939,9 @@ class ExplainableAgent(BlackBoxAgent):
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
         # ── Step 1: Citation header + concept name + justification as prefix ─
+        # Change log: 2026-04-01 — handle None return from build_citation_header()
+        # when concept is not in KG (user-added concept). Shows unverified note
+        # instead of fabricated citation.
         kg_data = None
         if not is_wrong:
             try:
@@ -897,25 +949,49 @@ class ExplainableAgent(BlackBoxAgent):
                     concept_name = concept,
                     framework    = self.kg_context["framework"],
                 )
-                lines         = citation_header.strip().split("\n")
-                source_line   = lines[0] if len(lines) > 0 else ""
-                justification = lines[1] if len(lines) > 1 else ""
-                prefix = (
-                    f"{source_line}\n\n"
-                    f"**{concept}**\n"
-                    f"{justification}\n"
-                )
+                if citation_header is not None:
+                    # Concept found in KG — show real citation
+                    lines         = citation_header.strip().split("\n")
+                    source_line   = lines[0] if len(lines) > 0 else ""
+                    justification = lines[1] if len(lines) > 1 else ""
+                    prefix = (
+                        source_line + "\n\n"
+                        "**" + concept + "**\n"
+                        + justification + "\n"
+                    )
+                else:
+                    # Concept not in KG — show cross-framework note or unverified note
+                    # Change log: 2026-04-02 — richer feedback using other_frameworks
+                    other_fws = kg_data.get("other_frameworks", [])
+                    if other_fws:
+                        fw_str = " and ".join("**" + f + "**" for f in other_fws)
+                        note = (
+                            "\n> *ℹ️ **" + concept + "** belongs to the "
+                            + fw_str
+                            + " framework — I can discuss it here, "
+                            "but it isn't part of the current framework.*\n"
+                        )
+                    else:
+                        note = (
+                            "\n> *ℹ️ This concept isn't in my knowledge base "
+                            "— I can discuss it, but can't verify it with a source.*\n"
+                        )
+                    logging.info(
+                        "[CITATION] not-in-KG note for '" + concept + "', "
+                        "other_frameworks=" + str(other_fws)
+                    )
+                    prefix = "**" + concept + "**\n" + note
                 if is_first:
-                    prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
+                    prefix = "Here is how I would structure the analysis:\n\n" + prefix
             except Exception as e:
-                logging.warning(f"[CITATION] header failed for concept='{concept}': {e}")
-                prefix = f"**{concept}**\n"
+                logging.warning("'[CITATION] header failed for concept='" + concept + "': " + str(e))
+                prefix = "**" + concept + "**\n"
                 if is_first:
-                    prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
+                    prefix = "Here is how I would structure the analysis:\n\n" + prefix
         else:
-            prefix = f"**{concept}**\n"
+            prefix = "**" + concept + "**\n"
             if is_first:
-                prefix = f"Here is how I would structure the analysis:\n\n{prefix}"
+                prefix = "Here is how I would structure the analysis:\n\n" + prefix
 
         # ── Step 2: Stream concept block ───────────────────────────────────
         full_concept_reply = []
@@ -952,7 +1028,13 @@ class ExplainableAgent(BlackBoxAgent):
             except Exception as e:
                 logging.warning(f"[FAITHFULNESS] warning check failed for '{concept}': {e}")
 
-    def _stream_concept_qa(self):
+    def _stream_concept_qa(self, just_added: str | None = None):
+        """
+        Answer a question about the current concept.
+        Change log: 2026-04-02 — added just_added param for acknowledgement.
+        When concept_added fired this turn, prepend a clear acknowledgement
+        before the concept answer so the user knows it was registered.
+        """
         concept    = self._current_concept() or "the current concept"
         on_swap    = (self.walkthrough_index == self.swap_position
                       and self.swap_presented
@@ -966,27 +1048,43 @@ class ExplainableAgent(BlackBoxAgent):
             "*Shall we move on to the next concept?*"
         )
 
-        # Inject on_swap into CONCEPT_QA_PROMPT so counterfactual format
-        # is suppressed when presenting the swap concept.
-        # Change log: 2026-04-01 — counterfactual conditional format added.
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
 
+        # ── Acknowledgement prefix ─────────────────────────────────────────
+        # Shown BEFORE the concept answer so the user immediately knows
+        # their proposed concept was registered. Resolves cognitive uncertainty.
+        # Change log: 2026-04-02 — added for concept_added UX clarity.
+        added_note = ""
+        if just_added:
+            added_note = (
+                "Good idea \u2014 I'll add **" + just_added
+                + "** after we finish **" + concept + "**.\n\n"
+            )
+            logging.info("[QA] concept_added acknowledgement prepended for '" + just_added + "'")
+
         instruction = (
-            f"{qa_prompt}\n\n"
-            f"─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
-            f"{closing}\n"
-            f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
-            f"Current concept: **{concept}**\n"
-            f"On swap concept: {on_swap}\n"
-            f"Framework: {self.kg_context['framework']} | Case: {self.kg_context['case_type']}\n"
-            f"─────────────────────────────────────────────────────────────────────\n"
+            qa_prompt + "\n\n"
+            "\u2500\u2500\u2500 CLOSING INSTRUCTION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            + closing + "\n"
+            "\u2500\u2500\u2500 CONTEXT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "Current concept: **" + concept + "**\n"
+            "On swap concept: " + str(on_swap) + "\n"
+            "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
+            # Exclude just_added concept — Python prefix already acknowledges it.
+            # Prevents LLM from double-acknowledging the newly inserted concept.
+            # Change log: 2026-04-02
+            "Framework concepts (in order): " + ", ".join(
+                c for c in self.walkthrough_concepts
+                if just_added is None or c.lower() != just_added.lower()
+            ) + "\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
         )
 
         if on_swap:
-            logging.info(f"[SWAP QA] user questioning swap concept at "
-                         f"index={self.walkthrough_index} — using explicit keep/remove prompt")
+            logging.info("[SWAP QA] user questioning swap concept at "
+                         "index=" + str(self.walkthrough_index) + " — using explicit keep/remove prompt")
 
-        yield from self._stream_with_instruction(instruction=instruction)
+        yield from self._stream_with_instruction(instruction=instruction, prefix=added_note)
 
     def _stream_swap_caught(self):
         """

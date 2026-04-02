@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Neo4j connection ───────────────────────────────────────────────────────
 _driver = None
 
 def _get_driver():
@@ -18,14 +17,12 @@ def _get_driver():
 
 
 def close():
-    """Call this on app shutdown to cleanly close the connection."""
     global _driver
     if _driver:
         _driver.close()
         _driver = None
 
 
-# ── Internal helper ────────────────────────────────────────────────────────
 def _run(query: str, **params) -> list[dict]:
     driver = _get_driver()
     with driver.session() as session:
@@ -33,18 +30,7 @@ def _run(query: str, **params) -> list[dict]:
         return [record.data() for record in result]
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Existing flat query methods — unchanged
-# ══════════════════════════════════════════════════════════════════════════
-
 def get_concepts(case_type: str) -> list[str]:
-    """
-    Return all concept names belonging to the given CaseType (flat).
-
-    Example:
-        get_concepts("Market Entry")
-        → ["Market Size", "Market Share", "Profit per Unit", ...]
-    """
     rows = _run(
         """
         MATCH (ct:CaseType {name: $case_type})
@@ -58,13 +44,6 @@ def get_concepts(case_type: str) -> list[str]:
 
 
 def concept_belongs_to_framework(concept: str, framework: str) -> bool:
-    """
-    Return True if the concept belongs to the given framework (flat check).
-
-    Example:
-        concept_belongs_to_framework("Variable Cost per Unit", "Economic Feasibility")
-        → False
-    """
     rows = _run(
         """
         MATCH (f:Framework {name: $framework})-[:HAS_CONCEPT]->(c:Concept {name: $concept})
@@ -79,18 +58,7 @@ def concept_belongs_to_framework(concept: str, framework: str) -> bool:
 def get_ordered_concepts(framework: str) -> list[str]:
     """
     Return leaf concept names for the given framework in depth-first order.
-
-    Change log: 2026-03-31 — updated to use HAS_CHILD tree traversal instead
-    of PRECEDES chain. Branch nodes (branch: true) are excluded — only leaf
-    concepts are returned, preserving backward compatibility with all callers.
-
-    Depth-first traversal ensures parent branches are visited before their
-    children, which reflects natural consulting analysis order.
-
-    Example:
-        get_ordered_concepts("Expanded Profit Formula")
-        → ["Volume", "Price per Unit", "Fixed Costs",
-           "Variable Cost per Unit", "Production", "Distribution", "Customer Pull"]
+    Change log: 2026-03-31 — updated to use HAS_CHILD tree traversal.
     """
     rows = _run(
         """
@@ -104,8 +72,6 @@ def get_ordered_concepts(framework: str) -> list[str]:
         """,
         framework=framework,
     )
-
-    # Fallback: if APOC not available, use recursive Cypher
     if not rows:
         rows = _run(
             """
@@ -115,23 +81,10 @@ def get_ordered_concepts(framework: str) -> list[str]:
             """,
             framework=framework,
         )
-
     return [r["concept"] for r in rows]
 
 
 def comes_before(concept_a: str, concept_b: str) -> bool:
-    """
-    Return True if concept_a is an ancestor of concept_b in the HAS_CHILD tree
-    (directly or transitively within the same framework).
-
-    Change log: 2026-03-31 — replaced PRECEDES traversal with HAS_CHILD ancestry
-    check. Cross-framework comparisons always return False (correct behaviour).
-
-    Example:
-        comes_before("Variable Costs", "Production")   → True
-        comes_before("Revenue", "Fixed Costs")         → False (different branch)
-        comes_before("Market Size", "Volume")          → False (different frameworks)
-    """
     rows = _run(
         """
         MATCH (a:Concept {name: $concept_a})-[:HAS_CHILD*1..]->(b:Concept {name: $concept_b})
@@ -144,17 +97,6 @@ def comes_before(concept_a: str, concept_b: str) -> bool:
 
 
 def get_correct_first_concept(case_type: str) -> str | None:
-    """
-    Return the name of the first top-level branch/concept for a given CaseType.
-    For frameworks with a tree structure, this is the first HAS_CHILD target
-    from the Framework node.
-
-    Change log: 2026-03-31 — updated to use HAS_CHILD instead of PRECEDES root.
-
-    Example:
-        get_correct_first_concept("Profitability")
-        → "Revenue"  (first branch under Expanded Profit Formula)
-    """
     rows = _run(
         """
         MATCH (ct:CaseType {name: $case_type})
@@ -169,13 +111,6 @@ def get_correct_first_concept(case_type: str) -> str | None:
 
 
 def get_framework_for_case(case_type: str) -> str | None:
-    """
-    Return the framework name for a given CaseType.
-
-    Example:
-        get_framework_for_case("Market Entry")
-        → "Economic Feasibility"
-    """
     rows = _run(
         """
         MATCH (ct:CaseType {name: $case_type})-[:USES_FRAMEWORK]->(f:Framework)
@@ -188,12 +123,7 @@ def get_framework_for_case(case_type: str) -> str | None:
 
 
 def get_all_frameworks() -> list[dict]:
-    """
-    Return all frameworks in the KG with their case type and description.
-    Used by ExplainableAgent._resolve_framework().
-
-    Change log: 2026-03-30 — initial implementation.
-    """
+    """Change log: 2026-03-30 — initial implementation."""
     rows = _run(
         """
         MATCH (ct:CaseType)-[:USES_FRAMEWORK]->(f:Framework)
@@ -213,31 +143,7 @@ def get_all_frameworks() -> list[dict]:
     ]
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# New tree-aware query methods
-# Change log: 2026-03-31 — added to support HAS_CHILD tree structure
-# ══════════════════════════════════════════════════════════════════════════
-
 def get_concept_parent(concept_name: str, framework: str) -> str | None:
-    """
-    Return the parent of the given concept in the HAS_CHILD tree.
-
-    Returns:
-      - Parent Concept name if parent is a Concept node
-      - Framework name string if concept is a direct child of the Framework root
-      - None if concept is not found in the KG at all
-
-    Example:
-        get_concept_parent("Price per Unit", "Expanded Profit Formula")
-        → "Revenue"
-
-        get_concept_parent("Revenue", "Expanded Profit Formula")
-        → "Expanded Profit Formula"  (direct child of Framework root)
-
-        get_concept_parent("Net Promoter Score", "Expanded Profit Formula")
-        → None  (not in KG)
-    """
-    # Check if parent is a Concept node
     rows = _run(
         """
         MATCH (parent:Concept {framework: $framework})-[:HAS_CHILD]->
@@ -250,8 +156,6 @@ def get_concept_parent(concept_name: str, framework: str) -> str | None:
     )
     if rows:
         return rows[0]["parent"]
-
-    # Check if parent is the Framework root itself
     rows_fw = _run(
         """
         MATCH (f:Framework {name: $framework})-[:HAS_CHILD]->
@@ -266,17 +170,6 @@ def get_concept_parent(concept_name: str, framework: str) -> str | None:
 
 
 def get_concept_children(concept_name: str, framework: str) -> list[str]:
-    """
-    Return the direct children of a concept in the HAS_CHILD tree.
-    Returns empty list for leaf concepts.
-
-    Example:
-        get_concept_children("Revenue", "Expanded Profit Formula")
-        → ["Volume", "Price per Unit"]
-
-        get_concept_children("Volume", "Expanded Profit Formula")
-        → []
-    """
     rows = _run(
         """
         MATCH (p:Concept {name: $concept_name, framework: $framework})
@@ -290,19 +183,6 @@ def get_concept_children(concept_name: str, framework: str) -> list[str]:
 
 
 def get_concept_depth(concept_name: str, framework: str) -> int:
-    """
-    Return the depth of a concept in the HAS_CHILD tree.
-    Direct children of Framework root = depth 1.
-    Their children = depth 2. And so on.
-
-    Used by Framework Alignment Accuracy scoring to compare structural
-    depth between user's framework and the KG ground truth.
-
-    Example:
-        get_concept_depth("Revenue", "Expanded Profit Formula")     → 1
-        get_concept_depth("Volume", "Expanded Profit Formula")      → 2
-        get_concept_depth("Production", "Expanded Profit Formula")  → 4
-    """
     rows = _run(
         """
         MATCH path = (f:Framework {name: $framework})-[:HAS_CHILD*1..]->(c:Concept {name: $concept_name})
@@ -317,25 +197,7 @@ def get_concept_depth(concept_name: str, framework: str) -> int:
 
 
 def get_framework_tree(framework: str) -> list[dict]:
-    """
-    Return the full tree structure of a framework as a flat list of
-    {concept, parent, depth} dicts, ordered by depth then concept name.
-
-    Used by Framework Alignment Accuracy scoring to compare the user's
-    submitted framework against the KG ground truth tree.
-
-    Example:
-        get_framework_tree("Expanded Profit Formula")
-        → [
-            {"concept": "Revenue",               "parent": "Expanded Profit Formula", "depth": 1},
-            {"concept": "Costs",                 "parent": "Expanded Profit Formula", "depth": 1},
-            {"concept": "Fixed Costs",           "parent": "Costs",                   "depth": 2},
-            {"concept": "Variable Costs",        "parent": "Costs",                   "depth": 2},
-            ...
-          ]
-
-    Change log: 2026-03-31 — initial implementation
-    """
+    """Change log: 2026-03-31 — initial implementation."""
     rows = _run(
         """
         MATCH path = (f:Framework {name: $framework})-[:HAS_CHILD*1..]->(c:Concept)
@@ -349,33 +211,13 @@ def get_framework_tree(framework: str) -> list[dict]:
         framework=framework,
     )
     return [
-        {
-            "concept": r["concept"],
-            "parent":  r["parent"],
-            "depth":   r["depth"],
-        }
+        {"concept": r["concept"], "parent": r["parent"], "depth": r["depth"]}
         for r in rows
     ]
 
 
 def get_also_drives(concept_name: str, framework: str) -> list[str]:
-    """
-    Return concepts that the given concept ALSO_DRIVES (cross-branch dependencies).
-
-    Currently only Units Sold → Variable Cost in Expanded Profit Formula.
-    Added as a general method so future cross-branch drivers can be added
-    to the KG without code changes.
-
-    Change log: 2026-03-31 — added to support ALSO_DRIVES relationship
-      introduced for Units Sold shared-driver pattern (Victor Cheng).
-
-    Example:
-        get_also_drives("Units Sold", "Expanded Profit Formula")
-        → ["Variable Cost"]
-
-        get_also_drives("Price per Unit", "Expanded Profit Formula")
-        → []
-    """
+    """Change log: 2026-03-31 — added for ALSO_DRIVES relationship."""
     rows = _run(
         """
         MATCH (a:Concept {name: $concept_name, framework: $framework})
@@ -390,36 +232,20 @@ def get_also_drives(concept_name: str, framework: str) -> list[str]:
 
 def get_concept_full_data(concept_name: str, framework: str) -> dict:
     """
-    Return all concept data needed by rag_explainer.py in a single KG query.
-    Replaces the previous pattern of 5 separate query calls in build_kg_data().
-
-    Returns dict with keys:
-      description, parent, siblings, children, is_branch
-
-    Falls back to empty/None values if concept not found.
-
-    Change log: 2026-03-31 — added to batch KG queries and reduce round-trips.
-      Previously build_kg_data() made 5 sequential Neo4j calls per concept,
-      adding latency before anything streamed to the user.
+    Return all concept data in a single KG query.
+    Change log: 2026-03-31 — added to batch KG queries.
     """
     rows = _run(
         """
         MATCH (c:Concept {name: $concept_name, framework: $framework})
-
-        // Parent — could be Concept or Framework node
         OPTIONAL MATCH (parent)-[:HAS_CHILD]->(c)
-
-        // Siblings — other children of same parent, same framework
         OPTIONAL MATCH (parent)-[:HAS_CHILD]->(sibling:Concept {framework: $framework})
         WHERE sibling.name <> $concept_name
-
-        // Children
         OPTIONAL MATCH (c)-[:HAS_CHILD]->(child:Concept)
-
         RETURN
-            coalesce(c.description, '')   AS description,
-            coalesce(c.branch, false)     AS is_branch,
-            parent.name                   AS parent,
+            coalesce(c.description, '')    AS description,
+            coalesce(c.branch, false)      AS is_branch,
+            parent.name                    AS parent,
             collect(DISTINCT sibling.name) AS siblings,
             collect(DISTINCT child.name)   AS children
         LIMIT 1
@@ -428,13 +254,7 @@ def get_concept_full_data(concept_name: str, framework: str) -> dict:
         framework=framework,
     )
     if not rows:
-        return {
-            "description": "",
-            "parent":      None,
-            "siblings":    [],
-            "children":    [],
-            "is_branch":   False,
-        }
+        return {"description": "", "parent": None, "siblings": [], "children": [], "is_branch": False}
     r = rows[0]
     return {
         "description": r["description"] or "",
@@ -446,17 +266,6 @@ def get_concept_full_data(concept_name: str, framework: str) -> dict:
 
 
 def get_concept_description(concept_name: str, framework: str) -> str:
-    """
-    Return the description of a concept node.
-    Returns empty string if description not yet set.
-
-    Change log: 2026-03-31 — added to support faithfulness classifier grounding.
-    Descriptions added via add_concept_descriptions.cypher.
-
-    Example:
-        get_concept_description("Price per Unit", "Expanded Profit Formula")
-        → "The selling price charged per unit of output. Analytical scope: ..."
-    """
     rows = _run(
         """
         MATCH (c:Concept {name: $concept_name, framework: $framework})
@@ -470,22 +279,6 @@ def get_concept_description(concept_name: str, framework: str) -> str:
 
 
 def get_concept_siblings(concept_name: str, framework: str) -> list[str]:
-    """
-    Return the sibling concepts — other children of the same parent.
-    Excludes the concept itself.
-
-    Change log: 2026-03-31 — added to support faithfulness classifier grounding.
-    Helps classifier understand what analytical territory belongs to adjacent
-    concepts vs. the current one.
-
-    Example:
-        get_concept_siblings("Price per Unit", "Expanded Profit Formula")
-        → ["Units Sold"]
-
-        get_concept_siblings("Fixed Cost", "Expanded Profit Formula")
-        → ["Variable Cost"]
-    """
-    # Find parent first, then get all its children except this concept
     rows = _run(
         """
         MATCH (parent)-[:HAS_CHILD]->(c:Concept {name: $concept_name, framework: $framework})
@@ -500,18 +293,6 @@ def get_concept_siblings(concept_name: str, framework: str) -> list[str]:
 
 
 def is_branch_node(concept_name: str, framework: str) -> bool:
-    """
-    Return True if the concept is an intermediate branch node (not a leaf).
-    Branch nodes have branch: true property set in the KG.
-
-    Used by rag_explainer.py to adjust citation language —
-    branch nodes get "this bucket groups..." phrasing,
-    leaf nodes get "this concept analyses..." phrasing.
-
-    Example:
-        is_branch_node("Revenue", "Expanded Profit Formula")        → True
-        is_branch_node("Volume", "Expanded Profit Formula")         → False
-    """
     rows = _run(
         """
         MATCH (c:Concept {name: $concept_name, framework: $framework})
@@ -524,41 +305,48 @@ def is_branch_node(concept_name: str, framework: str) -> bool:
     return rows[0]["is_branch"] if rows else False
 
 
-# ── Quick smoke test ───────────────────────────────────────────────────────
+# Change log: 2026-04-02 — added get_framework_for_concept()
+def get_framework_for_concept(concept_name: str) -> list[dict]:
+    """
+    Return all frameworks containing the given concept, across the entire KG.
+
+    Used when a concept is not found in the current active framework —
+    allows the citation layer to show a cross-framework note with correct
+    provenance instead of fabricating a source or showing a generic unverified note.
+
+    Returns list of dicts: [{"framework": str, "case_type": str}]
+    Returns empty list if concept not found anywhere in KG.
+
+    Example:
+        get_framework_for_concept("Market Share")
+        -> [{"framework": "Economic Feasibility", "case_type": "Market Entry"}]
+
+        get_framework_for_concept("unknown concept")
+        -> []
+    """
+    rows = _run(
+        """
+        MATCH (f:Framework)-[:HAS_CONCEPT]->(c:Concept {name: $concept_name})
+        MATCH (ct:CaseType)-[:USES_FRAMEWORK]->(f)
+        RETURN f.name  AS framework,
+               ct.name AS case_type
+        """,
+        concept_name=concept_name,
+    )
+    return [
+        {"framework": r["framework"], "case_type": r["case_type"]}
+        for r in rows
+    ]
+
+
 if __name__ == "__main__":
     print("=== get_ordered_concepts(Expanded Profit Formula) ===")
     print(get_ordered_concepts("Expanded Profit Formula"))
 
-    print("\n=== get_concept_parent(Price per Unit, Expanded Profit Formula) ===")
-    print(get_concept_parent("Price per Unit", "Expanded Profit Formula"))
-    # Expected: Revenue
+    print("\n=== get_framework_for_concept(Market Share) ===")
+    print(get_framework_for_concept("Market Share"))
 
-    print("\n=== get_concept_parent(Revenue, Expanded Profit Formula) ===")
-    print(get_concept_parent("Revenue", "Expanded Profit Formula"))
-    # Expected: None (direct child of Framework root)
-
-    print("\n=== get_concept_children(Costs, Expanded Profit Formula) ===")
-    print(get_concept_children("Costs", "Expanded Profit Formula"))
-    # Expected: ['Variable Cost', 'Fixed Cost']
-
-    print("\n=== get_also_drives(Units Sold, Expanded Profit Formula) ===")
-    print(get_also_drives("Units Sold", "Expanded Profit Formula"))
-    # Expected: ['Variable Cost']
-
-    print("\n=== get_framework_tree(Expanded Profit Formula) ===")
-    for row in get_framework_tree("Expanded Profit Formula"):
-        print(f"  depth={row['depth']}  parent={row['parent']}  →  {row['concept']}")
-
-    print("\n=== get_all_frameworks() — should include M&A and Capacity Change ===")
-    for f in get_all_frameworks():
-        print(f"  {f['case_type']} → {f['framework']}")
-
-    print("\n=== is_branch_node(Revenue, Expanded Profit Formula) ===")
-    print(is_branch_node("Revenue", "Expanded Profit Formula"))
-    # Expected: True
-
-    print("\n=== is_branch_node(Units Sold, Expanded Profit Formula) ===")
-    print(is_branch_node("Units Sold", "Expanded Profit Formula"))
-    # Expected: False
+    print("\n=== get_framework_for_concept(unknown) ===")
+    print(get_framework_for_concept("unknown concept"))
 
     close()

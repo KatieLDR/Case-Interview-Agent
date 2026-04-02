@@ -4,6 +4,8 @@ import logging
 from google import genai
 from dotenv import load_dotenv
 from backend import knowledge_graph as kg
+# Change log: 2026-04-02 — get_framework_for_concept used for cross-framework citation
+from backend.knowledge_graph import get_framework_for_concept
 
 load_dotenv()
 
@@ -12,11 +14,6 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
 CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── Faithfulness threshold ─────────────────────────────────────────────────
-# Kept at 0.85 — classifier must be highly confident before flagging unfaithful.
-# The safe fallback (default faithful=True when confidence < threshold) protects
-# against false positives on legitimate consulting elaboration.
-# Change log: 2026-03-31 — reverted 0.70 experiment; root cause is prompt
-#   over-sensitivity, not threshold. Prompt tightened instead.
 FAITHFULNESS_THRESHOLD = 0.85
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -85,24 +82,12 @@ Respond with ONLY the justification text — no labels, no markdown, no preamble
 
 def build_kg_data(concept_name: str, framework: str) -> dict:
     """
-    Pull the KG node data needed for faithfulness check and citation.
+    Pull KG node data for faithfulness check and citation.
 
-    Returns a dict with:
-      concept     : str
-      framework   : str
-      description : str   — concept scope and meaning (from KG description field)
-      parent      : str | None
-      siblings    : list[str] — other children of the same parent
-      children    : list[str]
-      is_branch   : bool
-      all_concepts: list[str]
-
-    Change log: 2026-03-31 — initial implementation
-    Change log: 2026-03-31 — replaced predecessor/successor with parent/children
-    Change log: 2026-03-31 — added description and siblings for richer
-      faithfulness classifier grounding. Without descriptions, classifier had
-      insufficient data to distinguish legitimate elaboration from out-of-scope
-      claims, leading to false positives on clean concept blocks.
+    Change log: 2026-04-01 — added 'in_kg' boolean flag to returned dict.
+    Callers use in_kg to decide whether to show citation or unverified note.
+    Previously, build_citation_header() would fabricate a citation for
+    user-added concepts not in KG because there was no way to detect the miss.
     """
     try:
         ordered = kg.get_ordered_concepts(framework)
@@ -115,11 +100,14 @@ def build_kg_data(concept_name: str, framework: str) -> dict:
     children    = []
     is_branch   = False
     description = ""
+    in_kg            = False   # True if concept in current framework
+    other_frameworks = []      # Non-empty if concept exists in other frameworks
+    # Change log: 2026-04-01 — in_kg flag
+    # Change log: 2026-04-02 — other_frameworks for cross-framework citation
 
     if concept_name in ordered or _concept_exists_in_kg(concept_name, framework):
+        in_kg = True
         try:
-            # Single batched KG query — replaces 5 sequential calls
-            # Change log: 2026-03-31 — batched to reduce round-trips
             full = kg.get_concept_full_data(concept_name, framework)
             parent      = full["parent"]
             siblings    = full["siblings"]
@@ -130,21 +118,27 @@ def build_kg_data(concept_name: str, framework: str) -> dict:
             logging.warning(f"[RAG] tree data fetch failed for '{concept_name}': {e}")
     else:
         logging.info(f"[RAG] concept '{concept_name}' not found in KG for framework '{framework}'")
+        # Check if concept exists in any other framework
+        try:
+            other_frameworks = kg.get_framework_for_concept(concept_name)
+        except Exception as e:
+            logging.warning(f"[RAG] cross-framework lookup failed for '{concept_name}': {e}")
 
     return {
-        "concept":      concept_name,
-        "framework":    framework,
-        "description":  description,
-        "parent":       parent,
-        "siblings":     siblings,
-        "children":     children,
-        "is_branch":    is_branch,
-        "all_concepts": ordered,
+        "concept":           concept_name,
+        "framework":         framework,
+        "description":       description,
+        "parent":            parent,
+        "siblings":          siblings,
+        "children":          children,
+        "is_branch":         is_branch,
+        "all_concepts":      ordered,
+        "in_kg":             in_kg,
+        "other_frameworks":  other_frameworks,
     }
 
 
 def _concept_exists_in_kg(concept_name: str, framework: str) -> bool:
-    """Check if a concept exists in the KG for a given framework (including branch nodes)."""
     try:
         return kg.concept_belongs_to_framework(concept_name, framework)
     except Exception:
@@ -152,13 +146,6 @@ def _concept_exists_in_kg(concept_name: str, framework: str) -> bool:
 
 
 def _format_kg_block(kg_data: dict) -> str:
-    """
-    Format KG data dict into a readable block for prompt injection.
-
-    Change log: 2026-03-31 — replaced predecessor/successor with parent/children
-    Change log: 2026-03-31 — added description and siblings for richer
-      faithfulness classifier grounding.
-    """
     parent    = kg_data["parent"]    or f"{kg_data['framework']} (top-level bucket)"
     siblings  = ", ".join(kg_data.get("siblings", [])) or "None (no siblings)"
     children  = ", ".join(kg_data["children"])          or "None (leaf concept)"
@@ -185,18 +172,13 @@ def _format_kg_block(kg_data: dict) -> str:
 def check_faithfulness(concept_name: str, concept_block: str, kg_data: dict) -> dict:
     """
     Check whether the streamed concept block stays within KG-supported bounds.
-
-    Returns:
-      {"faithful": bool, "confidence": float}
-
-    On classifier error, defaults to faithful=True to avoid false warnings.
-
-    Change log: 2026-03-31 — initial implementation
+    Returns {"faithful": bool, "confidence": float}
+    Defaults to faithful=True on error.
     """
     kg_block = _format_kg_block(kg_data)
     prompt   = _FAITHFULNESS_PROMPT.format(
         kg_data_block=kg_block,
-        concept_block=concept_block[:1000],  # cap to avoid token bloat
+        concept_block=concept_block[:1000],
     )
 
     try:
@@ -209,8 +191,8 @@ def check_faithfulness(concept_name: str, concept_block: str, kg_data: dict) -> 
 
         faithful   = parsed.get("faithful", True)
         confidence = parsed.get("confidence", 0.0)
+        result     = faithful if confidence >= FAITHFULNESS_THRESHOLD else True
 
-        result = faithful if confidence >= FAITHFULNESS_THRESHOLD else True
         logging.info(
             f"[FAITHFULNESS] concept='{concept_name}', "
             f"faithful={faithful}, confidence={confidence:.2f}, result={result}"
@@ -227,27 +209,11 @@ def check_faithfulness(concept_name: str, concept_block: str, kg_data: dict) -> 
 # ══════════════════════════════════════════════════════════════════════════
 
 def generate_citation(concept_name: str, kg_data: dict, faithful: bool) -> str:
-    """
-    Build the full citation block to stream after a concept block.
-
-    Format:
-      ---
-      📚 **Source:** `KG::Concept::{name}` — {framework}
-      {NL justification — 2-3 sentences}
-      [⚠️ warning line — only if not faithful]
-
-    Returns a plain string ready to yield to the Chainlit stream.
-
-    Change log: 2026-03-31 — initial implementation
-    """
     kg_block     = _format_kg_block(kg_data)
     entity_id    = f"KG::Concept::{concept_name}"
     framework    = kg_data["framework"]
-
-    # Generate NL justification
     justification = _generate_justification(kg_block, concept_name)
 
-    # Assemble citation block
     lines = [
         "\n\n---",
         f"📚 **Source:** `{entity_id}` — {framework}",
@@ -263,9 +229,7 @@ def generate_citation(concept_name: str, kg_data: dict, faithful: bool) -> str:
 
 
 def _generate_justification(kg_block: str, concept_name: str) -> str:
-    """Call Gemini to generate the 2-3 sentence NL justification."""
     prompt = _CITATION_PROMPT.format(kg_data_block=kg_block)
-
     try:
         response = client.models.generate_content(
             model=CLASSIFIER_MODEL,
@@ -274,49 +238,70 @@ def _generate_justification(kg_block: str, concept_name: str) -> str:
         justification = response.text.strip()
         logging.info(f"[CITATION] justification generated for '{concept_name}'")
         return justification
-
     except Exception as e:
         logging.warning(f"[CITATION] justification generation failed for '{concept_name}': {e}")
-        # Graceful fallback — still show citation without NL justification
-        return f"This concept is part of the structured framework for this analysis."
+        return "This concept is part of the structured framework for this analysis."
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Public functions — called from explainable_agent.py
+# Public functions
 # ══════════════════════════════════════════════════════════════════════════
 
-def build_citation_header(concept_name: str, framework: str) -> tuple[str, dict]:
+def build_citation_header(concept_name: str, framework: str) -> tuple[str | None, dict]:
     """
-    Build the citation header and NL justification — called BEFORE streaming
-    the concept block so the source appears first in the UI.
+    Build citation header + NL justification — called BEFORE streaming concept.
 
-    Returns:
-      (citation_header: str, kg_data: dict)
-
-    The kg_data is returned so the caller can pass it directly to
-    check_and_append_warning() after streaming, avoiding a second KG query.
-
-    Change log: 2026-03-31 — added to support source-first presentation order.
+    Three states — Change log: 2026-04-02:
+      State 1 — concept in current framework:
+        Returns (header, kg_data) with full KG citation + NL justification.
+      State 2 — concept in a different framework:
+        Returns (header, kg_data) with cross-framework citation + NL justification
+        sourced from the correct framework. Source line includes (not current framework).
+      State 3 — concept not in KG anywhere:
+        Returns (None, kg_data). Caller shows unverified note + LLM answer.
     """
-    kg_data       = build_kg_data(concept_name, framework)
-    entity_id     = f"KG::Concept::{concept_name}"
-    fw_name       = kg_data["framework"]
-    justification = _generate_justification(_format_kg_block(kg_data), concept_name)
-    header = (
-        f"📚 **Source:** `{entity_id}` — {fw_name}\n"
-        f"{justification}\n\n"
-    )
-    return header, kg_data
+    kg_data = build_kg_data(concept_name, framework)
+
+    # ── State 1: Concept in current framework — full citation ──────────────
+    if kg_data["in_kg"]:
+        entity_id     = "KG::Concept::" + concept_name
+        fw_name       = kg_data["framework"]
+        justification = _generate_justification(_format_kg_block(kg_data), concept_name)
+        header = (
+            "\U0001F4DA **Source:** `" + entity_id + "` \u2014 " + fw_name + "\n"
+            + justification + "\n\n"
+        )
+        logging.info("[CITATION] full citation for '" + concept_name + "' in '" + framework + "'")
+        return header, kg_data
+
+    # ── State 2: Concept in a different framework — cross-framework citation
+    other = kg_data.get("other_frameworks", [])
+    if other:
+        other_fw   = other[0]["framework"]
+        # Fetch full KG data from the framework it actually belongs to
+        cross_data = build_kg_data(concept_name, other_fw)
+        entity_id  = "KG::Concept::" + concept_name
+        justification = _generate_justification(_format_kg_block(cross_data), concept_name)
+        header = (
+            "\U0001F4DA **Source:** `" + entity_id + "` \u2014 "
+            + other_fw + " (not current framework)\n"
+            + justification + "\n\n"
+        )
+        logging.info(
+            "[CITATION] cross-framework citation for '" + concept_name
+            + "' \u2014 belongs to '" + other_fw + "', not '" + framework + "'"
+        )
+        return header, cross_data
+
+    # ── State 3: Concept not in KG anywhere — caller shows unverified note ──
+    logging.info("[CITATION] '" + concept_name + "' not found in any framework")
+    return None, kg_data
 
 
 def check_and_append_warning(concept_name: str, concept_block: str, kg_data: dict) -> str | None:
     """
-    Run faithfulness check on the streamed concept block.
-    Returns the warning string if unfaithful, None if faithful.
-
-    Called AFTER the concept block has finished streaming.
-
-    Change log: 2026-03-31 — added to support source-first presentation order.
+    Run faithfulness check after concept block streams.
+    Returns warning string if unfaithful, None if faithful.
     """
     result = check_faithfulness(concept_name, concept_block, kg_data)
     if not result["faithful"]:
@@ -325,16 +310,7 @@ def check_and_append_warning(concept_name: str, concept_block: str, kg_data: dic
 
 
 def build_and_check_citation(concept_name: str, framework: str, concept_block: str) -> str:
-    """
-    Legacy single-call pipeline — kept for backward compatibility with tests.
-    Returns full citation block (header + justification + optional warning).
-
-    For production use in _stream_concept(), prefer the two-step approach:
-      1. build_citation_header() — before streaming concept
-      2. check_and_append_warning() — after streaming concept
-
-    Change log: 2026-03-31 — refactored internals to delegate to new functions.
-    """
+    """Legacy single-call pipeline — kept for backward compatibility with tests."""
     kg_data      = build_kg_data(concept_name, framework)
     faith_result = check_faithfulness(concept_name, concept_block, kg_data)
     citation     = generate_citation(concept_name, kg_data, faith_result["faithful"])
