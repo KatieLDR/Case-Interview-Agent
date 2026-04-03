@@ -24,7 +24,7 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
     db.collection("sessions").document(session_id).set({
         "user_id": user_id,
         "agent_type": agent_type,
-        "started_at": datetime.now(timezone.utc),
+        "started_at": None,
         "ended_at": None,
         "current_answer": None,
         "original_answer": None,
@@ -66,7 +66,15 @@ def end_session(session_id: str) -> None:
     except Exception as e:
         print(f"[SESSION] failed to stamp ended_at: {e}")
 
-
+def stamp_started_at(session_id: str) -> None:
+    try:
+        db.collection("sessions").document(session_id).update({
+            "started_at": datetime.now(timezone.utc),
+        })
+        print(f"[SESSION] started_at stamped for session: {session_id}")
+    except Exception as e:
+        print(f"[SESSION] failed to stamp started_at: {e}")
+        
 # ── Counter map ────────────────────────────────────────────────────────────
 _COUNTER_MAP = {
     "user_message":    "count_user_messages",
