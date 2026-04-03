@@ -4,7 +4,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from backend.logger import (
-    create_session, end_session,
+    create_session, end_session, stamp_started_at,
     log_user_message, log_agent_response,
     log_interruption, log_memory_override,
     update_answer,
@@ -298,6 +298,7 @@ class BlackBoxAgent:
             return "⚠️ The session is already in progress."
 
         self.phase = "main"
+        stamp_started_at(self.session_id)
 
         # Inject explicit handover marker into history
         self.history.append(

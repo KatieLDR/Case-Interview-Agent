@@ -366,17 +366,22 @@ class ExplainableAgent(BlackBoxAgent):
             f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
         )
 
-    def start_main_phase(self) -> str:
-        """
-        Override to append a summary hint to the phase transition message.
-        Change log: 2026-03-31 — added summary hint.
-        """
-        base_message = super().start_main_phase()
-        return (
-            f"{base_message}\n\n"
+    def start_main_phase(self):
+        super().start_main_phase()   # side effects only: phase, history, stamp_started_at
+        yield (
+            f"✅ **Clarification round closed.**\n\n"
+            f"Let's walk through the framework together — I'll take you through it "
+            f"one concept at a time.\n\n"
             f"💡 *You can click **📊 Get Summary & End Session** at any time "
             f"to see your full framework and close the session.*"
+            f"\n\n---\n\n"
         )
+        # Initialise walkthrough state and stream first concept
+        self.walkthrough_concepts = self._build_walkthrough_concepts()
+        self.walkthrough_active   = True
+        self.walkthrough_index    = 0
+        self.swap_presented       = False
+        yield from self._stream_concept(is_first=True)
 
     # ══════════════════════════════════════════════════════════════════════
     # Walkthrough state helpers

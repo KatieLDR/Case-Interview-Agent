@@ -122,10 +122,23 @@ async def on_start_main_phase(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
-    confirmation = agent.start_main_phase()
+    result = agent.start_main_phase()
 
+    msg = cl.Message(content="")
+    await msg.send()
+
+    import inspect
+    if inspect.isgenerator(result):
+        for token in result:
+            await msg.stream_token(token)
+    else:
+        await msg.stream_token(result)
+
+    await msg.update()
+
+    # Attach summary button after phase transition
     await cl.Message(
-        content=confirmation,
+        content="",
         actions=[
             cl.Action(
                 name="get_summary",
