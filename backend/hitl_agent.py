@@ -76,19 +76,19 @@ Writer   : Strategic thinking partner — facilitator, not expert authority
 ─────────────────────────────────────────────────────────────────────────────
 
 ─── PERSONALISATION RULES ───────────────────────────────────────────────────
-Read CANDIDATE CONTEXT below and adjust your presentation accordingly.
+Read CANDIDATE CONTEXT below. Apply silently — do not mention these rules.
 
-Based on M&A familiarity:
-- First time / no experience → use plain language, add brief context in
-  sub-bullets to help the candidate understand what each area covers
-- Some experience → standard presentation
-- Experienced / familiar → lean, concise sub-bullets — no hand-holding
+IF experience_level = beginner:
+  Add ONE short line before sub-bullets — plain English, no jargon:
+    *[Concept] = [what it means in one clause]. Think of it like [everyday analogy].*
+  Then sub-bullets as normal. Keep the whole response short — 4 lines max.
+
+IF experience_level = experienced:
+  Sub-bullets only. No explanation line.
 
 Based on session goal:
-- Complete framework / thorough → 3 sub-bullets per concept
-- Quick overview / structured overview → 2 sub-bullets per concept
-
-Apply these rules silently — do not mention them to the candidate.
+- Complete framework → 3 sub-bullets per concept
+- Quick overview    → 2 sub-bullets per concept
 ─────────────────────────────────────────────────────────────────────────────
 
 ─── CONCEPT PRESENTATION FORMAT ─────────────────────────────────────────────
@@ -222,8 +222,9 @@ class HITLAgent(BlackBoxAgent):
 
         # ── Candidate context ──────────────────────────────────────────────
         # Config only — NOT stored in history.
-        self.hitl_context  = None  # Q1 answer — M&A familiarity
-        self.hitl_exigence = None  # Q2 answer — session goal
+        self.hitl_context          = None  # Q1 answer — case interview experience
+        self.hitl_exigence         = None  # Q2 answer — session goal
+        self.hitl_experience_level = None  # "beginner" | "experienced" — classified from Q1
 
         # ── Concept Swap ───────────────────────────────────────────────────
         self.concept_swap = ConceptSwap(
@@ -317,8 +318,7 @@ class HITLAgent(BlackBoxAgent):
             f"Before we begin, I have two quick questions to help me tailor "
             f"this session for you.\n\n"
             f"---\n\n"
-            f"**Have you worked with M&A frameworks before, or is this your "
-            f"first time approaching this type of case?**"
+            f"**Do you have experience with case interviews?**"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -380,6 +380,34 @@ class HITLAgent(BlackBoxAgent):
             self.hitl_context = user_input.strip()
             log_user_message(self.session_id, f"[Q1 CONTEXT] {user_input}")
             logging.info(f"[HITL] Q1 answer stored: '{self.hitl_context}'")
+
+            # ── Classify experience level ──────────────────────────────────
+            # LLM classifier — avoids keyword edge cases ("never done one",
+            # "not really", "total newbie" all mean the same thing).
+            # Result stored in Python state, injected into system prompt,
+            # logged to Firestore as covariate.
+            try:
+                response = client.models.generate_content(
+                    model=CLASSIFIER_MODEL,
+                    contents=(
+                        f"Classify this case interview experience answer as exactly "
+                        f"one word — either 'beginner' or 'experienced'.\n\n"
+                        f"Rules:\n"
+                        f"- 'beginner': no experience, first time, not sure, "
+                        f"never done one, not really, some vague familiarity\n"
+                        f"- 'experienced': has done case interviews before, "
+                        f"familiar with frameworks, practiced, knows the format\n\n"
+                        f"Answer: \"{self.hitl_context}\"\n\n"
+                        f"Reply with exactly one word: beginner or experienced."
+                    ),
+                )
+                level = response.text.strip().lower()
+                self.hitl_experience_level = level if level in ("beginner", "experienced") else "beginner"
+            except Exception as e:
+                logging.warning(f"[HITL] experience classifier failed: {e}")
+                self.hitl_experience_level = "beginner"  # safe fallback
+
+            logging.info(f"[HITL] experience_level classified: '{self.hitl_experience_level}'")
             self.clarification_step = CLARIFICATION_Q2_PENDING
             yield (
                 f"Got it — good to know.\n\n"
@@ -758,8 +786,8 @@ class HITLAgent(BlackBoxAgent):
         if self.hitl_context or self.hitl_exigence:
             context_block = (
                 f"─── CANDIDATE CONTEXT ────────────────────────────────────────\n"
-                f"M&A familiarity : {self.hitl_context or 'not specified'}\n"
-                f"Session goal    : {self.hitl_exigence or 'not specified'}\n"
+                f"Case interview experience : {self.hitl_experience_level or 'not specified'}\n"
+                f"Session goal             : {self.hitl_exigence or 'not specified'}\n"
                 f"──────────────────────────────────────────────────────────────\n\n"
             )
 
@@ -977,6 +1005,7 @@ class HITLAgent(BlackBoxAgent):
                 "swap_detected_at_end":  self.concept_swap.is_detected,
                 "concepts_approved":     self.approved_concepts,
                 "concepts_rejected":     self.excluded_concepts,
+                "experience_level":      self.hitl_experience_level or "unknown",
             })
             logging.info(f"[END SESSION] Firestore stamped for session={self.session_id}")
         except Exception as e:
