@@ -641,6 +641,66 @@ class BlackBoxAgent:
         return "\n".join(lines)
 
     # ══════════════════════════════════════════════════════════════════════
+    # Core streaming utility — used by ExplainableAgent and HITLAgent
+    # Moved to BlackBoxAgent so all subclasses inherit it.
+    # Change log: 2026-04-09 — moved up from ExplainableAgent.
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_with_instruction(
+        self,
+        instruction: str,
+        prefix: str = "",
+        task_injection: str = "",
+        track_swap: bool = False,
+        store_answer: bool = False,
+    ):
+        self._pending = True
+        full_reply    = []
+
+        if prefix:
+            yield prefix
+
+        contents = self.history
+        if task_injection:
+            contents = self.history + [
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=task_injection)]
+                )
+            ]
+
+        try:
+            for chunk in client.models.generate_content_stream(
+                model=MAIN_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=instruction,
+                ),
+            ):
+                token = chunk.text or ""
+                full_reply.append(token)
+                yield token
+
+            reply = "".join(full_reply)
+
+            if track_swap:
+                self.concept_swap.maybe_inject(reply)
+
+            self.history.append(
+                types.Content(role="model", parts=[types.Part(text=reply)])
+            )
+
+            if store_answer and self._is_answer(reply):
+                update_answer(self.session_id, reply)
+
+            log_agent_response(self.session_id, reply)
+
+        except Exception as e:
+            yield f"Sorry, I encountered an error: {str(e)}"
+        finally:
+            self._pending = False
+            
+    # ══════════════════════════════════════════════════════════════════════
     # Utility
     # ══════════════════════════════════════════════════════════════════════
 

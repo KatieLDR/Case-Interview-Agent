@@ -37,6 +37,14 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         # ── concept swap ──
         "concept_swap_presented": False,
         "concept_swap_detected": False,
+        # ── HITL-specific ──────────────────────────────────────────────
+        # Change log: 2026-04-09 — added for HITLAgent proactive clarification
+        # and explicit approval/rejection tracking.
+        # None/[] for non-HITL agents — ignored in scoring script.
+        "hitl_context":      None,   # Q1 answer — M&A familiarity
+        "hitl_exigence":     None,   # Q2 answer — session goal
+        "concepts_approved": [],     # explicitly approved concept names
+        "concepts_rejected": [],     # explicitly rejected concept names
     })
     return session_id
 
@@ -74,7 +82,7 @@ def stamp_started_at(session_id: str) -> None:
         print(f"[SESSION] started_at stamped for session: {session_id}")
     except Exception as e:
         print(f"[SESSION] failed to stamp started_at: {e}")
-        
+
 # ── Counter map ────────────────────────────────────────────────────────────
 _COUNTER_MAP = {
     "user_message":    "count_user_messages",
@@ -198,3 +206,24 @@ def log_memory_override(session_id: str, old_context: str, new_context: str) -> 
         "old_context": old_context,
         "new_context": new_context,
     })
+# Change log: 2026-04-09 — added stamp_hitl_context().
+# Stamps HITL candidate context (Q1 answer — M&A familiarity, Q2 answer — session goal)
+# to Firestore after proactive clarification completes. Called once — after Q2 answer is received.
+def stamp_hitl_context(
+    session_id: str,
+    hitl_context: str,
+    hitl_exigence: str,
+) -> None:
+    """
+    Stamp HITL candidate context to Firestore after proactive clarification completes.
+    Called once — after Q2 answer is received.
+    Change log: 2026-04-09
+    """
+    try:
+        db.collection("sessions").document(session_id).update({
+            "hitl_context":  hitl_context,
+            "hitl_exigence": hitl_exigence,
+        })
+        print(f"[HITL] context stamped for session={session_id}")
+    except Exception as e:
+        print(f"[HITL] failed to stamp context: {e}")

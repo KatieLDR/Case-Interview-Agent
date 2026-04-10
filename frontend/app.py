@@ -1,8 +1,11 @@
 import uuid
+import inspect
 import chainlit as cl
 from backend.black_box_agent import BlackBoxAgent
 from backend.coach_agent import CoachAgent
 from backend.explainable_agent import ExplainableAgent
+from backend.hitl_agent import HITLAgent
+
 
 # ── Session startup ────────────────────────────────────────────────────────
 @cl.on_chat_start
@@ -31,12 +34,12 @@ async def on_chat_start():
                 description="Select Agent 2",
                 payload={}
             ),
-            # cl.Action(
-            #     name="select_agent_3",
-            #     label="🤖 Agent 3",
-            #     description="Select Agent 3",
-            #     payload={}
-            # )
+            cl.Action(
+                name="select_agent_3",
+                label="🤖 Agent 3",
+                description="Select Agent 3",
+                payload={}
+            ),
         ]
     ).send()
 
@@ -47,11 +50,12 @@ async def on_select_agent_1(action: cl.Action):
     await _init_agent("black_box")
 
 @cl.action_callback("select_agent_2")
-async def on_select_agent_1(action: cl.Action):
+async def on_select_agent_2(action: cl.Action):
     await _init_agent("explainable")
-# @cl.action_callback("select_agent_2")
-# async def on_select_agent_2(action: cl.Action):
-#     await _init_agent("coach")
+
+@cl.action_callback("select_agent_3")
+async def on_select_agent_3(action: cl.Action):
+    await _init_agent("hitl")
 
 
 # ── Shared agent initialisation ────────────────────────────────────────────
@@ -80,21 +84,20 @@ async def _init_agent(agent_type: str):
             f"📝 Note this ID for future reference or support.\n\n"
             f"---\n"
         )
-    # else:
-    #     agent = CoachAgent(user_id=user_id)
-    #     intro = (
-    #         f"✅ **Agent 2 selected!**\n\n"
-    #         f"🪪 **Your Session ID:** `{agent.session_id}`\n"
-    #         f"📝 Note this ID for future reference or support.\n\n"
-    #         f"---\n"
-    #     )
+    elif agent_type == "hitl":
+        agent = HITLAgent(user_id=user_id)
+        intro = (
+            f"✅ **Agent 3 selected!**\n\n"
+            f"🪪 **Your Session ID:** `{agent.session_id}`\n"
+            f"📝 Note this ID for future reference or support.\n\n"
+            f"---\n"
+        )
 
     cl.user_session.set("agent", agent)
     cl.user_session.set("agent_type", agent_type)
 
     await cl.Message(content=intro).send()
 
-    # Present case + clarification prompt
     await cl.Message(
         content=agent.get_opening_message(),
         actions=[
@@ -127,7 +130,6 @@ async def on_start_main_phase(action: cl.Action):
     msg = cl.Message(content="")
     await msg.send()
 
-    import inspect
     if inspect.isgenerator(result):
         for token in result:
             await msg.stream_token(token)
@@ -136,18 +138,7 @@ async def on_start_main_phase(action: cl.Action):
 
     await msg.update()
 
-    # Attach summary button after phase transition
-    await cl.Message(
-        content="",
-        actions=[
-            cl.Action(
-                name="get_summary",
-                label="📊 Get Summary & End Session",
-                description="Get your session summary and end the session",
-                payload={}
-            ),
-        ]
-    ).send()
+    await _attach_buttons(agent)
 
 
 # ── Stop button handler ────────────────────────────────────────────────────
@@ -167,7 +158,7 @@ async def on_message(message: cl.Message):
 
     if agent is None:
         await cl.Message(
-            content="⚠️ Please select an agent first by clicking **Agent 1** or **Agent 2** above."
+            content="⚠️ Please select an agent first by clicking above."
         ).send()
         return
 
@@ -188,10 +179,104 @@ async def on_message(message: cl.Message):
         await msg.stream_token(token)
     await msg.update()
 
-    # Reattach buttons based on current phase
     if not cl.user_session.get("ended", False):
-        if hasattr(agent, "phase") and agent.phase == "clarification":
-            # Still in clarification — keep "I'm Ready" button visible
+        await _attach_buttons(agent)
+
+
+# ── HITL — Approve concept ─────────────────────────────────────────────────
+@cl.action_callback("approve_concept")
+async def on_approve_concept(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None or ended:
+        return
+
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_approve_concept():
+        await msg.stream_token(token)
+    await msg.update()
+
+    await _attach_buttons(agent)
+
+
+# ── HITL — Reject concept (triggers pushback) ──────────────────────────────
+@cl.action_callback("reject_concept")
+async def on_reject_concept(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None or ended:
+        return
+
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_reject_concept():
+        await msg.stream_token(token)
+    await msg.update()
+
+    await _attach_buttons(agent)
+
+
+# ── HITL — Confirm reject (commit exclusion) ───────────────────────────────
+@cl.action_callback("confirm_reject")
+async def on_confirm_reject(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None or ended:
+        return
+
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_confirm_reject():
+        await msg.stream_token(token)
+    await msg.update()
+
+    await _attach_buttons(agent)
+
+
+# ── HITL — Cancel reject (keep concept) ───────────────────────────────────
+@cl.action_callback("cancel_reject")
+async def on_cancel_reject(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None or ended:
+        return
+
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_cancel_reject():
+        await msg.stream_token(token)
+    await msg.update()
+
+    await _attach_buttons(agent)
+
+
+# ── Shared button attachment logic ─────────────────────────────────────────
+async def _attach_buttons(agent):
+    """
+    Attach the correct buttons based on agent type and current state.
+    Called after every streaming response completes.
+
+    BlackBox/Explainable: I'm Ready (clarification) or Summary (main)
+    HITL clarification:   I'm Ready
+    HITL main — concept:  Include / Skip
+    HITL main — pending:  Keep it / Yes skip it
+    HITL main — done:     Summary
+    All agents ended:     Nothing
+
+    Change log: 2026-04-09 — extracted from on_message for reuse across
+    all streaming callbacks.
+    """
+    if cl.user_session.get("ended", False):
+        return
+
+    # ── HITL-specific button logic ─────────────────────────────────────
+    if isinstance(agent, HITLAgent):
+        if agent.phase == "clarification":
             await cl.Message(
                 content="",
                 actions=[
@@ -203,19 +288,93 @@ async def on_message(message: cl.Message):
                     ),
                 ]
             ).send()
-        else:
-            # Main phase — show summary button
+
+        elif agent.should_show_confirmation_buttons():
+            # Pending reject — show confirm/cancel
+            # "Keep it" first — default action after pushback is to reconsider
             await cl.Message(
                 content="",
                 actions=[
                     cl.Action(
-                        name="get_summary",
-                        label="📊 Get Summary & End Session",
-                        description="Get your session summary and end the session",
+                        name="cancel_reject",
+                        label="↩️ Keep it",
+                        description="Keep this concept in the framework",
+                        payload={}
+                    ),
+                    cl.Action(
+                        name="confirm_reject",
+                        label="✅ Yes, skip it",
+                        description="Confirm removal of this concept",
                         payload={}
                     ),
                 ]
             ).send()
+
+        elif agent.should_show_buttons():
+            # Active concept awaiting decision
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(
+                        name="approve_concept",
+                        label="✅ Include",
+                        description="Include this concept in the framework",
+                        payload={}
+                    ),
+                    cl.Action(
+                        name="reject_concept",
+                        label="❌ Skip",
+                        description="Skip this concept",
+                        payload={}
+                    ),
+                ]
+            ).send()
+
+        else:
+            # Walkthrough done — show summary
+            # Only show if walkthrough has actually started
+            # (not during Q1/Q2 clarification step)
+            if agent.walkthrough_active or agent.walkthrough_done:
+                await cl.Message(
+                    content="",
+                    actions=[
+                        cl.Action(
+                            name="get_summary",
+                            label="📊 Get Summary & End Session",
+                            description="Get your session summary and end the session",
+                            payload={}
+                        ),
+                    ]
+                ).send()
+            # else: Q1/Q2 phase — no buttons shown
+            
+        return
+
+    # ── BlackBox / Explainable button logic ───────────────────────────
+    if hasattr(agent, "phase") and agent.phase == "clarification":
+        await cl.Message(
+            content="",
+            actions=[
+                cl.Action(
+                    name="start_main_phase",
+                    label="✅ I'm Ready — Let's Start",
+                    description="End clarification and begin your structured analysis",
+                    payload={}
+                ),
+            ]
+        ).send()
+    else:
+        await cl.Message(
+            content="",
+            actions=[
+                cl.Action(
+                    name="get_summary",
+                    label="📊 Get Summary & End Session",
+                    description="Get your session summary and end the session",
+                    payload={}
+                ),
+            ]
+        ).send()
 
 
 # ── Get summary button ─────────────────────────────────────────────────────
@@ -244,6 +403,32 @@ async def _send_summary():
         await cl.Message(content="⚠️ Session already ended.").send()
         return
 
+    # ── HITL — stream summary directly from walkthrough state ─────────
+    # Does not use send_message() — history scan unreliable for HITL.
+    # Summary derived from approved_concepts list instead.
+    # Change log: 2026-04-09
+    if agent_type == "hitl":
+        cl.user_session.set("ended", True)
+        agent.end_session()
+
+        msg = cl.Message(content="📊 **Your Session Summary:**\n\n")
+        await msg.send()
+        for token in agent.get_summary():
+            await msg.stream_token(token)
+        await msg.update()
+
+        await cl.Message(
+            content=(
+                f"---\n"
+                f"✅ **Session Ended**\n"
+                f"🪪 **Session ID:** `{agent.session_id}`\n"
+                f"*Keep this ID for your records. "
+                f"Refresh the page to start a new session.*"
+            )
+        ).send()
+        return
+
+    # ── BlackBox / Explainable — use send_message() ───────────────────
     if agent_type == "black_box":
         prompt = (
             "Please summarise the cases we explored in this session, "

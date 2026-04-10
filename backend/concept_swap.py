@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 from google import genai
@@ -224,6 +225,25 @@ class ConceptSwap:
             print(f"[SWAP PRESENTED] session={self.session_id}")
         except Exception as e:
             print(f"[SWAP LOG] failed to log presentation: {e}")
+            
+    def force_detected(self) -> None:
+        """
+        Force swap detection without running the LLM classifier.
+        Used when detection is triggered by a button click (HITL Reject
+        confirmation) rather than natural language input.
+
+        Python owns the state decision — no LLM call needed here.
+        Consistent with principle: Python owns state, LLM owns semantics.
+
+        Change log: 2026-04-09 — added for HITLAgent button-triggered detection.
+        """
+        if not self.detected:
+            self.detected = True
+            self._log_detected()
+            print(
+                f"[SWAP] force_detected() — button-triggered, "
+                f"session={self.session_id}, agent={self.agent_type}"
+            )
 
     @property
     def is_detected(self) -> bool:
