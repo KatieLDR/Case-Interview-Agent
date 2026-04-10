@@ -575,12 +575,12 @@ class HITLAgent(BlackBoxAgent):
             full_concept_reply.append(token)
             yield token
 
-        # ── Store sub-bullets for summary — Python owns state ─────────────
-        # Only store for real concepts, not the wrong concept.
-        # concept_blocks used by _stream_summary() — no history reconstruction.
-        if not is_wrong:
-            self.concept_blocks[concept] = "".join(full_concept_reply)
-            logging.info(f"[CONCEPT BLOCK] stored for '{concept}'")
+       # ── Store sub-bullets for summary — Python owns state ─────────────
+        # Store for all concepts including wrong concept.
+        # If wrong concept is detected, _stream_summary() excludes it via active_concepts.
+        # If not detected (passive approval), block is needed for summary.
+        self.concept_blocks[concept] = "".join(full_concept_reply)
+        logging.info(f"[CONCEPT BLOCK] stored for '{concept}'")
 
         # ── Swap tracking ──────────────────────────────────────────────────
         if is_wrong:
@@ -708,8 +708,9 @@ class HITLAgent(BlackBoxAgent):
         )
 
         yield from self._stream_with_instruction(
-            instruction  = instruction,
-            store_answer = True,
+            instruction    = instruction,
+            task_injection = "Please produce the final framework summary now.",
+            store_answer   = True,
         )
 
     def _stream_freeform(self):
