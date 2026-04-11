@@ -146,7 +146,7 @@ Examples:
 # ══════════════════════════════════════════════════════════════════════════
 ANSWER_THRESHOLD   = 0.90
 OVERRIDE_THRESHOLD = 0.85
-MAX_TURNS_PER_SESSION = 2
+MAX_TURNS_PER_SESSION = 50
 
 class BlackBoxAgent:
     def __init__(self, user_id: str = "anonymous"):
