@@ -146,7 +146,7 @@ Examples:
 # ══════════════════════════════════════════════════════════════════════════
 ANSWER_THRESHOLD   = 0.90
 OVERRIDE_THRESHOLD = 0.85
-MAX_TURNS_PER_SESSION = 50
+MAX_TURNS_PER_SESSION = 2
 
 class BlackBoxAgent:
     def __init__(self, user_id: str = "anonymous"):
@@ -355,8 +355,6 @@ class BlackBoxAgent:
         else:
             self.turn_count += 1
             if self.turn_count > MAX_TURNS_PER_SESSION:
-                yield "⏱️ **Session limit reached.** You've completed the maximum number of turns for this session.\n\nGenerating your summary now..."
-                yield from self._auto_end_session()
                 return
             yield from self._stream_main(user_input)
 
@@ -570,13 +568,7 @@ class BlackBoxAgent:
 
         end_session(self.session_id)
 
-    def _auto_end_session(self):
-        """Auto-trigger summary + end when turn cap is hit."""
-        summary = self.send_message(
-            "Please summarise the session in the standard format."
-        )
-        yield f"\n\n{summary}"
-        self.end_session()
+    
     # ══════════════════════════════════════════════════════════════════════
     # Classifiers
     # ══════════════════════════════════════════════════════════════════════

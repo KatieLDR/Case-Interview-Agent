@@ -1,10 +1,11 @@
 import uuid
 import inspect
 import chainlit as cl
-from backend.black_box_agent import BlackBoxAgent
+from backend.black_box_agent import BlackBoxAgent, MAX_TURNS_PER_SESSION
 from backend.coach_agent import CoachAgent
 from backend.explainable_agent import ExplainableAgent
 from backend.hitl_agent import HITLAgent
+
 
 # ── Security caps ──────────────────────────────────────────────────────────
 MAX_INPUT_CHARS = 2000
@@ -187,6 +188,13 @@ async def on_message(message: cl.Message):
     for token in agent.stream_message(message.content):
         await msg.stream_token(token)
     await msg.update()
+
+    if agent.turn_count >= MAX_TURNS_PER_SESSION:
+        await cl.Message(
+            content="⏱️ **You've reached the session limit.**\n\nThank you for your time! I'll now generate your session summary..."
+        ).send()
+        await _send_summary()
+        return
 
     if not cl.user_session.get("ended", False):
         await _attach_buttons(agent)

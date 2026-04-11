@@ -210,7 +210,8 @@ class HITLAgent(BlackBoxAgent):
         self.session_id    = create_session(user_id, agent_type="hitl")
         self.original_case = get_case("hitl")
         self._pending      = False
-
+        self.turn_count    = 0
+        
         # ── Clarification phase ────────────────────────────────────────────
         self.phase               = "clarification"
         self.clarification_facts = get_clarification_facts("hitl")
