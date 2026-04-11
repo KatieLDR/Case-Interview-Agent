@@ -149,9 +149,9 @@ OVERRIDE_THRESHOLD = 0.85
 MAX_TURNS_PER_SESSION = 50
 
 class BlackBoxAgent:
-    def __init__(self, user_id: str = "anonymous"):
+    def __init__(self, user_id: str = "anonymous", participant_code: str = "anonymous"):
         self.user_id       = user_id
-        self.session_id    = create_session(user_id, agent_type="black_box")
+        self.session_id    = create_session(user_id, agent_type="black_box", participant_code=participant_code)
         self.original_case = get_case("black_box")
         self._pending      = False
         self.turn_count = 0

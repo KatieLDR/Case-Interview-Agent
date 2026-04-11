@@ -288,14 +288,13 @@ class ExplainableAgent(BlackBoxAgent):
       - _stream_main        : stateful walkthrough logic
     """
 
-    def __init__(self, user_id: str = "anonymous"):
-        # Replicate BlackBoxAgent.__init__ with explainable config
+    def __init__(self, user_id: str = "anonymous", participant_code: str = "anonymous"):
         self.user_id       = user_id
-        self.session_id    = create_session(user_id, agent_type="explainable")
+        self.session_id    = create_session(user_id, agent_type="explainable", participant_code=participant_code)
         self.original_case = get_case("explainable")
         self._pending      = False
         self.turn_count    = 0
-        
+
         # ── Clarification phase ────────────────────────────────────────────
         self.phase               = "clarification"
         self.clarification_facts = get_clarification_facts("explainable")

@@ -70,10 +70,11 @@ async def _init_agent(agent_type: str):
         ).send()
         return
 
-    user_id = cl.user_session.get("user_id")
+    user_id          = cl.user_session.get("user_id")
+    participant_code = cl.user_session.get("participant_code", "anonymous")
 
     if agent_type == "black_box":
-        agent = BlackBoxAgent(user_id=user_id)
+        agent = BlackBoxAgent(user_id=user_id, participant_code=participant_code)
         intro = (
             f"✅ **Agent 1 selected!**\n\n"
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"
@@ -81,7 +82,7 @@ async def _init_agent(agent_type: str):
             f"---\n"
         )
     elif agent_type == "explainable":
-        agent = ExplainableAgent(user_id=user_id)
+        agent = ExplainableAgent(user_id=user_id, participant_code=participant_code)
         intro = (
             f"✅ **Agent 2 selected!**\n\n"
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"
@@ -89,7 +90,7 @@ async def _init_agent(agent_type: str):
             f"---\n"
         )
     elif agent_type == "hitl":
-        agent = HITLAgent(user_id=user_id)
+        agent = HITLAgent(user_id=user_id, participant_code=participant_code)
         intro = (
             f"✅ **Agent 3 selected!**\n\n"
             f"🪪 **Your Session ID:** `{agent.session_id}`\n"

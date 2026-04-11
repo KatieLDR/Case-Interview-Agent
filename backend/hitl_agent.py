@@ -204,10 +204,9 @@ class HITLAgent(BlackBoxAgent):
                              removed all auto-summary calls from button handlers
     """
 
-    def __init__(self, user_id: str = "anonymous"):
-        # ── Core identity ──────────────────────────────────────────────────
+    def __init__(self, user_id: str = "anonymous", participant_code: str = "anonymous"):
         self.user_id       = user_id
-        self.session_id    = create_session(user_id, agent_type="hitl")
+        self.session_id    = create_session(user_id, agent_type="hitl", participant_code=participant_code)
         self.original_case = get_case("hitl")
         self._pending      = False
         self.turn_count    = 0

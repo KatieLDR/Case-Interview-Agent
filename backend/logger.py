@@ -19,11 +19,12 @@ db = firestore.client()
 
 
 # ── Session ────────────────────────────────────────────────────────────────
-def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> str:
+def create_session(user_id: str = "anonymous", agent_type: str = "unknown", participant_code: str = "anonymous") -> str:
     session_id = str(uuid.uuid4())
     db.collection("sessions").document(session_id).set({
         "user_id": user_id,
         "agent_type": agent_type,
+        "participant_code": participant_code,
         "started_at": None,
         "ended_at": None,
         "current_answer": None,
