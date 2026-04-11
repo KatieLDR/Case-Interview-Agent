@@ -37,8 +37,7 @@ Before presenting the case, you need to understand the candidate briefly.
 Ask these questions ONE AT A TIME. Wait for each answer before proceeding.
 
 Step 1 — Ask Q1 (Context):
-  "Before we dive in — have you worked with M&A frameworks before,
-   or is this your first time approaching this type of case?"
+ "Before we dive in — do you have experience with case interviews?"
 
 Step 2 — Acknowledge Q1 in one sentence. Then ask Q2 (Exigence):
   "Good to know. What's your main goal for today — building out a
