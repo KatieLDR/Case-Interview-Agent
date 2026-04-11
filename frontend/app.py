@@ -6,6 +6,9 @@ from backend.coach_agent import CoachAgent
 from backend.explainable_agent import ExplainableAgent
 from backend.hitl_agent import HITLAgent
 
+# ── Security caps ──────────────────────────────────────────────────────────
+MAX_INPUT_CHARS = 2000
+
 
 # ── Session startup ────────────────────────────────────────────────────────
 @cl.on_chat_start
@@ -165,6 +168,12 @@ async def on_message(message: cl.Message):
     if ended:
         await cl.Message(
             content="⚠️ This session has already ended. Please refresh to start a new one."
+        ).send()
+        return
+
+    if len(message.content) > MAX_INPUT_CHARS:
+        await cl.Message(
+            content=f"⚠️ Your message is too long ({len(message.content)} characters). Please keep messages under {MAX_INPUT_CHARS} characters."
         ).send()
         return
 
@@ -347,7 +356,7 @@ async def _attach_buttons(agent):
                     ]
                 ).send()
             # else: Q1/Q2 phase — no buttons shown
-            
+
         return
 
     # ── BlackBox / Explainable button logic ───────────────────────────
