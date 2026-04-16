@@ -1,0 +1,17 @@
+# Dockerfile.keepalive
+# Reuses the ba-agent base image — no new dependencies needed.
+# Overrides entrypoint to run keep_alive.py instead of the Chainlit app.
+#
+# Build & push:
+#   docker buildx build --platform linux/amd64 \
+#     -f Dockerfile.keepalive \
+#     -t europe-west1-docker.pkg.dev/case-interview-coach/ba-agent/ba-agent-keepalive:latest \
+#     --push .
+
+FROM europe-west1-docker.pkg.dev/case-interview-coach/ba-agent/ba-agent:latest
+
+# Copy keep-alive script into the image
+COPY keep_alive.py /app/keep_alive.py
+
+# Override entrypoint — run the ping script, then exit
+CMD ["python", "/app/keep_alive.py"]
