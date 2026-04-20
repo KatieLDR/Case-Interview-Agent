@@ -8,7 +8,7 @@ from backend.hitl_agent import HITLAgent
 
 
 # ── Security caps ──────────────────────────────────────────────────────────
-MAX_INPUT_CHARS = 2000
+MAX_INPUT_CHARS = 6000
 
 
 # ── Session startup ────────────────────────────────────────────────────────
