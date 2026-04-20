@@ -4,6 +4,7 @@ Runs a minimal Cypher query to prevent AuraDB Free from pausing after 72h inacti
 Designed to be executed by Cloud Run Job, triggered every 24h via Cloud Scheduler.
 
 Change log: 2026-04-16 — initial build
+Change log: 2026-04-16 — switched RETURN 1 to MATCH (n) RETURN count(n) to ensure real graph READ activity
 """
 
 import os
@@ -30,9 +31,9 @@ def ping_neo4j():
     try:
         driver = GraphDatabase.driver(uri, auth=(username, password))
         with driver.session() as session:
-            result = session.run("RETURN 1 AS alive")
+            result = session.run("MATCH (n) RETURN count(n) AS alive LIMIT 1")
             record = result.single()
-            if record and record["alive"] == 1:
+            if record and record["alive"] is not None:
                 logging.info("✅ AuraDB ping successful — instance is alive.")
             else:
                 logging.warning("⚠️ Unexpected response from AuraDB.")

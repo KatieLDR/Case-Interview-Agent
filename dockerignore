@@ -1,0 +1,11 @@
+.git
+.DS_Store
+.env
+*.json
+__pycache__
+*.pyc
+*.pyo
+*.cypher
+test_*.py
+*.md
+.gitignore
