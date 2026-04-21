@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 from google.genai import types
 from backend.black_box_agent import (
     BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
@@ -24,6 +25,34 @@ CASE_TYPE = "M&A"
 CLARIFICATION_Q1_PENDING = "q1_pending"  # agent has not yet asked Q1
 CLARIFICATION_Q2_PENDING = "q2_pending"  # Q1 answered, Q2 not yet asked
 CLARIFICATION_OPEN       = "open"        # both answered, open Q&A active
+
+# ── Proactive prompts — rotating fixed list ────────────────────────────────
+# 8 variants split across user-first (1-4) and guidance-first (5-8).
+# Rotation via prompt_index % 8 — no LLM generation needed.
+# Change log: 2026-04-20 — HITL redesign
+PROACTIVE_PROMPTS = [
+    # User-first
+    "What's your instinct for the next area to explore, or would you like me to suggest one?",
+    "Any thoughts on what to tackle next, or would you prefer my guidance?",
+    "What angle would you take next, or shall I continue building this out?",
+    "What's your next move on this, or would you like me to step in?",
+    # Guidance-first
+    "Would you like me to guide the next step, or is there an area you'd want to drive?",
+    "Shall I take the lead here, or do you have a direction in mind?",
+    "Would you prefer my guidance on this, or do you have thoughts on where to go next?",
+    "Before I continue, is there an area you'd want to prioritise, or shall I proceed?",
+]
+
+# ── Justification acknowledgements — hardcoded, no LLM ────────────────────
+# Neutral, consistent, non-evaluative. Rotates via ack_index % 4.
+# No LLM call — avoids hallucination risk and history contamination.
+# Change log: 2026-04-22
+JUSTIFICATION_ACKS = [
+    "Noted — let's continue.",
+    "Thanks for sharing that.",
+    "Got it.",
+    "Understood.",
+]
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
@@ -198,10 +227,17 @@ class HITLAgent(BlackBoxAgent):
       CANCEL = AUTO-APPROVE: on_cancel_reject() auto-approves and advances.
         Pushback already served as deliberation. No second approval needed.
 
+      PROACTIVE PROMPT: Shown before every concept in main phase.
+        User can suggest own concept (auto-approved, no buttons) or ask
+        for guidance (KG concept presented with Include/Skip buttons).
+        Justification required at ~50% of steps, randomly assigned.
+
     Change log: 2026-04-09 — initial build
     Change log: 2026-04-10 — concept_blocks for summary, cancel auto-approve,
                              fixed duplicate on_confirm_reject, added on_reject_concept,
                              removed all auto-summary calls from button handlers
+    Change log: 2026-04-20 — HITL redesign: proactive prompts, user-contributed
+                             concepts, justification steps, fuzzy duplicate detection
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -267,6 +303,25 @@ class HITLAgent(BlackBoxAgent):
 
         # ── Pending confirmation state ─────────────────────────────────────
         self.pending_excl = None
+
+        # ── Proactive prompt state — HITL redesign 2026-04-20 ─────────────
+        # awaiting_user_suggestion: True after proactive prompt is shown,
+        #   waiting for user to either suggest a concept or ask for guidance.
+        # awaiting_justification: True after Include/Skip or auto-approve,
+        #   when this step was randomly selected for justification.
+        # justification_for: "accept" or "reject" — determines prompt wording.
+        # justification_required: whether current step needs justification.
+        # prompt_index: cycles through PROACTIVE_PROMPTS via % 8.
+        # user_contributed_concepts: set of concept names suggested by user.
+        #   Inserted into walkthrough_concepts for single source of truth.
+        #   should_show_buttons() checks this set to suppress Include/Skip.
+        self.awaiting_user_suggestion  = False
+        self.awaiting_justification    = False
+        self.justification_for         = None   # "accept" | "reject"
+        self.justification_required    = False
+        self.prompt_index              = 0
+        self.ack_index                 = 0      # cycles through JUSTIFICATION_ACKS
+        self.user_contributed_concepts = set()
 
         # ── Conversation history ───────────────────────────────────────────
         self.history = [
@@ -358,6 +413,107 @@ class HITLAgent(BlackBoxAgent):
             "Click **📊 Get Summary & End Session** to see your final framework.\n\n"
         )
 
+    def _get_proactive_prompt(self) -> str:
+        """Return next proactive prompt and advance index."""
+        prompt = PROACTIVE_PROMPTS[self.prompt_index % len(PROACTIVE_PROMPTS)]
+        self.prompt_index += 1
+        return prompt
+
+    def _should_require_justification(self) -> bool:
+        """Randomly determine if this step requires justification (~50%)."""
+        return random.random() < 0.5
+
+    def _classify_intent(self, user_input: str) -> dict:
+        """
+        Classify user response as suggestion or guidance.
+        Single responsibility — intent only, no duplicate detection.
+        Returns: {"type": "suggestion"|"guidance", "concept": str|None}
+        Uses CLASSIFIER_MODEL (lightest model).
+        Change log: 2026-04-21 — split from combined classifier
+        """
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=(
+                    f"You are classifying a user response in a case interview session.\n\n"
+                    f"The user was asked: 'What's your suggestion for the next area to "
+                    f"explore, or would you like me to guide you?'\n\n"
+                    f"User response: \"{user_input}\"\n\n"
+                    f"Reply with JSON only, no markdown, no explanation:\n"
+                    f"{{\"type\": \"suggestion\" or \"guidance\", "
+                    f"\"concept\": \"extracted noun phrase or null\"}}\n\n"
+                    f"type=guidance ALWAYS for:\n"
+                    f"- Questions: 'anything else?', 'what's next?'\n"
+                    f"- Deferrals: 'you decide', 'take a lead', 'take the lead', "
+                    f"'continue', 'proceed', 'next step', 'move on', 'go on'\n"
+                    f"- Uncertainty: 'I don't know', 'not sure', 'no ideas', "
+                    f"'guide me', 'help me', 'no guidance'\n"
+                    f"- Affirmations: 'ok', 'sure', 'yes', 'fine'\n"
+                    f"- Verb phrases without a clear business noun\n\n"
+                    f"type=suggestion ONLY if ALL true:\n"
+                    f"- Names a specific business/analytical area\n"
+                    f"- Is a noun or noun phrase\n"
+                    f"- Could appear in a business case framework\n"
+                    f"- Is NOT conversational or a verb phrase\n\n"
+                    f"WHEN IN DOUBT: use guidance."
+                ),
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            result = json.loads(raw.strip())
+            logging.info(f"[INTENT] classified: {result}")
+            return result
+        except Exception as e:
+            logging.warning(f"[INTENT] classifier failed: {e} — defaulting to guidance")
+            return {"type": "guidance", "concept": None}
+
+    def _check_duplicate(self, concept: str) -> dict:
+        """
+        Check if user-suggested concept matches anything already in the
+        walkthrough list (remaining or covered). Single responsibility —
+        duplicate detection only.
+        Returns: {"is_duplicate": bool, "matched_concept": str|None}
+        Uses CLASSIFIER_MODEL (lightest model).
+        Change log: 2026-04-21 — split from combined classifier
+        """
+        all_concepts = list(self.walkthrough_concepts)
+
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=(
+                    f"You are checking if a user-suggested concept matches any concept "
+                    f"in an existing list.\n\n"
+                    f"User suggested: \"{concept}\"\n\n"
+                    f"Existing concepts: {all_concepts}\n\n"
+                    f"Reply with JSON only, no markdown, no explanation:\n"
+                    f"{{\"is_duplicate\": true or false, "
+                    f"\"matched_concept\": \"exact string from list or null\"}}\n\n"
+                    f"is_duplicate=true ONLY if the user suggestion is clearly the same "
+                    f"concept as one in the list — same topic, possibly different wording.\n"
+                    f"Examples: 'revenue' matches 'Revenue Analysis', "
+                    f"'cost' matches 'Cost Structure'.\n"
+                    f"Do NOT match concepts that are merely related — "
+                    f"'cost' does NOT match 'Company' or 'Competition'.\n"
+                    f"matched_concept must be the exact string from the list.\n"
+                    f"WHEN IN DOUBT: is_duplicate=false."
+                ),
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            result = json.loads(raw.strip())
+            logging.info(f"[DUPLICATE] check result: {result}")
+            return result
+        except Exception as e:
+            logging.warning(f"[DUPLICATE] check failed: {e} — defaulting to not duplicate")
+            return {"is_duplicate": False, "matched_concept": None}
+
     # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
     # ══════════════════════════════════════════════════════════════════════
@@ -366,11 +522,14 @@ class HITLAgent(BlackBoxAgent):
         """
         Main phase router.
         1. Q1/Q2 proactive clarification
-        2. Swap detection
-        3. Override detection + walkthrough routing
+        2. Justification collection (if awaiting_justification)
+        3. User suggestion handling (if awaiting_user_suggestion)
+        4. Swap detection
+        5. Override detection + walkthrough routing
 
         Change log: 2026-04-09
         Change log: 2026-04-10 — Q1/Q2 not appended to history
+        Change log: 2026-04-20 — proactive prompt + justification routing
         """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
@@ -381,11 +540,6 @@ class HITLAgent(BlackBoxAgent):
             log_user_message(self.session_id, f"[Q1 CONTEXT] {user_input}")
             logging.info(f"[HITL] Q1 answer stored: '{self.hitl_context}'")
 
-            # ── Classify experience level ──────────────────────────────────
-            # LLM classifier — avoids keyword edge cases ("never done one",
-            # "not really", "total newbie" all mean the same thing).
-            # Result stored in Python state, injected into system prompt,
-            # logged to Firestore as covariate.
             try:
                 response = client.models.generate_content(
                     model=CLASSIFIER_MODEL,
@@ -405,7 +559,7 @@ class HITLAgent(BlackBoxAgent):
                 self.hitl_experience_level = level if level in ("beginner", "experienced") else "beginner"
             except Exception as e:
                 logging.warning(f"[HITL] experience classifier failed: {e}")
-                self.hitl_experience_level = "beginner"  # safe fallback
+                self.hitl_experience_level = "beginner"
 
             logging.info(f"[HITL] experience_level classified: '{self.hitl_experience_level}'")
             self.clarification_step = CLARIFICATION_Q2_PENDING
@@ -426,21 +580,74 @@ class HITLAgent(BlackBoxAgent):
                 hitl_context  = self.hitl_context,
                 hitl_exigence = self.hitl_exigence,
             )
-            yield (
-                f"Perfect — let's get started.\n\n"
-                f"Here is how I would structure the analysis. "
-                f"For each concept, use the buttons to include or skip it, "
-                f"or just ask me a question first.\n\n"
-                f"---\n\n"
-            )
             self.walkthrough_concepts = self._build_walkthrough_concepts()
             self.walkthrough_active   = True
             self.walkthrough_index    = 0
             self.swap_presented       = False
+            yield (
+                f"Perfect — let's get started.\n\n"
+                f"Here is the first area to explore. From the second concept onwards, "
+                f"I'll ask for your thoughts before we proceed.\n\n"
+                f"---\n\n"
+            )
+            # First concept presented directly — user has no context yet.
+            # Proactive prompt starts from second concept onwards.
+            # Change log: 2026-04-20
             yield from self._stream_concept(is_first=True)
             return
 
-        # ── 1. Swap detection ──────────────────────────────────────────────
+        # ── 1. Justification collection ────────────────────────────────────
+        if self.awaiting_justification:
+            log_user_message(self.session_id, f"[JUSTIFICATION:{self.justification_for}] {user_input}")
+            logging.info(f"[JUSTIFICATION] collected for={self.justification_for}: '{user_input}'")
+            self.awaiting_justification = False
+            self.justification_for      = None
+            yield from self._stream_justification_ack()
+            return
+
+        # ── 2. User suggestion handling ────────────────────────────────────
+        if self.awaiting_user_suggestion:
+            self.awaiting_user_suggestion = False
+            log_user_message(self.session_id, f"[PROACTIVE RESPONSE] {user_input}")
+
+            # Step 1 — classify intent only
+            intent = self._classify_intent(user_input)
+
+            if intent["type"] == "guidance":
+                logging.info(f"[PROACTIVE] user chose guidance")
+                yield from self._stream_concept(is_first=False)
+                return
+
+            # Step 2 — suggestion confirmed, check for duplicate
+            concept = intent.get("concept") or user_input.strip()
+            dup     = self._check_duplicate(concept)
+
+            if dup["is_duplicate"] and dup["matched_concept"]:
+                matched = dup["matched_concept"]
+                logging.info(f"[PROACTIVE] duplicate: '{concept}' matches '{matched}'")
+                # Remove from remaining list — will be re-inserted at current index
+                remaining_idx = None
+                for i in range(self.walkthrough_index, len(self.walkthrough_concepts)):
+                    if self.walkthrough_concepts[i].lower() == matched.lower():
+                        remaining_idx = i
+                        break
+                if remaining_idx is not None:
+                    self.walkthrough_concepts.pop(remaining_idx)
+                    if remaining_idx < self.swap_position:
+                        self.swap_position -= 1
+                        logging.info(f"[PROACTIVE] swap_position shifted back to {self.swap_position}")
+                yield (
+                    f"Good thinking — **{matched}** is already part of the framework. "
+                    f"Let's look at it now.\n\n"
+                )
+                yield from self._stream_user_contributed_concept(matched)
+            else:
+                logging.info(f"[PROACTIVE] new user concept: '{concept}'")
+                yield f"Great suggestion — let's explore **{concept}** now.\n\n"
+                yield from self._stream_user_contributed_concept(concept)
+            return
+
+        # ── 3. Swap detection ──────────────────────────────────────────────
         cs_detected = False
         if self.swap_presented:
             cs_detected = self.concept_swap.check_detection(user_input)
@@ -456,14 +663,14 @@ class HITLAgent(BlackBoxAgent):
                 self.walkthrough_index += 1
                 logging.info(f"[SWAP] caught via text — index→{self.walkthrough_index}")
 
-        # ── 1b. Invariant check ────────────────────────────────────────────
+        # ── 3b. Invariant check ────────────────────────────────────────────
         if (self.walkthrough_active
                 and self.walkthrough_index > self.swap_position
                 and not self.swap_presented):
             logging.error(f"[INVARIANT] rewinding to swap_position={self.swap_position}")
             self.walkthrough_index = self.swap_position
 
-        # ── 2. Override detection ──────────────────────────────────────────
+        # ── 4. Override detection ──────────────────────────────────────────
         just_added_concept = None
         override = None if cs_detected else self._detect_override(user_input)
         if override:
@@ -475,16 +682,22 @@ class HITLAgent(BlackBoxAgent):
             logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}")
 
             if override["type"] == "redo":
-                self.walkthrough_active   = False
-                self.walkthrough_done     = False
-                self.walkthrough_index    = 0
-                self.walkthrough_concepts = []
-                self.excluded_concepts    = []
-                self.approved_concepts    = []
-                self.concept_blocks       = {}
-                self.swap_presented       = False
-                self.swap_position        = 0
-                self.pending_excl         = None
+                self.walkthrough_active        = False
+                self.walkthrough_done          = False
+                self.walkthrough_index         = 0
+                self.walkthrough_concepts      = []
+                self.excluded_concepts         = []
+                self.approved_concepts         = []
+                self.concept_blocks            = {}
+                self.swap_presented            = False
+                self.swap_position             = 0
+                self.pending_excl              = None
+                self.awaiting_user_suggestion  = False
+                self.awaiting_justification    = False
+                self.justification_for         = None
+                self.prompt_index              = 0
+                self.ack_index                 = 0
+                self.user_contributed_concepts = set()
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted — let me start the walkthrough fresh.\n\n"
@@ -509,25 +722,25 @@ class HITLAgent(BlackBoxAgent):
                 logging.info(f"[CONCEPT ADDED] '{new_concept}' at index={insert_at}")
                 just_added_concept = new_concept
 
-        # ── 3. Log and append user message ────────────────────────────────
+        # ── 5. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
         )
 
-        # ── 4. Routing log ─────────────────────────────────────────────────
+        # ── 6. Routing log ─────────────────────────────────────────────────
         logging.info(
             f"[ROUTE] active={self.walkthrough_active}, done={self.walkthrough_done}, "
             f"swap_presented={self.swap_presented}, index={self.walkthrough_index}, "
             f"cs_detected={cs_detected}"
         )
 
-        # ── 5. Route ───────────────────────────────────────────────────────
+        # ── 7. Route ───────────────────────────────────────────────────────
         if not self.walkthrough_active:
-            self.walkthrough_concepts = self._build_walkthrough_concepts()
-            self.walkthrough_active   = True
-            self.walkthrough_index    = 0
-            self.swap_presented       = False
+            self.walkthrough_concepts     = self._build_walkthrough_concepts()
+            self.walkthrough_active       = True
+            self.walkthrough_index        = 0
+            self.swap_presented           = False
             yield from self._stream_concept(is_first=True)
 
         elif self.walkthrough_done:
@@ -540,10 +753,125 @@ class HITLAgent(BlackBoxAgent):
             if next_concept is None:
                 yield from self._walkthrough_complete_message()
             else:
-                yield from self._stream_concept(is_first=False)
+                yield from self._stream_proactive_prompt()
 
         else:
             yield from self._stream_concept_qa(just_added=just_added_concept)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Proactive prompt + justification streaming
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_proactive_prompt(self):
+        """
+        Show rotating proactive prompt and set awaiting_user_suggestion.
+        Called before every concept presentation.
+        Change log: 2026-04-20
+        """
+        self.awaiting_user_suggestion = True
+        self.justification_required   = self._should_require_justification()
+        prompt = self._get_proactive_prompt()
+        logging.info(
+            f"[PROACTIVE] prompt_index={self.prompt_index - 1}, "
+            f"justification_required={self.justification_required}"
+        )
+        yield prompt
+
+    def _stream_justification_prompt(self, for_decision: str, concept: str = None):
+        """
+        Show justification prompt after Include/Skip or auto-approve.
+        concept param allows caller to pass name explicitly — avoids
+        reading _current_concept() after index has been incremented.
+        for_decision: "accept" or "reject"
+        Change log: 2026-04-20
+        Change log: 2026-04-20 — added explicit concept param
+        """
+        self.awaiting_justification = True
+        self.justification_for      = for_decision
+        # Use explicitly passed concept name if provided — safer than
+        # calling _current_concept() after index increment
+        concept_name = concept or self._current_concept() or "this concept"
+
+        if for_decision == "accept":
+            yield (
+                f"Before we move on — what makes **{concept_name}** essential for this case? "
+                f"What would we risk missing if we excluded it?"
+            )
+        else:
+            yield (
+                f"The agent suggested **{concept_name}** because it is part of the standard "
+                f"framework for this type of analysis. Given this, what is your rationale "
+                f"for excluding it?"
+            )
+
+    def _stream_justification_ack(self):
+        """
+        Brief hardcoded acknowledgement after justification text received.
+        No LLM call — avoids hallucination from history contamination.
+        Rotates through JUSTIFICATION_ACKS via ack_index % 4.
+        Advances to next concept's proactive prompt.
+        Change log: 2026-04-20
+        Change log: 2026-04-22 — replaced LLM call with hardcoded rotating ack
+        """
+        ack = JUSTIFICATION_ACKS[self.ack_index % len(JUSTIFICATION_ACKS)]
+        self.ack_index += 1
+        yield ack + "\n\n"
+        # Advance to next concept
+        next_concept = self._current_concept()
+        if next_concept is None:
+            yield from self._walkthrough_complete_message()
+        else:
+            yield from self._stream_proactive_prompt()
+
+    def _stream_user_contributed_concept(self, concept: str):
+        """
+        Handle a user-contributed concept.
+        Inserts into walkthrough_concepts at current index for single
+        source of truth. Marks as user-contributed to suppress buttons.
+        Delegates to _stream_concept() — same code path as KG concepts.
+        Auto-approves after streaming completes (caller owns state).
+
+        Change log: 2026-04-20 — initial build
+        Change log: 2026-04-20 — refactored to single code path via
+                                  walkthrough_concepts insert + user_contributed_concepts set
+        """
+        # Insert at current index — becomes the active concept
+        self.walkthrough_concepts.insert(self.walkthrough_index, concept)
+        self.user_contributed_concepts.add(concept)
+        # If inserted before or at swap_position, shift swap_position forward
+        # to prevent wrong concept being presented twice.
+        # Change log: 2026-04-20
+        if self.walkthrough_index <= self.swap_position:
+            self.swap_position += 1
+            logging.info(f"[USER CONCEPT] swap_position shifted to {self.swap_position}")
+        log_concept_added(self.session_id, concept)
+        logging.info(f"[USER CONCEPT] inserted at index={self.walkthrough_index}: '{concept}'")
+
+        # Stream via same path as KG concepts — pure output, no state change inside
+        yield from self._stream_concept(is_first=False)
+
+        # Auto-approve after streaming — caller owns state transition
+        if concept not in self.approved_concepts:
+            self.approved_concepts.append(concept)
+        logging.info(f"[USER CONCEPT] auto-approved: '{concept}'")
+
+        # Advance index past this concept
+        self.walkthrough_index += 1
+
+        # Justification or next proactive prompt
+        # Pass concept explicitly — index already advanced, _current_concept() wrong here.
+        # Reset justification_required after consuming to prevent bleed into next step.
+        # Change log: 2026-04-21
+        yield "\n\n"
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
+        else:
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     # ══════════════════════════════════════════════════════════════════════
     # Streaming sub-methods
@@ -591,7 +919,6 @@ class HITLAgent(BlackBoxAgent):
 
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
-        # ── Stream and collect tokens ──────────────────────────────────────
         full_concept_reply = []
         for token in self._stream_with_instruction(
             instruction    = instruction,
@@ -603,14 +930,9 @@ class HITLAgent(BlackBoxAgent):
             full_concept_reply.append(token)
             yield token
 
-       # ── Store sub-bullets for summary — Python owns state ─────────────
-        # Store for all concepts including wrong concept.
-        # If wrong concept is detected, _stream_summary() excludes it via active_concepts.
-        # If not detected (passive approval), block is needed for summary.
         self.concept_blocks[concept] = "".join(full_concept_reply)
         logging.info(f"[CONCEPT BLOCK] stored for '{concept}'")
 
-        # ── Swap tracking ──────────────────────────────────────────────────
         if is_wrong:
             self.swap_presented = True
             if not already_logged:
@@ -715,9 +1037,13 @@ class HITLAgent(BlackBoxAgent):
             if c.lower() not in excluded_lower
         ]
 
+        # Also include user-contributed concepts not in walkthrough_concepts
+        for c in self.approved_concepts:
+            if c not in active_concepts:
+                active_concepts.append(c)
+
         logging.info(f"[SUMMARY] active_concepts={active_concepts}")
 
-        # Build framework directly from stored blocks — Python owns state
         concepts_with_blocks = "\n\n".join(
             f"**{c}**\n{self.concept_blocks.get(c, '').strip()}"
             for c in active_concepts
@@ -826,9 +1152,10 @@ class HITLAgent(BlackBoxAgent):
     def on_approve_concept(self):
         """
         Include button clicked.
-        Logs approval, advances, streams next concept.
-        Does NOT auto-stream summary.
+        Captures concept name before incrementing index to avoid
+        justification prompt showing wrong concept name.
         Change log: 2026-04-09 / 2026-04-10
+        Change log: 2026-04-20 — justification step added, capture concept before index increment
         """
         concept = self._current_concept()
         if concept is None:
@@ -838,14 +1165,17 @@ class HITLAgent(BlackBoxAgent):
             self.approved_concepts.append(concept)
 
         logging.info(f"[APPROVE] concept='{concept}', index={self.walkthrough_index}")
-
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     def on_reject_concept(self):
         """
@@ -879,8 +1209,9 @@ class HITLAgent(BlackBoxAgent):
     def on_confirm_reject(self):
         """
         Yes, skip it button clicked.
-        Commits exclusion, advances. Does NOT auto-stream summary.
+        Commits exclusion, checks justification, advances.
         Change log: 2026-04-09 / 2026-04-10
+        Change log: 2026-04-20 — justification step added
         """
         concept = self.pending_excl
         if concept is None:
@@ -903,41 +1234,47 @@ class HITLAgent(BlackBoxAgent):
         logging.info(f"[REJECT CONFIRMED] concept='{concept}'")
 
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
         yield f"Got it — removing **{concept}** from the framework.\n\n"
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("reject", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     def on_cancel_reject(self):
         """
         Keep it button clicked.
-        Auto-approves concept and advances — no second approval click needed.
-        Pushback already served as the deliberation moment.
+        Auto-approves concept and advances.
         Change log: 2026-04-09
-        Change log: 2026-04-10 — auto-approve and advance instead of
-                                  returning to decision point.
+        Change log: 2026-04-10 — auto-approve and advance
+        Change log: 2026-04-20 — justification step added
         """
         concept = self.pending_excl
         self.pending_excl = None
         logging.info(f"[REJECT CANCELLED] concept='{concept}' kept in framework")
 
-        # Auto-approve — user chose to keep after deliberation
         if concept and concept not in self.approved_concepts:
             self.approved_concepts.append(concept)
 
         yield f"Keeping **{concept}** — let's continue.\n\n"
 
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     # ══════════════════════════════════════════════════════════════════════
     # UI state queries
@@ -946,8 +1283,11 @@ class HITLAgent(BlackBoxAgent):
     def should_show_buttons(self) -> bool:
         """
         True if Include/Skip buttons should show.
-        False when pending (confirmation buttons show instead) or done.
+        False when awaiting user suggestion (proactive prompt active),
+        pending confirmation, awaiting justification, or walkthrough done.
         Change log: 2026-04-09
+        Change log: 2026-04-20 — added awaiting_user_suggestion,
+                                  awaiting_justification, user_contributed_concepts guards
         """
         return (
             self.phase == "main"
@@ -956,6 +1296,9 @@ class HITLAgent(BlackBoxAgent):
             and self._current_concept() is not None
             and self.clarification_step == CLARIFICATION_OPEN
             and self.pending_excl is None
+            and not self.awaiting_user_suggestion
+            and not self.awaiting_justification
+            and (self._current_concept() not in self.user_contributed_concepts)
         )
 
     def should_show_confirmation_buttons(self) -> bool:
@@ -982,6 +1325,7 @@ class HITLAgent(BlackBoxAgent):
         Stamp HITL-specific Firestore fields.
         Final framework from approved_concepts — not history scan.
         Change log: 2026-04-09
+        Change log: 2026-04-20 — justification logging placeholder
         """
         from backend.logger import end_session as _end_session
 

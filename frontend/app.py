@@ -8,7 +8,7 @@ from backend.hitl_agent import HITLAgent
 
 
 # ── Security caps ──────────────────────────────────────────────────────────
-MAX_INPUT_CHARS = 6000
+MAX_INPUT_CHARS = 6000  # raised from 2000 — realistic case response is ~2800–3000 chars
 
 
 # ── Session startup ────────────────────────────────────────────────────────
@@ -305,6 +305,12 @@ async def _attach_buttons(agent):
                     ),
                 ]
             ).send()
+
+        elif agent.awaiting_user_suggestion:
+            # Proactive prompt active — no buttons shown.
+            # User must respond via free text before buttons reappear.
+            # Change log: 2026-04-22
+            return
 
         elif agent.should_show_confirmation_buttons():
             # Pending reject — show confirm/cancel
