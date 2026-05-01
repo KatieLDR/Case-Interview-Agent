@@ -102,6 +102,32 @@ async def _init_agent(agent_type: str):
 
     await cl.Message(content=intro).send()
 
+    # ── Show warm-up prompt — no button yet
+    # Button appears after participant submits their answer.
+    # Change log: 2026-05-01 — warm-up phase added before clarification.
+    await cl.Message(content=agent.get_warmup_message()).send()
+
+
+# ── "Let's go" button — transitions warmup → clarification ────────────────
+# Change log: 2026-05-01 — added for warm-up phase.
+# Shown after agent acknowledges warm-up response.
+# Displays opening message + "I'm Ready" button to begin clarification.
+@cl.action_callback("lets_go")
+async def on_lets_go(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None:
+        await cl.Message(content="⚠️ No agent selected yet.").send()
+        return
+
+    if ended:
+        await cl.Message(content="⚠️ This session has already ended.").send()
+        return
+
+    # Phase already set to "clarification" in on_message warmup handler.
+    # Just show the case + I'm Ready button.
+    # Change log: 2026-05-01
     await cl.Message(
         content=agent.get_opening_message(),
         actions=[
@@ -183,6 +209,29 @@ async def on_message(message: cl.Message):
         return
 
     # Stream response token by token
+    # ── Warmup phase — handle entirely here, never enters stream_message ──
+    # Change log: 2026-05-01
+    if hasattr(agent, "phase") and agent.phase == "warmup":
+        from backend.logger import log_warmup_response
+        log_warmup_response(agent.session_id, message.content)
+        agent.phase = "clarification"
+        print(f"[WARMUP] response logged, phase → clarification "
+              f"for session={agent.session_id}")
+        await cl.Message(
+            content=(
+                "It would be a great party! 🎉\n\n"
+                "Are you ready to move on to the main task?"
+            ),
+            actions=[
+                cl.Action(
+                    name="lets_go",
+                    label="Let's go! 🚀",
+                    description="Move on to the main task",
+                    payload={}
+                ),
+            ]
+        ).send()
+        return
     msg = cl.Message(content="")
     await msg.send()
     for token in agent.stream_message(message.content):
@@ -278,6 +327,7 @@ async def _attach_buttons(agent):
     Attach the correct buttons based on agent type and current state.
     Called after every streaming response completes.
 
+    Warmup phase:         Let's go 🚀
     BlackBox/Explainable: I'm Ready (clarification) or Summary (main)
     HITL clarification:   I'm Ready
     HITL main — concept:  Include / Skip
@@ -287,6 +337,7 @@ async def _attach_buttons(agent):
 
     Change log: 2026-04-09 — extracted from on_message for reuse across
     all streaming callbacks.
+    Change log: 2026-05-01 — added warmup phase button.
     """
     if cl.user_session.get("ended", False):
         return
@@ -307,8 +358,6 @@ async def _attach_buttons(agent):
             ).send()
 
         elif agent.should_show_confirmation_buttons():
-            # Pending reject — show confirm/cancel
-            # "Keep it" first — default action after pushback is to reconsider
             await cl.Message(
                 content="",
                 actions=[
@@ -328,7 +377,6 @@ async def _attach_buttons(agent):
             ).send()
 
         elif agent.should_show_buttons():
-            # Active concept awaiting decision
             await cl.Message(
                 content="",
                 actions=[
@@ -348,9 +396,6 @@ async def _attach_buttons(agent):
             ).send()
 
         else:
-            # Walkthrough done — show summary
-            # Only show if walkthrough has actually started
-            # (not during Q1/Q2 clarification step)
             if agent.walkthrough_active or agent.walkthrough_done:
                 await cl.Message(
                     content="",
@@ -363,7 +408,6 @@ async def _attach_buttons(agent):
                         ),
                     ]
                 ).send()
-            # else: Q1/Q2 phase — no buttons shown
 
         return
 
@@ -380,6 +424,7 @@ async def _attach_buttons(agent):
                 ),
             ]
         ).send()
+
     else:
         await cl.Message(
             content="",
@@ -421,9 +466,6 @@ async def _send_summary():
         return
 
     # ── HITL — stream summary directly from walkthrough state ─────────
-    # Does not use send_message() — history scan unreliable for HITL.
-    # Summary derived from approved_concepts list instead.
-    # Change log: 2026-04-09
     if agent_type == "hitl":
         cl.user_session.set("ended", True)
         agent.end_session()

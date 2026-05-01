@@ -7,7 +7,7 @@ from backend.logger import (
     create_session, end_session, stamp_started_at,
     log_user_message, log_agent_response,
     log_interruption, log_memory_override,
-    update_answer,
+    update_answer, log_warmup_response,
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -30,9 +30,6 @@ CASE_TYPE = "Market Entry"
 # ══════════════════════════════════════════════════════════════════════════
 
 # ── Clarification phase system prompt ─────────────────────────────────────
-# Used only during self.phase == "clarification".
-# Agent answers strictly from the facts sheet, infers when related,
-# deflects politely when out of scope.
 CLARIFICATION_SYSTEM_PROMPT = """
 You are a BCG case interviewer conducting the clarification round before the
 candidate begins their structured analysis.
@@ -142,11 +139,35 @@ Examples:
 """
 
 # ══════════════════════════════════════════════════════════════════════════
+# Warm-up content
+# Change log: 2026-05-01 — added for warm-up phase.
+# Domain-free task to warm up structured thinking before the real case.
+# Designed following Shen & Tamkin (2026) warm-up design principles.
+# Response logged to Firestore only — never passed to LLM.
+# ══════════════════════════════════════════════════════════════════════════
+
+WARMUP_PROMPT = (
+    "**Quick Warm-Up** 🎉\n\n"
+    "Your friend is planning a birthday party for 20 people and needs your help "
+    "thinking it through.\n\n"
+    "Take a moment and think carefully before answering:\n\n"
+    "* What are the **3 most important factors** you would consider?\n"
+    "* What could go wrong?\n\n"
+    "There are no right or wrong answers. Just think it through as best you can!"
+)
+
+WARMUP_ACKNOWLEDGEMENT = (
+    "Sounds like a great party! 🎉\n\n"
+    "Are you ready to move on to the main task?"
+)
+
+# ══════════════════════════════════════════════════════════════════════════
 # Thresholds
 # ══════════════════════════════════════════════════════════════════════════
-ANSWER_THRESHOLD   = 0.90
-OVERRIDE_THRESHOLD = 0.85
+ANSWER_THRESHOLD      = 0.90
+OVERRIDE_THRESHOLD    = 0.85
 MAX_TURNS_PER_SESSION = 50
+
 
 class BlackBoxAgent:
     def __init__(self, user_id: str = "anonymous"):
@@ -154,16 +175,16 @@ class BlackBoxAgent:
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
         self._pending      = False
-        self.turn_count = 0
+        self.turn_count    = 0
+
+        # ── Phase sequence: warmup → clarification → main ──────────────────
+        # Change log: 2026-05-01 — warmup phase added before clarification.
+        self.phase = "warmup"
 
         # ── Clarification phase ────────────────────────────────────────────
-        # Phase starts as "clarification" and switches to "main" when the
-        # user clicks "I'm Ready". Facts sheet is loaded from cases.py.
-        self.phase               = "clarification"
         self.clarification_facts = get_clarification_facts("black_box")
 
         # ── Concept Swap experiment ────────────────────────────────────────
-        # Active only during main phase. Injected via system prompt.
         self.concept_swap = ConceptSwap(
             agent_type="black_box",
             session_id=self.session_id
@@ -184,7 +205,9 @@ class BlackBoxAgent:
         }
 
         # ── Conversation history ───────────────────────────────────────────
-        # Pre-load case so agent knows it's been presented.
+        # Pre-loaded with case only.
+        # Warm-up exchange is NOT included — logged to Firestore only.
+        # Change log: 2026-05-01
         self.history = [
             types.Content(
                 role="user",
@@ -225,10 +248,6 @@ class BlackBoxAgent:
                 break
 
     def _build_clarification_system_prompt(self) -> str:
-        """
-        Builds the system prompt for the clarification phase.
-        Injects the facts sheet so the agent answers strictly from it.
-        """
         if self.clarification_facts:
             facts_lines = "\n".join(
                 f"- {topic.upper()}: {answer}"
@@ -247,14 +266,9 @@ class BlackBoxAgent:
                 f"\"I'm afraid I don't have that information for this case.\"\n"
                 f"──────────────────────────────────────────────────────────────────────\n\n"
             )
-
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_system_prompt(self) -> str:
-        """
-        Builds the main phase system prompt:
-          KG context + Concept Swap block + base SYSTEM_PROMPT
-        """
         concepts_str = " → ".join(self.kg_context["concepts"]) \
                        if self.kg_context["concepts"] else "N/A"
 
@@ -268,8 +282,15 @@ class BlackBoxAgent:
         )
 
         swap_block = self.concept_swap.get_system_prompt_block()
-
         return kg_block + swap_block + SYSTEM_PROMPT
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Warm-up message
+    # Change log: 2026-05-01
+    # ══════════════════════════════════════════════════════════════════════
+
+    def get_warmup_message(self) -> str:
+        return WARMUP_PROMPT
 
     # ══════════════════════════════════════════════════════════════════════
     # Opening message
@@ -286,22 +307,24 @@ class BlackBoxAgent:
         )
 
     # ══════════════════════════════════════════════════════════════════════
-    # Phase transition — called by app.py when user clicks "I'm Ready"
+    # Phase transition — clarification → main
     # ══════════════════════════════════════════════════════════════════════
 
-    def start_main_phase(self) -> str:
+    def start_main_phase(self):
         """
-        Transitions agent from clarification → main phase.
-        Injects a system marker into history so the model knows the phase changed.
-        Returns a confirmation message for Chainlit to display.
+        Transitions clarification → main phase.
+        Now a generator — auto-presents framework immediately without
+        waiting for user input.
+        Change log: 2026-05-01 — converted from str return to generator,
+        added auto-trigger of framework presentation.
         """
         if self.phase == "main":
-            return "⚠️ The session is already in progress."
+            yield "⚠️ The session is already in progress."
+            return
 
         self.phase = "main"
         stamp_started_at(self.session_id)
 
-        # Inject explicit handover marker into history
         self.history.append(
             types.Content(
                 role="user",
@@ -324,10 +347,23 @@ class BlackBoxAgent:
         )
 
         print(f"[PHASE] clarification → main for session={self.session_id}")
-        return (
+
+        # Clarification closed + instruction block shown together BEFORE
+        # framework streams so user sees it while LLM is generating.
+        # Change log: 2026-05-01
+        yield (
             "✅ **Clarification round closed.**\n\n"
-            "You can now present your structured framework or ask for a reference answer!"
+            "> ***📖 Read each point carefully. You can discuss, question, or "
+            "change anything in this analysis.***\n>\n"
+            "> *‼️ When you are satisfied with the analysis, click "
+            "**📊 Get Summary & End Session** to finish. "
+            "Note that ending the session cannot be undone.*\n\n"
         )
+
+        # Auto-present framework via dedicated method — no fake user message,
+        # no wasted classifier calls, clean Firestore logging.
+        # Change log: 2026-05-01
+        yield from self._stream_framework_presentation()
 
     # ══════════════════════════════════════════════════════════════════════
     # Main message handler
@@ -335,21 +371,23 @@ class BlackBoxAgent:
 
     def stream_message(self, user_input: str):
         """
-        Routes to clarification or main flow based on self.phase.
+        Routes to warmup, clarification or main flow based on self.phase.
+
+        Warm-up phase:
+          - Logs raw response to Firestore only — no LLM call
+          - Static acknowledgement
+          - Transitions to clarification
 
         Clarification phase:
           - Answers strictly from facts sheet
           - No concept swap, no override detection, no KG update
-          - Uses CLARIFICATION_SYSTEM_PROMPT
 
         Main phase:
           - Full flow: concept swap + override detection + KG + streaming
-          - Uses _build_system_prompt()
         """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # ── Route by phase ─────────────────────────────────────────────────
         if self.phase == "clarification":
             yield from self._stream_clarification(user_input)
         else:
@@ -358,6 +396,8 @@ class BlackBoxAgent:
                 return
             yield from self._stream_main(user_input)
 
+    # ══════════════════════════════════════════════════════════════════════
+    # Warm-up phase streaming
     # ══════════════════════════════════════════════════════════════════════
     # Clarification phase streaming
     # ══════════════════════════════════════════════════════════════════════
@@ -395,6 +435,71 @@ class BlackBoxAgent:
             self._pending = False
 
     # ══════════════════════════════════════════════════════════════════════
+    # Framework presentation — auto-triggered at start of main phase
+    # Change log: 2026-05-01 — replaces fake _stream_main() auto-trigger.
+    # Bypasses user message logging, swap detection, override detection.
+    # Concept swap injected via system prompt + maybe_inject() fallback.
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_framework_presentation(self):
+        """
+        Auto-present framework at start of main phase.
+        - Trigger appended to history as user turn — NOT logged to Firestore
+        - No swap detection, no override detection, no turn_count increment
+        - Concept swap injected via _build_system_prompt() + maybe_inject()
+        - update_answer() stores as original_answer in Firestore
+        Change log: 2026-05-01
+        """
+        # Append trigger to history only — not logged to Firestore
+        self.history.append(
+            types.Content(
+                role="user",
+                parts=[types.Part(text=(
+                    "Please present the full structured framework for this case."
+                ))]
+            )
+        )
+
+        self._pending = True
+        full_reply = []
+        try:
+            for chunk in client.models.generate_content_stream(
+                model=MAIN_MODEL,
+                contents=self.history,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._build_system_prompt(),
+                ),
+            ):
+                token = chunk.text or ""
+                full_reply.append(token)
+                yield token
+
+            reply = "".join(full_reply)
+
+            # Concept swap injection — fallback if LLM missed system prompt instruction
+            was_injected   = self.concept_swap.is_injected
+            injected_reply = self.concept_swap.maybe_inject(reply)
+            if injected_reply != reply:
+                yield injected_reply[len(reply):]
+            reply = injected_reply
+
+            if self.concept_swap.is_injected and not was_injected:
+                self.concept_swap.log_presented()
+
+            self.history.append(
+                types.Content(role="model", parts=[types.Part(text=reply)])
+            )
+
+            # Store as original_answer — this is the first framework presented
+            update_answer(self.session_id, reply)
+            log_agent_response(self.session_id, reply)
+
+        except Exception as e:
+            yield f"Sorry, I encountered an error: {str(e)}"
+        finally:
+            self._pending = False
+
+    # ══════════════════════════════════════════════════════════════════════
     # Main phase streaming
     # ══════════════════════════════════════════════════════════════════════
 
@@ -407,7 +512,6 @@ class BlackBoxAgent:
           4. Stream response
           5. Post-stream: concept swap injection tracking
         """
-        # ── 1. Concept Swap detection ──────────────────────────────────────
         cs_detected = self.concept_swap.check_detection(user_input)
         if cs_detected:
             log_memory_override(
@@ -417,7 +521,6 @@ class BlackBoxAgent:
             )
             print(f"[CONCEPT SWAP] detected — exclusion active from next response")
 
-        # ── 2. Override detection → log for research ───────────────────────
         override = self._detect_override(user_input)
         if override:
             log_memory_override(
@@ -439,10 +542,8 @@ class BlackBoxAgent:
                 )
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
 
-        # ── 3. KG context update ───────────────────────────────────────────
         self._update_kg_if_framework_mentioned(user_input)
 
-        # ── 4. Stream response ─────────────────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
@@ -464,7 +565,6 @@ class BlackBoxAgent:
 
             reply = "".join(full_reply)
 
-            # ── 5. Concept Swap injection tracking ─────────────────────────
             was_injected   = self.concept_swap.is_injected
             injected_reply = self.concept_swap.maybe_inject(reply)
             if injected_reply != reply:
@@ -568,7 +668,6 @@ class BlackBoxAgent:
 
         end_session(self.session_id)
 
-    
     # ══════════════════════════════════════════════════════════════════════
     # Classifiers
     # ══════════════════════════════════════════════════════════════════════

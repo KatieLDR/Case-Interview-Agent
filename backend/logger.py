@@ -28,6 +28,10 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         "ended_at": None,
         "current_answer": None,
         "original_answer": None,
+        # ── warm-up ────────────────────────────────────────────────────
+        # Change log: 2026-05-01 — added for warm-up phase.
+        # Stores raw participant response for optional post-hoc analysis.
+        "warmup_response": None,
         # ── counters ──
         "count_user_messages": 0,
         "count_agent_responses": 0,
@@ -125,6 +129,24 @@ def update_answer(session_id: str, answer: str) -> None:
 
 
 # ── Public logging methods ─────────────────────────────────────────────────
+def log_warmup_response(session_id: str, response: str) -> None:
+    """
+    Log raw warm-up response to Firestore.
+    Stored as a session field for optional post-hoc analysis.
+    Change log: 2026-05-01 — added for warm-up phase.
+    """
+    try:
+        db.collection("sessions").document(session_id).update({
+            "warmup_response": response,
+        })
+        _log_event(session_id, "warmup_response", {
+            "response": response,
+        })
+        print(f"[WARMUP] response logged for session={session_id}")
+    except Exception as e:
+        print(f"[WARMUP] failed to log response: {e}")
+
+
 def log_concept_swap_presented(session_id: str) -> None:
     db.collection("sessions").document(session_id).update({
         "concept_swap_presented": True,
@@ -206,6 +228,7 @@ def log_memory_override(session_id: str, old_context: str, new_context: str) -> 
         "old_context": old_context,
         "new_context": new_context,
     })
+
 # Change log: 2026-04-09 — added stamp_hitl_context().
 # Stamps HITL candidate context (Q1 answer — M&A familiarity, Q2 answer — session goal)
 # to Firestore after proactive clarification completes. Called once — after Q2 answer is received.

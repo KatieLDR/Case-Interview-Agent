@@ -211,9 +211,10 @@ class HITLAgent(BlackBoxAgent):
         self.original_case = get_case("hitl")
         self._pending      = False
         self.turn_count    = 0
-        
-        # ── Clarification phase ────────────────────────────────────────────
-        self.phase               = "clarification"
+     
+        # ── Phase sequence: warmup → clarification → main ──────────────────
+        # Change log: 2026-05-01 — warmup phase added before clarification.
+        self.phase               = "warmup"
         self.clarification_facts = get_clarification_facts("hitl")
 
         # ── Proactive clarification step state ─────────────────────────────
