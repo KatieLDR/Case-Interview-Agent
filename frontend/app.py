@@ -140,6 +140,69 @@ async def on_lets_go(action: cl.Action):
         ]
     ).send()
 
+# ── "Done" button — ends warm-up, shows model answer, shows Let's go ──────
+# Change log: 2026-05-05 — multi-message warm-up
+@cl.action_callback("done_warmup")
+async def on_done_warmup(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None:
+        await cl.Message(content="⚠️ No agent selected yet.").send()
+        return
+
+    if ended:
+        await cl.Message(content="⚠️ This session has already ended.").send()
+        return
+
+    # Guard — prevent double-click after phase already transitioned
+    # Change log: 2026-05-05
+    if agent.phase != "warmup":
+        return
+
+    # Guard — nudge if user clicks Done without typing anything
+    # Change log: 2026-05-05
+    warmup_messages = cl.user_session.get("warmup_messages", [])
+    if not warmup_messages:
+        await cl.Message(
+            content=(
+                "It looks like you haven't typed anything yet! "
+                "Give it a try — there are no wrong answers. 😊"
+            ),
+            actions=[
+                cl.Action(
+                    name="done_warmup",
+                    label="✅ Done",
+                    description="Finish the warm-up exercise",
+                    payload={}
+                ),
+            ]
+        ).send()
+        return
+
+    # Log combined warmup response to Firestore
+    from backend.logger import log_warmup_response
+    combined = " | ".join(warmup_messages)
+    log_warmup_response(agent.session_id, combined)
+
+    # Transition phase
+    agent.phase = "clarification"
+    print(f"[WARMUP] combined response logged, phase → clarification "
+          f"for session={agent.session_id}")
+
+    # Show model answer + Let's go button
+    await cl.Message(
+        content=agent.get_warmup_model_answer(),
+        actions=[
+            cl.Action(
+                name="lets_go",
+                label="Let's go! 🚀",
+                description="Move on to the main task",
+                payload={}
+            ),
+        ]
+    ).send()    
+
 
 # ── "I'm Ready" button — transitions clarification → main ─────────────────
 @cl.action_callback("start_main_phase")
@@ -212,21 +275,18 @@ async def on_message(message: cl.Message):
     # ── Warmup phase — handle entirely here, never enters stream_message ──
     # Change log: 2026-05-01
     if hasattr(agent, "phase") and agent.phase == "warmup":
-        from backend.logger import log_warmup_response
-        log_warmup_response(agent.session_id, message.content)
-        agent.phase = "clarification"
-        print(f"[WARMUP] response logged, phase → clarification "
-              f"for session={agent.session_id}")
+        # Accumulate messages — logged as one combined response on Done click
+        # Change log: 2026-05-05 — multi-message warm-up
+        warmup_messages = cl.user_session.get("warmup_messages", [])
+        warmup_messages.append(message.content)
+        cl.user_session.set("warmup_messages", warmup_messages)
         await cl.Message(
-            content=(
-                "It would be a great party! 🎉\n\n"
-                "Are you ready to move on to the main task?"
-            ),
+            content=agent.get_warmup_acknowledgement(),
             actions=[
                 cl.Action(
-                    name="lets_go",
-                    label="Let's go! 🚀",
-                    description="Move on to the main task",
+                    name="done_warmup",
+                    label="✅ Done",
+                    description="Finish the warm-up exercise",
                     payload={}
                 ),
             ]
@@ -339,6 +399,9 @@ async def _attach_buttons(agent):
     all streaming callbacks.
     Change log: 2026-05-01 — added warmup phase button.
     """
+    if hasattr(agent, "phase") and agent.phase == "warmup":
+        return
+
     if cl.user_session.get("ended", False):
         return
 

@@ -140,25 +140,48 @@ Examples:
 
 # ══════════════════════════════════════════════════════════════════════════
 # Warm-up content
-# Change log: 2026-05-01 — added for warm-up phase.
-# Domain-free task to warm up structured thinking before the real case.
-# Designed following Shen & Tamkin (2026) warm-up design principles.
-# Response logged to Firestore only — never passed to LLM.
+# Change log: 2026-05-05 — redesigned warm-up:
+#   - Domain changed to "moving to a new city" (different from main case)
+#   - Multi-message flow: accumulate in app.py, log on Done click
+#   - Model answer shown after Done, bridges to main task
+#   - Shen & Tamkin (2026) — warm-up as cognitive priming before task
 # ══════════════════════════════════════════════════════════════════════════
 
 WARMUP_PROMPT = (
-    "**Quick Warm-Up** 🎉\n\n"
-    "Your friend is planning a birthday party for 20 people and needs your help "
-    "thinking it through.\n\n"
-    "Take a moment and think carefully before answering:\n\n"
-    "* What are the **3 most important factors** you would consider?\n"
-    "* What could go wrong?\n\n"
-    "There are no right or wrong answers. Just think it through as best you can!"
+    "**🧪 Practice Exercise: Build a Solution**\n\n"
+    "Before the main task, let's warm up with a quick exercise.\n\n"
+    "**The situation:**\n"
+    "You're thinking about moving to a new city. Before you go, "
+    "you want to make sure you've thought everything through.\n\n"
+    "**Your task:**\n"
+    "Break this down into the main **areas** you'd need to figure out. "
+    "For each area, list a few **questions** you'd want to answer.\n\n"
+    "**Example:**\n"
+    "> 🏠 **Housing**\n"
+    "> - Where will I live?\n"
+    "> - What's the average rent?\n"
+    "> - How far is it from work?\n\n"
+    "**Now it's your turn!**\n"
+    "Type your areas and questions below — send as many messages as you like.\n"
+    "When you're done, click the **✅ Done** button below."
 )
 
 WARMUP_ACKNOWLEDGEMENT = (
-    "Sounds like a great party! 🎉\n\n"
-    "Are you ready to move on to the main task?"
+    "Got it! Anything else to add? "
+    "When you're ready, click the **✅ Done** button below."
+)
+
+WARMUP_MODEL_ANSWER = (
+    "**Here's an example of a complete solution:**\n\n"
+    "> 🏠 **Housing** — Where will I live? What's the rent? How far from work?\n\n"
+    "> 💰 **Finances** — What's my budget? What's the cost of living?\n\n"
+    "> 🏢 **Work** — Do I have a job lined up? What's the commute?\n\n"
+    "> 👥 **Social** — Do I know anyone there? How will I meet people?\n\n"
+    "> 📦 **Logistics** — Moving costs, paperwork, transport\n\n"
+    "---\n"
+    "*Notice how each area has a clear theme, and each question helps you "
+    "decide whether that area needs attention. "
+    "That's exactly what you'll be doing in the main task — but for a business situation!*"
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -292,6 +315,12 @@ class BlackBoxAgent:
     def get_warmup_message(self) -> str:
         return WARMUP_PROMPT
 
+    def get_warmup_acknowledgement(self) -> str:
+        return WARMUP_ACKNOWLEDGEMENT
+
+    def get_warmup_model_answer(self) -> str:
+        return WARMUP_MODEL_ANSWER
+    
     # ══════════════════════════════════════════════════════════════════════
     # Opening message
     # ══════════════════════════════════════════════════════════════════════
