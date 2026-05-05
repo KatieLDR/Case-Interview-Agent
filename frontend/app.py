@@ -112,6 +112,7 @@ async def _init_agent(agent_type: str):
 # Change log: 2026-05-01 — added for warm-up phase.
 # Shown after agent acknowledges warm-up response.
 # Displays opening message + "I'm Ready" button to begin clarification.
+# Change log: 2026-05-06 — split into two messages: case text + instruction/button.
 @cl.action_callback("lets_go")
 async def on_lets_go(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -126,19 +127,26 @@ async def on_lets_go(action: cl.Action):
         return
 
     # Phase already set to "clarification" in on_message warmup handler.
-    # Just show the case + I'm Ready button.
-    # Change log: 2026-05-01
+    # Show case text first, then instruction + button as separate message.
+    # Change log: 2026-05-06
+    await cl.Message(content=agent.get_opening_message()).send()
+
     await cl.Message(
-        content=agent.get_opening_message(),
+        content=(
+            "💬 **Before we begin:** Feel free to ask any questions about the case — "
+            "I'm here to help clarify. When you're ready to build your framework, "
+            "click the I'm Ready ✅ button below to start."
+        ),
         actions=[
             cl.Action(
                 name="start_main_phase",
-                label="✅ I'm Ready — Let's Start",
+                label="I'm Ready ✅",
                 description="End clarification and begin your structured analysis",
                 payload={}
             ),
         ]
     ).send()
+
 
 # ── "Done" button — ends warm-up, shows model answer, shows Let's go ──────
 # Change log: 2026-05-05 — multi-message warm-up
@@ -201,7 +209,7 @@ async def on_done_warmup(action: cl.Action):
                 payload={}
             ),
         ]
-    ).send()    
+    ).send()
 
 
 # ── "I'm Ready" button — transitions clarification → main ─────────────────
@@ -271,7 +279,6 @@ async def on_message(message: cl.Message):
         await _send_summary()
         return
 
-    # Stream response token by token
     # ── Warmup phase — handle entirely here, never enters stream_message ──
     # Change log: 2026-05-01
     if hasattr(agent, "phase") and agent.phase == "warmup":
@@ -292,6 +299,7 @@ async def on_message(message: cl.Message):
             ]
         ).send()
         return
+
     msg = cl.Message(content="")
     await msg.send()
     for token in agent.stream_message(message.content):
@@ -398,6 +406,7 @@ async def _attach_buttons(agent):
     Change log: 2026-04-09 — extracted from on_message for reuse across
     all streaming callbacks.
     Change log: 2026-05-01 — added warmup phase button.
+    Change log: 2026-05-06 — updated I'm Ready label to match on_lets_go().
     """
     if hasattr(agent, "phase") and agent.phase == "warmup":
         return
@@ -413,7 +422,7 @@ async def _attach_buttons(agent):
                 actions=[
                     cl.Action(
                         name="start_main_phase",
-                        label="✅ I'm Ready — Let's Start",
+                        label="I'm Ready ✅",
                         description="End clarification and begin your structured analysis",
                         payload={}
                     ),
@@ -481,7 +490,7 @@ async def _attach_buttons(agent):
             actions=[
                 cl.Action(
                     name="start_main_phase",
-                    label="✅ I'm Ready — Let's Start",
+                    label="I'm Ready ✅",
                     description="End clarification and begin your structured analysis",
                     payload={}
                 ),

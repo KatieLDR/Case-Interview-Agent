@@ -145,6 +145,7 @@ Examples:
 #   - Multi-message flow: accumulate in app.py, log on Done click
 #   - Model answer shown after Done, bridges to main task
 #   - Shen & Tamkin (2026) — warm-up as cognitive priming before task
+# Change log: 2026-05-06 — added "Let's go" cue at end of WARMUP_MODEL_ANSWER
 # ══════════════════════════════════════════════════════════════════════════
 
 WARMUP_PROMPT = (
@@ -181,7 +182,8 @@ WARMUP_MODEL_ANSWER = (
     "---\n"
     "*Notice how each area has a clear theme, and each question helps you "
     "decide whether that area needs attention. "
-    "That's exactly what you'll be doing in the main task — but for a business situation!*"
+    "That's exactly what you'll be doing in the main task — but for a business situation!*\n\n"
+    "👆 When you're ready to close this practice and start the main task, click **Let's go!** below."
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -308,7 +310,7 @@ class BlackBoxAgent:
         return kg_block + swap_block + SYSTEM_PROMPT
 
     # ══════════════════════════════════════════════════════════════════════
-    # Warm-up message
+    # Warm-up messages
     # Change log: 2026-05-01
     # ══════════════════════════════════════════════════════════════════════
 
@@ -329,10 +331,6 @@ class BlackBoxAgent:
         return (
             f"📋 **Here is your case:**\n\n"
             f"{self.original_case}\n\n"
-            f"---\n"
-            f"Take your time to read it. Feel free to ask any clarifying questions "
-            f"before you begin your analysis.\n\n"
-            f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -396,9 +394,6 @@ class BlackBoxAgent:
             yield "⚠️ The session is already in progress."
             return
 
-        # Clarification closed + instruction block shown together BEFORE
-        # framework streams so user sees it while LLM is generating.
-        # Change log: 2026-05-01
         yield (
             "✅ **Clarification round closed.**\n\n"
             "> ***📖 Read each point carefully. You can discuss, question, or "
@@ -408,9 +403,6 @@ class BlackBoxAgent:
             "Note that ending the session cannot be undone.*\n\n"
         )
 
-        # Auto-present framework via dedicated method — no fake user message,
-        # no wasted classifier calls, clean Firestore logging.
-        # Change log: 2026-05-01
         yield from self._stream_framework_presentation()
 
     # ══════════════════════════════════════════════════════════════════════

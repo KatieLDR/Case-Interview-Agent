@@ -287,7 +287,6 @@ class HITLAgent(BlackBoxAgent):
             f"When you're ready, I'll walk you through a framework one concept at a "
             f"time. For each concept, you can **include** it, **skip** it, or ask "
             f"me a question before deciding.\n\n"
-            f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
         )
 
     # ══════════════════════════════════════════════════════════════════════

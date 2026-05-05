@@ -348,7 +348,6 @@ class ExplainableAgent(BlackBoxAgent):
             f"Take your time to read it. Feel free to ask any clarifying questions "
             f"before you begin. When you're ready, I'll walk you through the framework "
             f"one concept at a time — you can ask questions at each step.\n\n"
-            f"When you're ready to start, click **\"I'm Ready — Let's Start\"** below."
         )
 
     def start_main_phase(self):
