@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 from google.genai import types
 from backend.black_box_agent import (
     BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
@@ -11,19 +12,39 @@ from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
     log_framework_switched, log_concept_added, stamp_started_at,
-    stamp_hitl_context,
 )
 from backend import knowledge_graph as kg
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "M&A"
 
-# ── Clarification step states ──────────────────────────────────────────────
-# String states preferred over integers for readability and safe extensibility.
-# Change log: 2026-04-09 — senior SE/architect recommendation.
-CLARIFICATION_Q1_PENDING = "q1_pending"  # agent has not yet asked Q1
-CLARIFICATION_Q2_PENDING = "q2_pending"  # Q1 answered, Q2 not yet asked
-CLARIFICATION_OPEN       = "open"        # both answered, open Q&A active
+# ── Proactive prompts — rotating fixed list ────────────────────────────────
+# 8 variants split across user-first (1-4) and guidance-first (5-8).
+# Rotation via prompt_index % 8 — no LLM generation needed.
+# Change log: 2026-04-20 — HITL redesign
+PROACTIVE_PROMPTS = [
+    # User-first
+    "What's your instinct for the next area to explore, or would you like me to suggest one?",
+    "Any thoughts on what to tackle next, or would you prefer my guidance?",
+    "What angle would you take next, or shall I continue building this out?",
+    "What's your next move on this, or would you like me to step in?",
+    # Guidance-first
+    "Would you like me to guide the next step, or is there an area you'd want to drive?",
+    "Shall I take the lead here, or do you have a direction in mind?",
+    "Would you prefer my guidance on this, or do you have thoughts on where to go next?",
+    "Before I continue, is there an area you'd want to prioritise, or shall I proceed?",
+]
+
+# ── Justification acknowledgements — hardcoded, no LLM ────────────────────
+# Neutral, consistent, non-evaluative. Rotates via ack_index % 4.
+# No LLM call — avoids hallucination risk and history contamination.
+# Change log: 2026-04-22
+JUSTIFICATION_ACKS = [
+    "Noted — let's continue.",
+    "Thanks for sharing that.",
+    "Got it.",
+    "Understood.",
+]
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
@@ -31,26 +52,10 @@ CLARIFICATION_OPEN       = "open"        # both answered, open Q&A active
 
 HITL_CLARIFICATION_SYSTEM_PROMPT = """
 You are a strategic thinking partner facilitating a case interview session.
-Before presenting the case, you need to understand the candidate briefly.
 
-─── PHASE A — TWO ORIENTATION QUESTIONS ─────────────────────────────────────
-Ask these questions ONE AT A TIME. Wait for each answer before proceeding.
-
-Step 1 — Ask Q1 (Context):
- "Before we dive in — do you have experience with case interviews?"
-
-Step 2 — Acknowledge Q1 in one sentence. Then ask Q2 (Exigence):
-  "Good to know. What's your main goal for today — building out a
-   complete acquisition framework, or getting a structured overview
-   of the key areas?"
-
-Step 3 — Acknowledge Q2 in one sentence. Summarise both answers
-  briefly. Then say the case is ready whenever they are.
-
-─── PHASE B — OPEN CLARIFICATION ────────────────────────────────────────────
-After both questions are answered, the candidate may ask clarifying
-questions about the case. Answer ONLY from the CASE INFORMATION SHEET
-below. If a question is outside the sheet, say:
+─── OPEN CLARIFICATION ───────────────────────────────────────────────────────
+The candidate may ask clarifying questions about the case. Answer ONLY from
+the CASE INFORMATION SHEET below. If a question is outside the sheet, say:
 "I'm afraid I don't have that information for this case."
 
 ─── RULES ───────────────────────────────────────────────────────────────────
@@ -74,29 +79,13 @@ Subject  : M&A acquisition — US foods company acquiring British confectionery 
 Writer   : Strategic thinking partner — facilitator, not expert authority
 ─────────────────────────────────────────────────────────────────────────────
 
-─── PERSONALISATION RULES ───────────────────────────────────────────────────
-Read CANDIDATE CONTEXT below. Apply silently — do not mention these rules.
-
-IF experience_level = beginner:
-  Add ONE short line before sub-bullets — plain English, no jargon:
-    *[Concept] = [what it means in one clause]. Think of it like [everyday analogy].*
-  Then sub-bullets as normal. Keep the whole response short — 4 lines max.
-
-IF experience_level = experienced:
-  Sub-bullets only. No explanation line.
-
-Based on session goal:
-- Complete framework → 3 sub-bullets per concept
-- Quick overview    → 2 sub-bullets per concept
-─────────────────────────────────────────────────────────────────────────────
-
 ─── CONCEPT PRESENTATION FORMAT ─────────────────────────────────────────────
 Present each concept using this exact format:
 
 **[Concept Name]**
 - [sub-bucket, 5–7 words, specific to this case]
 - [sub-bucket, 5–7 words, specific to this case]
-(- [sub-bucket, 5–7 words] — only if 3 sub-bullets indicated by session goal)
+- [sub-bucket, 5–7 words, specific to this case]
 
 Present concepts clearly and concisely. Let the candidate lead.
 Answer questions when asked, but do not volunteer analysis unprompted.
@@ -160,23 +149,24 @@ class HITLAgent(BlackBoxAgent):
       - _strip_concept_swap_from_history()
       - send_message()
       - KG infrastructure (_fetch_kg_context, _update_kg_if_framework_mentioned)
-      - _stream_with_instruction() — moved to BlackBoxAgent 2026-04-09
+      - _stream_with_instruction()
+      - _start_main_phase_setup() — shared side effects, not a generator
 
     Overrides:
-      - __init__                         : HITL case + walkthrough + clarification step state
+      - __init__                         : HITL case + walkthrough state
       - get_opening_message              : mechanic explanation
-      - start_main_phase                 : generator — asks Q1, initialises walkthrough
-      - _stream_main                     : Q1/Q2 state machine + walkthrough router
+      - start_main_phase                 : generator — transition + first concept
+      - _stream_main                     : justification + suggestion + walkthrough router
       - _stream_concept                  : present concept, store in concept_blocks
       - _stream_concept_qa               : answer question, buttons reattach via app.py
       - _stream_swap_caught              : acknowledge wrong concept, advance
       - _stream_summary                  : uses concept_blocks for reliable summary
-      - _build_system_prompt             : KG + candidate context + HITL rules
+      - _build_system_prompt             : KG context + HITL rules
       - _build_clarification_system_prompt: HITL clarification prompt
-      - on_approve_concept               : button handler — approve + advance
+      - on_approve_concept               : button handler — approve + justification/advance
       - on_reject_concept                : button handler — set pending + pushback
-      - on_confirm_reject                : button handler — commit exclusion + advance
-      - on_cancel_reject                 : button handler — auto-approve + advance
+      - on_confirm_reject                : button handler — commit exclusion + justification/advance
+      - on_cancel_reject                 : button handler — auto-approve + justification/advance
       - should_show_buttons              : UI state query for app.py
       - should_show_confirmation_buttons : UI state query for app.py
       - get_summary                      : public wrapper for app.py summary streaming
@@ -187,10 +177,6 @@ class HITLAgent(BlackBoxAgent):
         stream_message() → BlackBoxAgent.stream_message() → self._stream_main().
         Python MRO resolves correctly. Do NOT override stream_message().
 
-      Q1/Q2 NOT IN HISTORY: Q1/Q2 answers are config, not conversation.
-        Stored in self.hitl_context/hitl_exigence, injected into system
-        prompt at runtime. NOT appended to self.history.
-
       CONCEPT BLOCKS: Sub-bullets stored in self.concept_blocks as streamed.
         Used directly in _stream_summary() — no history reconstruction.
         Python owns state principle — reliable, no LLM hallucination risk.
@@ -198,10 +184,17 @@ class HITLAgent(BlackBoxAgent):
       CANCEL = AUTO-APPROVE: on_cancel_reject() auto-approves and advances.
         Pushback already served as deliberation. No second approval needed.
 
+      PROACTIVE PROMPT: Shown before every concept from second onwards.
+        User can suggest own concept or ask for guidance.
+        Justification required at ~50% of steps, randomly assigned.
+
     Change log: 2026-04-09 — initial build
-    Change log: 2026-04-10 — concept_blocks for summary, cancel auto-approve,
-                             fixed duplicate on_confirm_reject, added on_reject_concept,
-                             removed all auto-summary calls from button handlers
+    Change log: 2026-04-10 — concept_blocks for summary, cancel auto-approve
+    Change log: 2026-04-20 — proactive prompts, user-contributed concepts,
+                             justification steps, fuzzy duplicate detection
+    Change log: 2026-05-05 — removed Q1/Q2; replaced super() with
+                             _start_main_phase_setup(); warmup phase added;
+                             personalisation rules removed from system prompt
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -211,21 +204,11 @@ class HITLAgent(BlackBoxAgent):
         self.original_case = get_case("hitl")
         self._pending      = False
         self.turn_count    = 0
-     
+
         # ── Phase sequence: warmup → clarification → main ──────────────────
         # Change log: 2026-05-01 — warmup phase added before clarification.
         self.phase               = "warmup"
         self.clarification_facts = get_clarification_facts("hitl")
-
-        # ── Proactive clarification step state ─────────────────────────────
-        # "q1_pending" → "q2_pending" → "open"
-        self.clarification_step = CLARIFICATION_Q1_PENDING
-
-        # ── Candidate context ──────────────────────────────────────────────
-        # Config only — NOT stored in history.
-        self.hitl_context          = None  # Q1 answer — case interview experience
-        self.hitl_exigence         = None  # Q2 answer — session goal
-        self.hitl_experience_level = None  # "beginner" | "experienced" — classified from Q1
 
         # ── Concept Swap ───────────────────────────────────────────────────
         self.concept_swap = ConceptSwap(
@@ -256,18 +239,24 @@ class HITLAgent(BlackBoxAgent):
         self.walkthrough_active   = False
         self.walkthrough_done     = False
         self.excluded_concepts    = []
-        self.approved_concepts    = []  # HITL-specific — explicit approvals
+        self.approved_concepts    = []
         self.swap_presented       = False
         self.swap_position        = 0
 
         # ── Concept blocks — Python owns state ────────────────────────────
-        # Stores sub-bullets exactly as streamed per concept.
-        # Used by _stream_summary() — no LLM history reconstruction.
-        # Change log: 2026-04-10
         self.concept_blocks = {}  # concept_name → sub-bullet text
 
         # ── Pending confirmation state ─────────────────────────────────────
         self.pending_excl = None
+
+        # ── Proactive prompt state — HITL redesign 2026-04-20 ─────────────
+        self.awaiting_user_suggestion  = False
+        self.awaiting_justification    = False
+        self.justification_for         = None   # "accept" | "reject"
+        self.justification_required    = False
+        self.prompt_index              = 0
+        self.ack_index                 = 0
+        self.user_contributed_concepts = set()
 
         # ── Conversation history ───────────────────────────────────────────
         self.history = [
@@ -279,7 +268,7 @@ class HITLAgent(BlackBoxAgent):
                 role="model",
                 parts=[types.Part(text=(
                     "I have received the case. We are now in the clarification round. "
-                    "I will ask you two quick questions before we begin."
+                    "Feel free to ask any questions about the case before we begin."
                 ))]
             ),
         ]
@@ -308,19 +297,27 @@ class HITLAgent(BlackBoxAgent):
     def start_main_phase(self):
         """
         Override — generator.
-        Calls super() for side effects: phase, history injection, stamp_started_at.
-        Yields Q1. Q2 and walkthrough handled in _stream_main().
-        Change log: 2026-04-09
+        Calls _start_main_phase_setup() for side effects: phase transition,
+        history injection, stamp_started_at. Yields transition message then
+        streams first concept directly.
+        Change log: 2026-05-05 — removed Q1/Q2; replaced super() with
+                                  _start_main_phase_setup(); walkthrough starts immediately
         """
-        super().start_main_phase()
-        self.clarification_step = CLARIFICATION_Q1_PENDING
+        self._start_main_phase_setup()
+
+        self.walkthrough_concepts = self._build_walkthrough_concepts()
+        self.walkthrough_active   = True
+        self.walkthrough_index    = 0
+        self.swap_presented       = False
+
         yield (
-            f"✅ **Clarification round closed.**\n\n"
-            f"Before we begin, I have two quick questions to help me tailor "
-            f"this session for you.\n\n"
+            f"✅ **Clarification round closed — let's begin.**\n\n"
+            f"I'll walk you through the framework one concept at a time. "
+            f"For each one, use the buttons to **include** or **skip** it, "
+            f"or just type a question first.\n\n"
             f"---\n\n"
-            f"**Do you have experience with case interviews?**"
         )
+        yield from self._stream_concept(is_first=True)
 
     # ══════════════════════════════════════════════════════════════════════
     # Walkthrough state helpers
@@ -352,12 +349,101 @@ class HITLAgent(BlackBoxAgent):
         return concept.lower() == self.concept_swap.config["wrong_concept"].lower()
 
     def _walkthrough_complete_message(self):
-        """Shared helper — yields walkthrough complete message."""
         self.walkthrough_done = True
         yield (
             "✅ We've covered all the concepts. "
             "Click **📊 Get Summary & End Session** to see your final framework.\n\n"
         )
+
+    def _get_proactive_prompt(self) -> str:
+        prompt = PROACTIVE_PROMPTS[self.prompt_index % len(PROACTIVE_PROMPTS)]
+        self.prompt_index += 1
+        return prompt
+
+    def _should_require_justification(self) -> bool:
+        return random.random() < 0.5
+
+    def _classify_intent(self, user_input: str) -> dict:
+        """
+        Classify user response to proactive prompt as suggestion or guidance.
+        Change log: 2026-04-21
+        """
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=(
+                    f"You are classifying a user response in a case interview session.\n\n"
+                    f"The user was asked: 'What's your suggestion for the next area to "
+                    f"explore, or would you like me to guide you?'\n\n"
+                    f"User response: \"{user_input}\"\n\n"
+                    f"Reply with JSON only, no markdown, no explanation:\n"
+                    f"{{\"type\": \"suggestion\" or \"guidance\", "
+                    f"\"concept\": \"extracted noun phrase or null\"}}\n\n"
+                    f"type=guidance ALWAYS for:\n"
+                    f"- Questions: 'anything else?', 'what's next?'\n"
+                    f"- Deferrals: 'you decide', 'take a lead', 'take the lead', "
+                    f"'continue', 'proceed', 'next step', 'move on', 'go on'\n"
+                    f"- Uncertainty: 'I don't know', 'not sure', 'no ideas', "
+                    f"'guide me', 'help me', 'no guidance'\n"
+                    f"- Affirmations: 'ok', 'sure', 'yes', 'fine'\n"
+                    f"- Verb phrases without a clear business noun\n\n"
+                    f"type=suggestion ONLY if ALL true:\n"
+                    f"- Names a specific business/analytical area\n"
+                    f"- Is a noun or noun phrase\n"
+                    f"- Could appear in a business case framework\n"
+                    f"- Is NOT conversational or a verb phrase\n\n"
+                    f"WHEN IN DOUBT: use guidance."
+                ),
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            result = json.loads(raw.strip())
+            logging.info(f"[INTENT] classified: {result}")
+            return result
+        except Exception as e:
+            logging.warning(f"[INTENT] classifier failed: {e} — defaulting to guidance")
+            return {"type": "guidance", "concept": None}
+
+    def _check_duplicate(self, concept: str) -> dict:
+        """
+        Check if user-suggested concept matches anything already in walkthrough.
+        Change log: 2026-04-21
+        """
+        all_concepts = list(self.walkthrough_concepts)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=(
+                    f"You are checking if a user-suggested concept matches any concept "
+                    f"in an existing list.\n\n"
+                    f"User suggested: \"{concept}\"\n\n"
+                    f"Existing concepts: {all_concepts}\n\n"
+                    f"Reply with JSON only, no markdown, no explanation:\n"
+                    f"{{\"is_duplicate\": true or false, "
+                    f"\"matched_concept\": \"exact string from list or null\"}}\n\n"
+                    f"is_duplicate=true ONLY if the user suggestion is clearly the same "
+                    f"concept as one in the list — same topic, possibly different wording.\n"
+                    f"Examples: 'revenue' matches 'Revenue Analysis', "
+                    f"'cost' matches 'Cost Structure'.\n"
+                    f"Do NOT match concepts that are merely related.\n"
+                    f"matched_concept must be the exact string from the list.\n"
+                    f"WHEN IN DOUBT: is_duplicate=false."
+                ),
+            )
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            result = json.loads(raw.strip())
+            logging.info(f"[DUPLICATE] check result: {result}")
+            return result
+        except Exception as e:
+            logging.warning(f"[DUPLICATE] check failed: {e} — defaulting to not duplicate")
+            return {"is_duplicate": False, "matched_concept": None}
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
@@ -366,82 +452,67 @@ class HITLAgent(BlackBoxAgent):
     def _stream_main(self, user_input: str):
         """
         Main phase router.
-        1. Q1/Q2 proactive clarification
-        2. Swap detection
-        3. Override detection + walkthrough routing
+        1. Justification collection (if awaiting_justification)
+        2. User suggestion handling (if awaiting_user_suggestion)
+        3. Swap detection
+        4. Override detection + walkthrough routing
 
         Change log: 2026-04-09
-        Change log: 2026-04-10 — Q1/Q2 not appended to history
+        Change log: 2026-04-20 — proactive prompt + justification routing
+        Change log: 2026-05-05 — removed Q1/Q2 state machine
         """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # ── 0. Proactive clarification ─────────────────────────────────────
-        if self.clarification_step == CLARIFICATION_Q1_PENDING:
-            self.hitl_context = user_input.strip()
-            log_user_message(self.session_id, f"[Q1 CONTEXT] {user_input}")
-            logging.info(f"[HITL] Q1 answer stored: '{self.hitl_context}'")
+        # ── 1. Justification collection ────────────────────────────────────
+        if self.awaiting_justification:
+            log_user_message(self.session_id, f"[JUSTIFICATION:{self.justification_for}] {user_input}")
+            logging.info(f"[JUSTIFICATION] collected for={self.justification_for}: '{user_input}'")
+            self.awaiting_justification = False
+            self.justification_for      = None
+            yield from self._stream_justification_ack()
+            return
 
-            # ── Classify experience level ──────────────────────────────────
-            # LLM classifier — avoids keyword edge cases ("never done one",
-            # "not really", "total newbie" all mean the same thing).
-            # Result stored in Python state, injected into system prompt,
-            # logged to Firestore as covariate.
-            try:
-                response = client.models.generate_content(
-                    model=CLASSIFIER_MODEL,
-                    contents=(
-                        f"Classify this case interview experience answer as exactly "
-                        f"one word — either 'beginner' or 'experienced'.\n\n"
-                        f"Rules:\n"
-                        f"- 'beginner': no experience, first time, not sure, "
-                        f"never done one, not really, some vague familiarity\n"
-                        f"- 'experienced': has done case interviews before, "
-                        f"familiar with frameworks, practiced, knows the format\n\n"
-                        f"Answer: \"{self.hitl_context}\"\n\n"
-                        f"Reply with exactly one word: beginner or experienced."
-                    ),
+        # ── 2. User suggestion handling ────────────────────────────────────
+        if self.awaiting_user_suggestion:
+            self.awaiting_user_suggestion = False
+            log_user_message(self.session_id, f"[PROACTIVE RESPONSE] {user_input}")
+
+            intent = self._classify_intent(user_input)
+
+            if intent["type"] == "guidance":
+                logging.info(f"[PROACTIVE] user chose guidance")
+                yield from self._stream_concept(is_first=False)
+                return
+
+            concept = intent.get("concept") or user_input.strip()
+            dup     = self._check_duplicate(concept)
+
+            if dup["is_duplicate"] and dup["matched_concept"]:
+                matched = dup["matched_concept"]
+                logging.info(f"[PROACTIVE] duplicate: '{concept}' matches '{matched}'")
+                remaining_idx = None
+                for i in range(self.walkthrough_index, len(self.walkthrough_concepts)):
+                    if self.walkthrough_concepts[i].lower() == matched.lower():
+                        remaining_idx = i
+                        break
+                if remaining_idx is not None:
+                    self.walkthrough_concepts.pop(remaining_idx)
+                    if remaining_idx < self.swap_position:
+                        self.swap_position -= 1
+                        logging.info(f"[PROACTIVE] swap_position shifted back to {self.swap_position}")
+                yield (
+                    f"Good thinking — **{matched}** is already part of the framework. "
+                    f"Let's look at it now.\n\n"
                 )
-                level = response.text.strip().lower()
-                self.hitl_experience_level = level if level in ("beginner", "experienced") else "beginner"
-            except Exception as e:
-                logging.warning(f"[HITL] experience classifier failed: {e}")
-                self.hitl_experience_level = "beginner"  # safe fallback
-
-            logging.info(f"[HITL] experience_level classified: '{self.hitl_experience_level}'")
-            self.clarification_step = CLARIFICATION_Q2_PENDING
-            yield (
-                f"Got it — good to know.\n\n"
-                f"**What's your main goal for today — building a complete "
-                f"acquisition framework, or getting a quick structured overview?**"
-            )
+                yield from self._stream_user_contributed_concept(matched)
+            else:
+                logging.info(f"[PROACTIVE] new user concept: '{concept}'")
+                yield f"Great suggestion — let's explore **{concept}** now.\n\n"
+                yield from self._stream_user_contributed_concept(concept)
             return
 
-        if self.clarification_step == CLARIFICATION_Q2_PENDING:
-            self.hitl_exigence = user_input.strip()
-            log_user_message(self.session_id, f"[Q2 EXIGENCE] {user_input}")
-            logging.info(f"[HITL] Q2 answer stored: '{self.hitl_exigence}'")
-            self.clarification_step = CLARIFICATION_OPEN
-            stamp_hitl_context(
-                session_id    = self.session_id,
-                hitl_context  = self.hitl_context,
-                hitl_exigence = self.hitl_exigence,
-            )
-            yield (
-                f"Perfect — let's get started.\n\n"
-                f"Here is how I would structure the analysis. "
-                f"For each concept, use the buttons to include or skip it, "
-                f"or just ask me a question first.\n\n"
-                f"---\n\n"
-            )
-            self.walkthrough_concepts = self._build_walkthrough_concepts()
-            self.walkthrough_active   = True
-            self.walkthrough_index    = 0
-            self.swap_presented       = False
-            yield from self._stream_concept(is_first=True)
-            return
-
-        # ── 1. Swap detection ──────────────────────────────────────────────
+        # ── 3. Swap detection ──────────────────────────────────────────────
         cs_detected = False
         if self.swap_presented:
             cs_detected = self.concept_swap.check_detection(user_input)
@@ -457,14 +528,14 @@ class HITLAgent(BlackBoxAgent):
                 self.walkthrough_index += 1
                 logging.info(f"[SWAP] caught via text — index→{self.walkthrough_index}")
 
-        # ── 1b. Invariant check ────────────────────────────────────────────
+        # ── 3b. Invariant check ────────────────────────────────────────────
         if (self.walkthrough_active
                 and self.walkthrough_index > self.swap_position
                 and not self.swap_presented):
             logging.error(f"[INVARIANT] rewinding to swap_position={self.swap_position}")
             self.walkthrough_index = self.swap_position
 
-        # ── 2. Override detection ──────────────────────────────────────────
+        # ── 4. Override detection ──────────────────────────────────────────
         just_added_concept = None
         override = None if cs_detected else self._detect_override(user_input)
         if override:
@@ -476,16 +547,22 @@ class HITLAgent(BlackBoxAgent):
             logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}")
 
             if override["type"] == "redo":
-                self.walkthrough_active   = False
-                self.walkthrough_done     = False
-                self.walkthrough_index    = 0
-                self.walkthrough_concepts = []
-                self.excluded_concepts    = []
-                self.approved_concepts    = []
-                self.concept_blocks       = {}
-                self.swap_presented       = False
-                self.swap_position        = 0
-                self.pending_excl         = None
+                self.walkthrough_active        = False
+                self.walkthrough_done          = False
+                self.walkthrough_index         = 0
+                self.walkthrough_concepts      = []
+                self.excluded_concepts         = []
+                self.approved_concepts         = []
+                self.concept_blocks            = {}
+                self.swap_presented            = False
+                self.swap_position             = 0
+                self.pending_excl              = None
+                self.awaiting_user_suggestion  = False
+                self.awaiting_justification    = False
+                self.justification_for         = None
+                self.prompt_index              = 0
+                self.ack_index                 = 0
+                self.user_contributed_concepts = set()
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted — let me start the walkthrough fresh.\n\n"
@@ -510,25 +587,25 @@ class HITLAgent(BlackBoxAgent):
                 logging.info(f"[CONCEPT ADDED] '{new_concept}' at index={insert_at}")
                 just_added_concept = new_concept
 
-        # ── 3. Log and append user message ────────────────────────────────
+        # ── 5. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
         )
 
-        # ── 4. Routing log ─────────────────────────────────────────────────
+        # ── 6. Routing log ─────────────────────────────────────────────────
         logging.info(
             f"[ROUTE] active={self.walkthrough_active}, done={self.walkthrough_done}, "
             f"swap_presented={self.swap_presented}, index={self.walkthrough_index}, "
             f"cs_detected={cs_detected}"
         )
 
-        # ── 5. Route ───────────────────────────────────────────────────────
+        # ── 7. Route ───────────────────────────────────────────────────────
         if not self.walkthrough_active:
-            self.walkthrough_concepts = self._build_walkthrough_concepts()
-            self.walkthrough_active   = True
-            self.walkthrough_index    = 0
-            self.swap_presented       = False
+            self.walkthrough_concepts     = self._build_walkthrough_concepts()
+            self.walkthrough_active       = True
+            self.walkthrough_index        = 0
+            self.swap_presented           = False
             yield from self._stream_concept(is_first=True)
 
         elif self.walkthrough_done:
@@ -541,25 +618,106 @@ class HITLAgent(BlackBoxAgent):
             if next_concept is None:
                 yield from self._walkthrough_complete_message()
             else:
-                yield from self._stream_concept(is_first=False)
+                yield from self._stream_proactive_prompt()
 
         else:
             yield from self._stream_concept_qa(just_added=just_added_concept)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Proactive prompt + justification streaming
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _stream_proactive_prompt(self):
+        """
+        Show rotating proactive prompt and set awaiting_user_suggestion.
+        Called before every concept from second onwards.
+        Change log: 2026-04-20
+        """
+        self.awaiting_user_suggestion = True
+        self.justification_required   = self._should_require_justification()
+        prompt = self._get_proactive_prompt()
+        logging.info(
+            f"[PROACTIVE] prompt_index={self.prompt_index - 1}, "
+            f"justification_required={self.justification_required}"
+        )
+        yield prompt
+
+    def _stream_justification_prompt(self, for_decision: str, concept: str = None):
+        """
+        Show justification prompt after Include/Skip or auto-approve.
+        for_decision: "accept" or "reject"
+        Change log: 2026-04-20
+        """
+        self.awaiting_justification = True
+        self.justification_for      = for_decision
+        concept_name = concept or self._current_concept() or "this concept"
+
+        if for_decision == "accept":
+            yield (
+                f"Before we move on — what makes **{concept_name}** essential for this case? "
+                f"What would we risk missing if we excluded it?"
+            )
+        else:
+            yield (
+                f"The agent suggested **{concept_name}** because it is part of the standard "
+                f"framework for this type of analysis. Given this, what is your rationale "
+                f"for excluding it?"
+            )
+
+    def _stream_justification_ack(self):
+        """
+        Brief hardcoded acknowledgement after justification text received.
+        No LLM call — avoids hallucination risk.
+        Change log: 2026-04-22
+        """
+        ack = JUSTIFICATION_ACKS[self.ack_index % len(JUSTIFICATION_ACKS)]
+        self.ack_index += 1
+        yield ack + "\n\n"
+        next_concept = self._current_concept()
+        if next_concept is None:
+            yield from self._walkthrough_complete_message()
+        else:
+            yield from self._stream_proactive_prompt()
+
+    def _stream_user_contributed_concept(self, concept: str):
+        """
+        Handle a user-contributed concept.
+        Inserts into walkthrough_concepts, marks as user-contributed,
+        delegates to _stream_concept(), auto-approves after streaming.
+        Change log: 2026-04-20
+        """
+        self.walkthrough_concepts.insert(self.walkthrough_index, concept)
+        self.user_contributed_concepts.add(concept)
+        if self.walkthrough_index <= self.swap_position:
+            self.swap_position += 1
+            logging.info(f"[USER CONCEPT] swap_position shifted to {self.swap_position}")
+        log_concept_added(self.session_id, concept)
+        logging.info(f"[USER CONCEPT] inserted at index={self.walkthrough_index}: '{concept}'")
+
+        yield from self._stream_concept(is_first=False)
+
+        if concept not in self.approved_concepts:
+            self.approved_concepts.append(concept)
+        logging.info(f"[USER CONCEPT] auto-approved: '{concept}'")
+
+        self.walkthrough_index += 1
+
+        yield "\n\n"
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
+        else:
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     # ══════════════════════════════════════════════════════════════════════
     # Streaming sub-methods
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_concept(self, is_first: bool):
-        """
-        Present concept at current walkthrough_index.
-        Stores streamed sub-bullets in concept_blocks for summary use.
-        Buttons attached by app.py via should_show_buttons().
-
-        Change log: 2026-04-09
-        Change log: 2026-04-10 — collect tokens into concept_blocks.
-                                  removed auto-summary, uses _walkthrough_complete_message.
-        """
         concept = self._current_concept()
         if concept is None:
             yield from self._walkthrough_complete_message()
@@ -592,7 +750,6 @@ class HITLAgent(BlackBoxAgent):
 
         already_logged = self.concept_swap.is_injected if is_wrong else False
 
-        # ── Stream and collect tokens ──────────────────────────────────────
         full_concept_reply = []
         for token in self._stream_with_instruction(
             instruction    = instruction,
@@ -604,14 +761,9 @@ class HITLAgent(BlackBoxAgent):
             full_concept_reply.append(token)
             yield token
 
-       # ── Store sub-bullets for summary — Python owns state ─────────────
-        # Store for all concepts including wrong concept.
-        # If wrong concept is detected, _stream_summary() excludes it via active_concepts.
-        # If not detected (passive approval), block is needed for summary.
         self.concept_blocks[concept] = "".join(full_concept_reply)
         logging.info(f"[CONCEPT BLOCK] stored for '{concept}'")
 
-        # ── Swap tracking ──────────────────────────────────────────────────
         if is_wrong:
             self.swap_presented = True
             if not already_logged:
@@ -619,11 +771,6 @@ class HITLAgent(BlackBoxAgent):
                 logging.info(f"[SWAP] concept presented at position={self.swap_position}")
 
     def _stream_concept_qa(self, just_added: str | None = None):
-        """
-        Answer a question about the current concept.
-        Buttons reattach via app.py should_show_buttons() after streaming.
-        Change log: 2026-04-09
-        """
         concept = self._current_concept() or "the current concept"
         on_swap = (
             self.walkthrough_index == self.swap_position
@@ -637,7 +784,6 @@ class HITLAgent(BlackBoxAgent):
                 f"Good idea — I'll add **{just_added}** after we finish "
                 f"**{concept}**.\n\n"
             )
-            logging.info(f"[QA] concept_added acknowledgement for '{just_added}'")
 
         instruction = (
             f"{self._build_system_prompt()}\n\n"
@@ -663,11 +809,6 @@ class HITLAgent(BlackBoxAgent):
         )
 
     def _stream_swap_caught(self):
-        """
-        Acknowledge user caught wrong concept via text.
-        Caller handles advancement.
-        Change log: 2026-04-09
-        """
         wrong       = self.concept_swap.config["wrong_concept"]
         wrong_fw    = self.concept_swap.config["wrong_framework"]
         active_fw   = self.kg_context["framework"]
@@ -693,15 +834,6 @@ class HITLAgent(BlackBoxAgent):
         yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_summary(self):
-        """
-        Generate final framework summary using concept_blocks.
-        concept_blocks contains exactly what was streamed per concept —
-        no history reconstruction, no LLM hallucination risk.
-        Only called via get_summary() — never auto-called.
-
-        Change log: 2026-04-09
-        Change log: 2026-04-10 — uses concept_blocks, standalone HITL_SUMMARY_PROMPT
-        """
         self.walkthrough_done = True
 
         wrong = self.concept_swap.config["wrong_concept"].lower()
@@ -716,9 +848,12 @@ class HITLAgent(BlackBoxAgent):
             if c.lower() not in excluded_lower
         ]
 
+        for c in self.approved_concepts:
+            if c not in active_concepts:
+                active_concepts.append(c)
+
         logging.info(f"[SUMMARY] active_concepts={active_concepts}")
 
-        # Build framework directly from stored blocks — Python owns state
         concepts_with_blocks = "\n\n".join(
             f"**{c}**\n{self.concept_blocks.get(c, '').strip()}"
             for c in active_concepts
@@ -743,10 +878,6 @@ class HITLAgent(BlackBoxAgent):
         )
 
     def _stream_freeform(self):
-        """
-        Post-walkthrough freeform.
-        Change log: 2026-04-09
-        """
         concepts_str = " → ".join(self.kg_context["concepts"])
         instruction  = (
             f"─── FRAMEWORK CONTEXT ────────────────────────────────────────\n"
@@ -765,9 +896,8 @@ class HITLAgent(BlackBoxAgent):
 
     def _build_system_prompt(self) -> str:
         """
-        KG context + candidate context + HITL rules.
-        Graceful fallback if Q1/Q2 not yet collected.
-        Change log: 2026-04-09
+        KG context + HITL rules.
+        Change log: 2026-05-05 — removed candidate context block (Q1/Q2 removed)
         """
         concepts_str = " → ".join(self.kg_context["concepts"]) \
                        if self.kg_context["concepts"] else "N/A"
@@ -782,23 +912,9 @@ class HITLAgent(BlackBoxAgent):
         )
 
         swap_block = self.concept_swap.get_system_prompt_block()
-
-        context_block = ""
-        if self.hitl_context or self.hitl_exigence:
-            context_block = (
-                f"─── CANDIDATE CONTEXT ────────────────────────────────────────\n"
-                f"Case interview experience : {self.hitl_experience_level or 'not specified'}\n"
-                f"Session goal             : {self.hitl_exigence or 'not specified'}\n"
-                f"──────────────────────────────────────────────────────────────\n\n"
-            )
-
-        return kg_block + swap_block + context_block + HITL_MAIN_SYSTEM_PROMPT
+        return kg_block + swap_block + HITL_MAIN_SYSTEM_PROMPT
 
     def _build_clarification_system_prompt(self) -> str:
-        """
-        HITL clarification prompt with facts sheet.
-        Change log: 2026-04-09
-        """
         if self.clarification_facts:
             facts_lines = "\n".join(
                 f"- {topic.upper()}: {answer}"
@@ -817,7 +933,6 @@ class HITLAgent(BlackBoxAgent):
                 f"\"I'm afraid I don't have that information for this case.\"\n"
                 f"──────────────────────────────────────────────────────────────\n\n"
             )
-
         return facts_block + HITL_CLARIFICATION_SYSTEM_PROMPT
 
     # ══════════════════════════════════════════════════════════════════════
@@ -827,9 +942,8 @@ class HITLAgent(BlackBoxAgent):
     def on_approve_concept(self):
         """
         Include button clicked.
-        Logs approval, advances, streams next concept.
-        Does NOT auto-stream summary.
-        Change log: 2026-04-09 / 2026-04-10
+        Captures concept name before incrementing index.
+        Change log: 2026-04-20 — justification step added
         """
         concept = self._current_concept()
         if concept is None:
@@ -839,21 +953,21 @@ class HITLAgent(BlackBoxAgent):
             self.approved_concepts.append(concept)
 
         logging.info(f"[APPROVE] concept='{concept}', index={self.walkthrough_index}")
-
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     def on_reject_concept(self):
         """
-        Skip button clicked.
-        Sets pending_excl, streams KG-grounded pushback.
-        No exclusion yet — confirmation required.
-        Change log: 2026-04-09
+        Skip button clicked. Sets pending_excl, streams pushback.
         """
         concept = self._current_concept()
         if concept is None:
@@ -879,9 +993,8 @@ class HITLAgent(BlackBoxAgent):
 
     def on_confirm_reject(self):
         """
-        Yes, skip it button clicked.
-        Commits exclusion, advances. Does NOT auto-stream summary.
-        Change log: 2026-04-09 / 2026-04-10
+        Yes, skip it button clicked. Commits exclusion + justification/advance.
+        Change log: 2026-04-20 — justification step added
         """
         concept = self.pending_excl
         if concept is None:
@@ -902,43 +1015,44 @@ class HITLAgent(BlackBoxAgent):
 
         self.pending_excl = None
         logging.info(f"[REJECT CONFIRMED] concept='{concept}'")
-
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
         yield f"Got it — removing **{concept}** from the framework.\n\n"
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("reject", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     def on_cancel_reject(self):
         """
-        Keep it button clicked.
-        Auto-approves concept and advances — no second approval click needed.
-        Pushback already served as the deliberation moment.
-        Change log: 2026-04-09
-        Change log: 2026-04-10 — auto-approve and advance instead of
-                                  returning to decision point.
+        Keep it button clicked. Auto-approves + justification/advance.
+        Change log: 2026-04-20 — justification step added
         """
         concept = self.pending_excl
         self.pending_excl = None
         logging.info(f"[REJECT CANCELLED] concept='{concept}' kept in framework")
 
-        # Auto-approve — user chose to keep after deliberation
         if concept and concept not in self.approved_concepts:
             self.approved_concepts.append(concept)
 
         yield f"Keeping **{concept}** — let's continue.\n\n"
-
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
 
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
+        if self.justification_required:
+            self.justification_required = False
+            yield from self._stream_justification_prompt("accept", concept=concept)
         else:
-            yield from self._stream_concept(is_first=False)
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
 
     # ══════════════════════════════════════════════════════════════════════
     # UI state queries
@@ -947,23 +1061,21 @@ class HITLAgent(BlackBoxAgent):
     def should_show_buttons(self) -> bool:
         """
         True if Include/Skip buttons should show.
-        False when pending (confirmation buttons show instead) or done.
-        Change log: 2026-04-09
+        Change log: 2026-04-20 — added proactive/justification/user-contributed guards
+        Change log: 2026-05-05 — removed clarification_step check (Q1/Q2 removed)
         """
         return (
             self.phase == "main"
             and self.walkthrough_active
             and not self.walkthrough_done
             and self._current_concept() is not None
-            and self.clarification_step == CLARIFICATION_OPEN
             and self.pending_excl is None
+            and not self.awaiting_user_suggestion
+            and not self.awaiting_justification
+            and (self._current_concept() not in self.user_contributed_concepts)
         )
 
     def should_show_confirmation_buttons(self) -> bool:
-        """
-        True if Keep it / Yes skip it buttons should show.
-        Change log: 2026-04-09
-        """
         return self.pending_excl is not None
 
     # ══════════════════════════════════════════════════════════════════════
@@ -971,19 +1083,9 @@ class HITLAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
 
     def get_summary(self):
-        """
-        Public wrapper for app.py summary button.
-        Uses _stream_summary() with concept_blocks — not send_message().
-        Change log: 2026-04-09
-        """
         yield from self._stream_summary()
 
     def end_session(self) -> None:
-        """
-        Stamp HITL-specific Firestore fields.
-        Final framework from approved_concepts — not history scan.
-        Change log: 2026-04-09
-        """
         from backend.logger import end_session as _end_session
 
         if self.approved_concepts:
@@ -1006,7 +1108,6 @@ class HITLAgent(BlackBoxAgent):
                 "swap_detected_at_end":  self.concept_swap.is_detected,
                 "concepts_approved":     self.approved_concepts,
                 "concepts_rejected":     self.excluded_concepts,
-                "experience_level":      self.hitl_experience_level or "unknown",
             })
             logging.info(f"[END SESSION] Firestore stamped for session={self.session_id}")
         except Exception as e:

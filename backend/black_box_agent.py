@@ -320,7 +320,7 @@ class BlackBoxAgent:
 
     def get_warmup_model_answer(self) -> str:
         return WARMUP_MODEL_ANSWER
-    
+
     # ══════════════════════════════════════════════════════════════════════
     # Opening message
     # ══════════════════════════════════════════════════════════════════════
@@ -336,19 +336,19 @@ class BlackBoxAgent:
         )
 
     # ══════════════════════════════════════════════════════════════════════
-    # Phase transition — clarification → main
+    # Phase transition — shared setup (non-generator)
+    # Change log: 2026-05-05 — extracted from start_main_phase() so subclasses
+    # can call side effects directly without iterating a generator.
     # ══════════════════════════════════════════════════════════════════════
 
-    def start_main_phase(self):
+    def _start_main_phase_setup(self):
         """
-        Transitions clarification → main phase.
-        Now a generator — auto-presents framework immediately without
-        waiting for user input.
-        Change log: 2026-05-01 — converted from str return to generator,
-        added auto-trigger of framework presentation.
+        Shared side effects for all agents — NOT a generator.
+        Sets phase, stamps started_at, injects system turn into history.
+        Called directly by start_main_phase() in all agents.
+        Change log: 2026-05-05
         """
         if self.phase == "main":
-            yield "⚠️ The session is already in progress."
             return
 
         self.phase = "main"
@@ -377,6 +377,25 @@ class BlackBoxAgent:
 
         print(f"[PHASE] clarification → main for session={self.session_id}")
 
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase transition — clarification → main
+    # ══════════════════════════════════════════════════════════════════════
+
+    def start_main_phase(self):
+        """
+        Transitions clarification → main phase.
+        Generator — auto-presents framework immediately without
+        waiting for user input.
+        Change log: 2026-05-01 — converted from str return to generator,
+        added auto-trigger of framework presentation.
+        Change log: 2026-05-05 — side effects moved to _start_main_phase_setup().
+        """
+        self._start_main_phase_setup()
+
+        if self.phase != "main":
+            yield "⚠️ The session is already in progress."
+            return
+
         # Clarification closed + instruction block shown together BEFORE
         # framework streams so user sees it while LLM is generating.
         # Change log: 2026-05-01
@@ -400,12 +419,7 @@ class BlackBoxAgent:
 
     def stream_message(self, user_input: str):
         """
-        Routes to warmup, clarification or main flow based on self.phase.
-
-        Warm-up phase:
-          - Logs raw response to Firestore only — no LLM call
-          - Static acknowledgement
-          - Transitions to clarification
+        Routes to clarification or main flow based on self.phase.
 
         Clarification phase:
           - Answers strictly from facts sheet
@@ -425,8 +439,6 @@ class BlackBoxAgent:
                 return
             yield from self._stream_main(user_input)
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Warm-up phase streaming
     # ══════════════════════════════════════════════════════════════════════
     # Clarification phase streaming
     # ══════════════════════════════════════════════════════════════════════
@@ -479,7 +491,6 @@ class BlackBoxAgent:
         - update_answer() stores as original_answer in Firestore
         Change log: 2026-05-01
         """
-        # Append trigger to history only — not logged to Firestore
         self.history.append(
             types.Content(
                 role="user",
@@ -505,7 +516,6 @@ class BlackBoxAgent:
 
             reply = "".join(full_reply)
 
-            # Concept swap injection — fallback if LLM missed system prompt instruction
             was_injected   = self.concept_swap.is_injected
             injected_reply = self.concept_swap.maybe_inject(reply)
             if injected_reply != reply:
@@ -519,7 +529,6 @@ class BlackBoxAgent:
                 types.Content(role="model", parts=[types.Part(text=reply)])
             )
 
-            # Store as original_answer — this is the first framework presented
             update_answer(self.session_id, reply)
             log_agent_response(self.session_id, reply)
 
