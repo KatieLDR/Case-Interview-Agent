@@ -23,7 +23,8 @@ MAIN_MODEL       = "gemini-2.5-flash"
 CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── Case config ────────────────────────────────────────────────────────────
-CASE_TYPE = "Market Entry"
+# CASE_TYPE = "Market Entry"
+CASE_TYPE = "Profitability"
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts

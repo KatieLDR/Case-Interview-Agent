@@ -16,7 +16,8 @@ from backend.logger import (
 from backend import knowledge_graph as kg
 
 # ── Case config ────────────────────────────────────────────────────────────
-CASE_TYPE = "M&A"
+# CASE_TYPE = "M&A"
+CASE_TYPE = "Profitability"
 
 # ── Proactive prompts — rotating fixed list ────────────────────────────────
 # 8 variants split across user-first (1-4) and guidance-first (5-8).
