@@ -197,21 +197,21 @@ def get_concept_depth(concept_name: str, framework: str) -> int:
 
 
 def get_framework_tree(framework: str) -> list[dict]:
-    """Change log: 2026-03-31 — initial implementation."""
     rows = _run(
         """
         MATCH path = (f:Framework {name: $framework})-[:HAS_CHILD*1..]->(c:Concept)
         WITH c, length(path) AS depth, path
         MATCH (parent)-[:HAS_CHILD]->(c)
-        RETURN c.name      AS concept,
-               parent.name AS parent,
-               depth
+        RETURN c.name                      AS concept,
+               parent.name                AS parent,
+               depth,
+               coalesce(c.branch, false)  AS is_branch
         ORDER BY depth, c.name
         """,
         framework=framework,
     )
     return [
-        {"concept": r["concept"], "parent": r["parent"], "depth": r["depth"]}
+        {"concept": r["concept"], "parent": r["parent"], "depth": r["depth"], "is_branch": r["is_branch"]}
         for r in rows
     ]
 

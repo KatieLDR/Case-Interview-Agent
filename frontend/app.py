@@ -2,7 +2,6 @@ import uuid
 import inspect
 import chainlit as cl
 from backend.black_box_agent import BlackBoxAgent, MAX_TURNS_PER_SESSION
-from backend.coach_agent import CoachAgent
 from backend.explainable_agent import ExplainableAgent
 from backend.hitl_agent import HITLAgent
 
@@ -110,8 +109,6 @@ async def _init_agent(agent_type: str):
 
 # ── "Let's go" button — transitions warmup → clarification ────────────────
 # Change log: 2026-05-01 — added for warm-up phase.
-# Shown after agent acknowledges warm-up response.
-# Displays opening message + "I'm Ready" button to begin clarification.
 # Change log: 2026-05-06 — split into two messages: case text + instruction/button.
 @cl.action_callback("lets_go")
 async def on_lets_go(action: cl.Action):
@@ -126,9 +123,6 @@ async def on_lets_go(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
-    # Phase already set to "clarification" in on_message warmup handler.
-    # Show case text first, then instruction + button as separate message.
-    # Change log: 2026-05-06
     await cl.Message(content=agent.get_opening_message()).send()
 
     await cl.Message(
@@ -163,13 +157,9 @@ async def on_done_warmup(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
-    # Guard — prevent double-click after phase already transitioned
-    # Change log: 2026-05-05
     if agent.phase != "warmup":
         return
 
-    # Guard — nudge if user clicks Done without typing anything
-    # Change log: 2026-05-05
     warmup_messages = cl.user_session.get("warmup_messages", [])
     if not warmup_messages:
         await cl.Message(
@@ -188,17 +178,14 @@ async def on_done_warmup(action: cl.Action):
         ).send()
         return
 
-    # Log combined warmup response to Firestore
     from backend.logger import log_warmup_response
     combined = " | ".join(warmup_messages)
     log_warmup_response(agent.session_id, combined)
 
-    # Transition phase
     agent.phase = "clarification"
     print(f"[WARMUP] combined response logged, phase → clarification "
           f"for session={agent.session_id}")
 
-    # Show model answer + Let's go button
     await cl.Message(
         content=agent.get_warmup_model_answer(),
         actions=[
@@ -212,11 +199,14 @@ async def on_done_warmup(action: cl.Action):
     ).send()
 
 
-# ── "I'm Ready" button — transitions clarification → main ─────────────────
+# ── "I'm Ready" button — shows tree overview + instruction + Got it button ─
+# Change log: 2026-05-12 — split into show_tree() + begin_analysis() flow.
+# No longer calls start_main_phase() directly.
+# started_at now stamps in begin_analysis() via _start_main_phase_setup().
 @cl.action_callback("start_main_phase")
 async def on_start_main_phase(action: cl.Action):
-    agent  = cl.user_session.get("agent")
-    ended  = cl.user_session.get("ended", False)
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
 
     if agent is None:
         await cl.Message(content="⚠️ No agent selected yet.").send()
@@ -226,19 +216,49 @@ async def on_start_main_phase(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
-    result = agent.start_main_phase()
+    # Show tree overview
+    tree = agent.show_tree()
+    await cl.Message(content=tree).send()
+
+    # Show per-agent instruction
+    await cl.Message(content=agent.get_pre_analysis_instruction()).send()
+
+    # Show "Got it" button
+    await cl.Message(
+        content="",
+        actions=[
+            cl.Action(
+                name="begin_analysis",
+                label="Got it, show me the full analysis ✅",
+                description="Begin the structured analysis",
+                payload={}
+            ),
+        ]
+    ).send()
+
+
+# ── "Got it" button — triggers begin_analysis(), stamps started_at ─────────
+# Change log: 2026-05-12 — new callback for tree/button flow.
+@cl.action_callback("begin_analysis")
+async def on_begin_analysis(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+
+    if agent is None:
+        await cl.Message(content="⚠️ No agent selected yet.").send()
+        return
+
+    if ended:
+        await cl.Message(content="⚠️ This session has already ended.").send()
+        return
 
     msg = cl.Message(content="")
     await msg.send()
 
-    if inspect.isgenerator(result):
-        for token in result:
-            await msg.stream_token(token)
-    else:
-        await msg.stream_token(result)
+    for token in agent.begin_analysis():
+        await msg.stream_token(token)
 
     await msg.update()
-
     await _attach_buttons(agent)
 
 
@@ -271,7 +291,8 @@ async def on_message(message: cl.Message):
 
     if len(message.content) > MAX_INPUT_CHARS:
         await cl.Message(
-            content=f"⚠️ Your message is too long ({len(message.content)} characters). Please keep messages under {MAX_INPUT_CHARS} characters."
+            content=f"⚠️ Your message is too long ({len(message.content)} characters). "
+                    f"Please keep messages under {MAX_INPUT_CHARS} characters."
         ).send()
         return
 
@@ -279,11 +300,9 @@ async def on_message(message: cl.Message):
         await _send_summary()
         return
 
-    # ── Warmup phase — handle entirely here, never enters stream_message ──
+    # ── Warmup phase ──────────────────────────────────────────────────────
     # Change log: 2026-05-01
     if hasattr(agent, "phase") and agent.phase == "warmup":
-        # Accumulate messages — logged as one combined response on Done click
-        # Change log: 2026-05-05 — multi-message warm-up
         warmup_messages = cl.user_session.get("warmup_messages", [])
         warmup_messages.append(message.content)
         cl.user_session.set("warmup_messages", warmup_messages)
@@ -308,7 +327,8 @@ async def on_message(message: cl.Message):
 
     if agent.turn_count >= MAX_TURNS_PER_SESSION:
         await cl.Message(
-            content="⏱️ **You've reached the session limit.**\n\nThank you for your time! I'll now generate your session summary..."
+            content="⏱️ **You've reached the session limit.**\n\nThank you for your time! "
+                    "I'll now generate your session summary..."
         ).send()
         await _send_summary()
         return
@@ -395,18 +415,10 @@ async def _attach_buttons(agent):
     Attach the correct buttons based on agent type and current state.
     Called after every streaming response completes.
 
-    Warmup phase:         Let's go 🚀
-    BlackBox/Explainable: I'm Ready (clarification) or Summary (main)
-    HITL clarification:   I'm Ready
-    HITL main — concept:  Include / Skip
-    HITL main — pending:  Keep it / Yes skip it
-    HITL main — done:     Summary
-    All agents ended:     Nothing
-
-    Change log: 2026-04-09 — extracted from on_message for reuse across
-    all streaming callbacks.
-    Change log: 2026-05-01 — added warmup phase button.
-    Change log: 2026-05-06 — updated I'm Ready label to match on_lets_go().
+    Change log: 2026-04-09 — extracted from on_message
+    Change log: 2026-05-01 — added warmup phase button
+    Change log: 2026-05-06 — updated I'm Ready label
+    Change log: 2026-05-12 — removed user_framework phase (replaced by tree/button flow)
     """
     if hasattr(agent, "phase") and agent.phase == "warmup":
         return

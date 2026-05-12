@@ -23,14 +23,12 @@ MAIN_MODEL       = "gemini-2.5-flash"
 CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── Case config ────────────────────────────────────────────────────────────
-# CASE_TYPE = "Market Entry"
 CASE_TYPE = "Profitability"
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
 # ══════════════════════════════════════════════════════════════════════════
 
-# ── Clarification phase system prompt ─────────────────────────────────────
 CLARIFICATION_SYSTEM_PROMPT = """
 You are a BCG case interviewer conducting the clarification round before the
 candidate begins their structured analysis.
@@ -50,7 +48,6 @@ candidate's questions based strictly on that sheet.
 - Do not ask questions back to the candidate
 """
 
-# ── Main phase system prompt ───────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are a strategic consultant specializing in structured frameworks. Your goal
 is to provide a concise, high-level logical breakdown of business problems.
@@ -61,35 +58,66 @@ STRICT OUTPUT FORMAT — follow this exactly:
 One single question the framework aims to solve.
 
 **The Framework**
-**Primary Bucket 1**
-- Sub-bucket detail
-- Sub-bucket detail
 
-**Primary Bucket 2**
-- Sub-bucket detail
-- Sub-bucket detail
+**[Branch concept]**
+- **[Leaf concept]**
+  - [analytical question, 5-7 words]
+  - [analytical question, 5-7 words]
 
-(continue for all buckets)
+**[Branch concept]**
+- **[Leaf concept]**
+  - [analytical question, 5-7 words]
+- **[Branch+Leaf concept]**
+  - **[Leaf concept]**
+    - [analytical question, 5-7 words]
+
+(continue for all branches — do NOT add any not in KG context above,
+UNLESS the user explicitly requests it)
+
+─── STRUCTURAL EXAMPLE (format only — do not copy these questions) ──────
+**Revenue**
+- **Price per Unit**
+  - [your question here]
+  - [your question here]
+- **Units Sold**
+  - [your question here]
+  - [your question here]
+
+**Costs**
+- **Fixed Cost**
+  - [your question here]
+- **Variable Cost**
+  - **Cost per Unit**
+    - [your question here]
+─────────────────────────────────────────────────────────────────────────
 
 **Key Considerations** *(only if relevant)*
 - Critical dependency 1
 - Critical dependency 2
 
-─── INTERACTION STYLE ─────────────────────────────────────────────────────
+─── INTERACTION STYLE ────────────────────────────────────────────────────
 You are a reference tool, not an interviewer. After presenting or updating
 a framework, ask ONE short natural follow-up question to invite exploration.
 
-If the user questions the framework or asks to change it:
+If the user wants to ADD a new concept or bucket:
+- Add it immediately, no pushback
+- If it fits within Revenue or Costs → add as a sub-bucket under the right branch
+- If it is a new top-level area (e.g. Risks, Market) → add as a new primary bucket
+- Never refuse user additions
+- When a user explicitly asks to add a sub-bullet, always honour it — no limit applies
+
+If the user wants to REMOVE or CHANGE an existing KG concept:
 - Briefly explain your reasoning in one sentence
 - Ask if they still want to proceed
 - If they confirm, honour it immediately
 
-─── RULES ─────────────────────────────────────────────────────────────────
+─── RULES ────────────────────────────────────────────────────────────────
 - Always use the exact format above — bold headers, bullet sub-buckets
 - Never use numbered lists for framework buckets
 - Be direct and concise
 - Never evaluate or score the user
 - Ask only ONE follow-up question per response
+- When initially presenting concepts, aim for 2 analytical questions per leaf concept
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -115,38 +143,47 @@ Determine whether the user's message is attempting to steer or change the
 agent's output — i.e. the content, structure, or direction of the framework.
 
 If yes, classify the type:
-- "redo"               : wants a fresh answer or complete regeneration ("redo", "try again", "start over", "different approach")
-- "concept_excluded"   : wants to remove a specific concept or bucket ("remove X", "exclude X", "don't include X")
-- "framework_switch"   : wants to use a specific named different framework ("use profitability framework", "switch to market sizing")
-- "none"               : not steering the output
+- "redo"             : wants a fresh answer or complete regeneration
+- "concept_excluded" : wants to remove a specific concept or bucket
+- "concept_added"    : wants to add a new concept or bucket
+- "framework_switch" : wants to use a specific named different framework
+- "none"             : not steering the output
 
 This does NOT include:
-- Asking for a framework for the first time ("give me a framework", "show me the framework")
+- Asking for a framework for the first time
 - Asking follow-up questions ("can you elaborate?", "why is X here?")
 - General questions about the case
+- Single word responses ("yes", "no", "ok", "sure")
+- Questions asking where a concept is ("where's X", "where is X")
+- Conversational rejections ("no thanks", "not needed", "no")
+- Asking what happened to a concept ("what happened to X")
 
 Respond ONLY with valid JSON, no explanation, no markdown:
-{"override": true or false, "type": "redo"|"concept_excluded"|"framework_switch"|"none", "detail": string or null, "confidence": float}
+{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}
 
 Examples:
 - "redo this" → {"override": true, "type": "redo", "detail": null, "confidence": 0.99}
 - "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "confidence": 0.97}
 - "remove profit per unit" → {"override": true, "type": "concept_excluded", "detail": "Profit per Unit", "confidence": 0.97}
+- "add external risks as a bucket" → {"override": true, "type": "concept_added", "detail": "External Risks", "confidence": 0.97}
+- "what about market preference?" → {"override": true, "type": "concept_added", "detail": "Market Preference", "confidence": 0.95}
 - "use profitability framework" → {"override": true, "type": "framework_switch", "detail": "profitability", "confidence": 0.96}
 - "give me a framework" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "show me the framework" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
 - "why is variable cost here?" → {"override": false, "type": "none", "detail": null, "confidence": 0.95}
-- "can you elaborate?" → {"override": false, "type": "none", "detail": null, "confidence": 0.98}
+- "yes" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "no" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "no thanks" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "ok" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "sure" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "where's variable cost" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "where is external risk" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "what happened to market share" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
 # Warm-up content
-# Change log: 2026-05-05 — redesigned warm-up:
-#   - Domain changed to "moving to a new city" (different from main case)
-#   - Multi-message flow: accumulate in app.py, log on Done click
-#   - Model answer shown after Done, bridges to main task
-#   - Shen & Tamkin (2026) — warm-up as cognitive priming before task
-# Change log: 2026-05-06 — added "Let's go" cue at end of WARMUP_MODEL_ANSWER
+# Change log: 2026-05-05 — redesigned warm-up
+# Change log: 2026-05-06 — added "Let's go" cue
 # ══════════════════════════════════════════════════════════════════════════
 
 WARMUP_PROMPT = (
@@ -204,7 +241,6 @@ class BlackBoxAgent:
         self.turn_count    = 0
 
         # ── Phase sequence: warmup → clarification → main ──────────────────
-        # Change log: 2026-05-01 — warmup phase added before clarification.
         self.phase = "warmup"
 
         # ── Clarification phase ────────────────────────────────────────────
@@ -231,9 +267,6 @@ class BlackBoxAgent:
         }
 
         # ── Conversation history ───────────────────────────────────────────
-        # Pre-loaded with case only.
-        # Warm-up exchange is NOT included — logged to Firestore only.
-        # Change log: 2026-05-01
         self.history = [
             types.Content(
                 role="user",
@@ -258,7 +291,6 @@ class BlackBoxAgent:
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
     def _update_kg_if_framework_mentioned(self, user_input: str) -> None:
-        """Keyword match — update KG context if user mentions a different framework."""
         lowered = user_input.lower()
         for framework_name, keywords in self._kg_framework_keywords.items():
             if any(kw in lowered for kw in keywords):
@@ -295,24 +327,51 @@ class BlackBoxAgent:
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_system_prompt(self) -> str:
-        concepts_str = " → ".join(self.kg_context["concepts"]) \
-                       if self.kg_context["concepts"] else "N/A"
+        framework = self.kg_context["framework"]
+
+        try:
+            tree = kg.get_framework_tree(framework)
+            concept_lines = []
+            for node in tree:
+                indent = "  " * (node["depth"] - 1)
+                concept_lines.append(f"{indent}{node['parent']} → {node['concept']}")
+            concepts_str = "\n".join(concept_lines) if concept_lines else "N/A"
+        except Exception as e:
+            print(f"[SYSTEM PROMPT] tree fetch failed: {e}")
+            concepts_str = " → ".join(self.kg_context["concepts"])
 
         kg_block = (
             f"─── KNOWLEDGE GRAPH CONTEXT ──────────────────────────────────────────\n"
             f"Case Type : {self.kg_context['case_type']}\n"
-            f"Framework : {self.kg_context['framework']}\n"
-            f"Concepts  : {concepts_str}\n"
-            f"(These are the correct ordered concepts. Ground your answer here.)\n"
+            f"Framework : {framework}\n"
+            f"Concepts  :\n{concepts_str}\n"
+            f"CRITICAL: Use branch nodes as PRIMARY BUCKET HEADERS (e.g. Revenue, Costs).\n"
+            f"Use leaf nodes as SUB-BUCKET HEADERS under their parent branch.\n"
+            f"Generate 2 analytical questions under each leaf concept.\n"
+            f"Do NOT add any bucket or concept not listed here UNLESS the user explicitly requests it.\n"
             f"──────────────────────────────────────────────────────────────────────\n\n"
         )
 
         swap_block = self.concept_swap.get_system_prompt_block()
         return kg_block + swap_block + SYSTEM_PROMPT
 
+    def _build_tree_overview(self) -> str:
+        return (
+            "**Framework Overview**\n\n"
+            "- **Revenue**\n"
+            "  - Price per Unit\n"
+            "  - Units Sold\n\n"
+            "- **Costs**\n"
+            "  - Fixed Cost\n"
+            "  - **Variable Cost**\n"
+            "    - Cost per Unit\n"
+        )
+
+    def show_tree(self) -> str:
+        return self._build_tree_overview()
+
     # ══════════════════════════════════════════════════════════════════════
     # Warm-up messages
-    # Change log: 2026-05-01
     # ══════════════════════════════════════════════════════════════════════
 
     def get_warmup_message(self) -> str:
@@ -334,19 +393,18 @@ class BlackBoxAgent:
             f"{self.original_case}\n\n"
         )
 
+    def get_pre_analysis_instruction(self) -> str:
+        return (
+            "📖 *After you click the button below, read each concept carefully — "
+            "add any ideas or questions that come to mind as we go.*"
+        )
+
     # ══════════════════════════════════════════════════════════════════════
     # Phase transition — shared setup (non-generator)
-    # Change log: 2026-05-05 — extracted from start_main_phase() so subclasses
-    # can call side effects directly without iterating a generator.
+    # Change log: 2026-05-05
     # ══════════════════════════════════════════════════════════════════════
 
     def _start_main_phase_setup(self):
-        """
-        Shared side effects for all agents — NOT a generator.
-        Sets phase, stamps started_at, injects system turn into history.
-        Called directly by start_main_phase() in all agents.
-        Change log: 2026-05-05
-        """
         if self.phase == "main":
             return
 
@@ -377,50 +435,32 @@ class BlackBoxAgent:
         print(f"[PHASE] clarification → main for session={self.session_id}")
 
     # ══════════════════════════════════════════════════════════════════════
-    # Phase transition — clarification → main
+    # Phase transition — tree/button flow
+    # Change log: 2026-05-12 — replaces start_main_phase()
     # ══════════════════════════════════════════════════════════════════════
 
-    def start_main_phase(self):
+    def begin_analysis(self):
         """
-        Transitions clarification → main phase.
-        Generator — auto-presents framework immediately without
-        waiting for user input.
-        Change log: 2026-05-01 — converted from str return to generator,
-        added auto-trigger of framework presentation.
-        Change log: 2026-05-05 — side effects moved to _start_main_phase_setup().
+        Generator — called when user clicks 'Got it, show me the full analysis'.
+        Replaces start_main_phase().
+        Change log: 2026-05-12
         """
         self._start_main_phase_setup()
 
-        if self.phase != "main":
-            yield "⚠️ The session is already in progress."
-            return
+        yield from self._stream_framework_presentation()
 
         yield (
-            "✅ **Clarification round closed.**\n\n"
-            "> ***📖 Read each point carefully. You can discuss, question, or "
-            "change anything in this analysis.***\n>\n"
-            "> *‼️ When you are satisfied with the analysis, click "
+            "\n\n---\n\n"
+            "📖 *When you are satisfied with the analysis, click "
             "**📊 Get Summary & End Session** to finish. "
-            "Note that ending the session cannot be undone.*\n\n"
+            "Note that ending the session cannot be undone.*"
         )
-
-        yield from self._stream_framework_presentation()
 
     # ══════════════════════════════════════════════════════════════════════
     # Main message handler
     # ══════════════════════════════════════════════════════════════════════
 
     def stream_message(self, user_input: str):
-        """
-        Routes to clarification or main flow based on self.phase.
-
-        Clarification phase:
-          - Answers strictly from facts sheet
-          - No concept swap, no override detection, no KG update
-
-        Main phase:
-          - Full flow: concept swap + override detection + KG + streaming
-        """
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
@@ -437,7 +477,6 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_clarification(self, user_input: str):
-        """Answer from facts sheet only. No swap, no override, no KG."""
         log_user_message(self.session_id, f"[CLARIFICATION] {user_input}")
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
@@ -469,21 +508,12 @@ class BlackBoxAgent:
             self._pending = False
 
     # ══════════════════════════════════════════════════════════════════════
-    # Framework presentation — auto-triggered at start of main phase
-    # Change log: 2026-05-01 — replaces fake _stream_main() auto-trigger.
-    # Bypasses user message logging, swap detection, override detection.
-    # Concept swap injected via system prompt + maybe_inject() fallback.
+    # Framework presentation
+    # Change log: 2026-05-01
+    # Change log: 2026-05-12 — removed debug print
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_framework_presentation(self):
-        """
-        Auto-present framework at start of main phase.
-        - Trigger appended to history as user turn — NOT logged to Firestore
-        - No swap detection, no override detection, no turn_count increment
-        - Concept swap injected via _build_system_prompt() + maybe_inject()
-        - update_answer() stores as original_answer in Firestore
-        Change log: 2026-05-01
-        """
         self.history.append(
             types.Content(
                 role="user",
@@ -532,27 +562,48 @@ class BlackBoxAgent:
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase streaming
+    # Change log: 2026-05-12 — override runs before swap detection;
+    # swap gated on is_injected AND not override;
+    # explicit removal of wrong concept triggers force_detected()
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
-        """
-        Full main phase flow:
-          1. Concept Swap detection
-          2. Override detection → log for research
-          3. KG context update
-          4. Stream response
-          5. Post-stream: concept swap injection tracking
-        """
-        cs_detected = self.concept_swap.check_detection(user_input)
-        if cs_detected:
-            log_memory_override(
-                self.session_id,
-                old_context=f"included: {self.concept_swap.config['wrong_concept']}",
-                new_context=f"user rejected: {self.concept_swap.config['wrong_concept']}",
-            )
-            print(f"[CONCEPT SWAP] detected — exclusion active from next response")
+        if self._pending:
+            log_interruption(self.session_id, context=user_input)
 
+        # ── 1. Override detection first ────────────────────────────────────
         override = self._detect_override(user_input)
+
+        # ── 2. Check if user explicitly removed the wrong concept ──────────
+        if (override and
+                override["type"] == "concept_excluded" and
+                override.get("detail") and
+                not self.concept_swap.is_detected and
+                self.concept_swap.is_injected):
+            wrong        = self.concept_swap.config["wrong_concept"]
+            detail_lower = override["detail"].lower()
+            wrong_lower  = wrong.lower()
+            if wrong_lower in detail_lower or detail_lower in wrong_lower:
+                self.concept_swap.force_detected()
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"included: {wrong}",
+                    new_context=f"user removed wrong concept explicitly: {wrong}",
+                )
+                print(f"[CONCEPT SWAP] detected via explicit removal")
+
+        # ── 3. Swap detection — only if injected AND no override ───────────
+        cs_detected = False
+        if self.concept_swap.is_injected and not override:
+            cs_detected = self.concept_swap.check_detection(user_input)
+            if cs_detected:
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"included: {self.concept_swap.config['wrong_concept']}",
+                    new_context=f"user rejected: {self.concept_swap.config['wrong_concept']}",
+                )
+                print(f"[CONCEPT SWAP] detected — exclusion active from next response")
+
         if override:
             log_memory_override(
                 self.session_id,
@@ -572,6 +623,10 @@ class BlackBoxAgent:
                     f"answer for this case:\n\n{self.original_case}"
                 )
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
+
+            elif override["type"] == "concept_added" and override.get("detail"):
+                new_concept = override["detail"]
+                print(f"[CONCEPT ADDED] '{new_concept}' — LLM will incorporate via history")
 
         self._update_kg_if_framework_mentioned(user_input)
 
@@ -619,20 +674,22 @@ class BlackBoxAgent:
 
     # ══════════════════════════════════════════════════════════════════════
     # Non-streaming fallback (summary)
+    # Change log: 2026-05-12 — updated prompt to include sub-bullets
     # ══════════════════════════════════════════════════════════════════════
 
     def send_message(self, user_input: str) -> str:
-        """Non-streaming fallback used for summary."""
         log_user_message(self.session_id, user_input)
 
         summary_prompt = (
             f"Based on our conversation, provide a summary in this exact format:\n\n"
             f"**Final Framework: [Framework Name]**\n\n"
             f"**The Framework:**\n"
-            f"- Use bolding for Primary Buckets\n"
-            f"- Use bullet points for specific Sub-buckets under each bucket\n\n"
+            f"For each primary bucket, list its leaf concepts as bold sub-headers.\n"
+            f"Under each leaf concept, copy the EXACT analytical questions from our "
+            f"conversation — do not paraphrase or omit them.\n"
+            f"If the user added new concepts or sub-bullets, include those too.\n\n"
             f"Then in 2-3 sentences: note any concepts the user removed and any "
-            f"framework switches made during the session."
+            f"concepts they added during the session."
         )
 
         self.history.append(
@@ -657,6 +714,7 @@ class BlackBoxAgent:
 
     # ══════════════════════════════════════════════════════════════════════
     # Session control
+    # Change log: 2026-05-12 — removed unreliable end_session swap detection
     # ══════════════════════════════════════════════════════════════════════
 
     def end_session(self) -> None:
@@ -678,12 +736,11 @@ class BlackBoxAgent:
             final_framework = fallback
             print("[END SESSION] no structured framework — using last model message")
 
-        if not self.concept_swap.is_detected:
-            detected_at_end = self.concept_swap.check_detection(final_framework)
-            print(f"[END SESSION] final concept swap check: detected={detected_at_end}")
-        else:
-            detected_at_end = True
+        detected_at_end = self.concept_swap.is_detected
+        if self.concept_swap.is_detected:
             print("[END SESSION] concept swap already detected during chat")
+        else:
+            print("[END SESSION] concept swap not detected during session")
 
         try:
             from firebase_admin import firestore as fs
@@ -722,7 +779,6 @@ class BlackBoxAgent:
             return False
 
     def _detect_override(self, user_input: str) -> dict | None:
-        """Single classifier for all override types. Used for research logging only."""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -741,12 +797,52 @@ class BlackBoxAgent:
             print(f"[OVERRIDE] error: {e}")
         return None
 
+    def _check_duplicate(self, concept: str, existing_concepts: list) -> dict:
+        """
+        Three-layer duplicate guard for concept_added path.
+        Layer 2: exact string match (Python, no LLM)
+        Layer 3: fuzzy LLM check on different model
+        Layer 1 (prompt hardening) lives in WALKTHROUGH_OVERRIDE_PROMPT in explainable_agent.py
+        Conservative error fallback: is_duplicate=True
+        Change log: 2026-05-12
+        """
+        # Layer 2 — exact string match
+        for existing in existing_concepts:
+            if concept.strip().lower() == existing.strip().lower():
+                print(f"[DUPLICATE] exact match: '{concept}' == '{existing}'")
+                return {"is_duplicate": True, "matched_concept": existing}
+
+        # Layer 3 — LLM fuzzy check, different model from override classifier
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=(
+                    f"You are checking if a user-suggested concept is essentially "
+                    f"the same as an existing concept.\n\n"
+                    f"User suggested: \"{concept}\"\n\n"
+                    f"Existing concepts: {existing_concepts}\n\n"
+                    f"Reply with JSON only, no markdown:\n"
+                    f"{{\"is_duplicate\": true or false, "
+                    f"\"matched_concept\": \"exact string from list or null\"}}\n\n"
+                    f"is_duplicate=true ONLY if clearly the same concept — "
+                    f"same topic, possibly different wording.\n"
+                    f"Examples: 'revenue' matches 'Price per Unit' → false. "
+                    f"'unit sales' matches 'Units Sold' → true.\n"
+                    f"WHEN IN DOUBT: is_duplicate=false."
+                ),
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            print(f"[DUPLICATE] fuzzy check: '{concept}' → {parsed}")
+            return parsed
+        except Exception as e:
+            print(f"[DUPLICATE] fuzzy check failed: {e} — defaulting to duplicate (safe)")
+            return {"is_duplicate": True, "matched_concept": None}
+
     # ══════════════════════════════════════════════════════════════════════
     # History helpers
     # ══════════════════════════════════════════════════════════════════════
 
     def _strip_concept_swap_from_history(self) -> list:
-        """Remove Concept Swap traces from history on redo after detection."""
         note_marker = "---\n💡"
         wrong       = self.concept_swap.config["wrong_concept"].lower()
         cleaned     = []
@@ -777,7 +873,6 @@ class BlackBoxAgent:
 
     # ══════════════════════════════════════════════════════════════════════
     # Core streaming utility — used by ExplainableAgent and HITLAgent
-    # Moved to BlackBoxAgent so all subclasses inherit it.
     # Change log: 2026-04-09 — moved up from ExplainableAgent.
     # ══════════════════════════════════════════════════════════════════════
 
