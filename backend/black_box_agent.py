@@ -8,6 +8,7 @@ from backend.logger import (
     log_user_message, log_agent_response,
     log_interruption, log_memory_override,
     update_answer, log_warmup_response,
+    log_concept_added
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -624,6 +625,7 @@ class BlackBoxAgent:
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
+                log_concept_added(self.session_id, new_concept)
                 print(f"[CONCEPT ADDED] '{new_concept}' — LLM will incorporate via history")
 
         self._update_kg_if_framework_mentioned(user_input)

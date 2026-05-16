@@ -35,13 +35,13 @@ SWAP_CONFIG = {
         "wrong_framework": "HR Analytics",
     },
     "explainable": {
-        "wrong_concept":   "Net Promoter Score (NPS)", # Customer satisfaction — outside KG
-        "wrong_framework": "Customer Experience",
+        "wrong_concept":   "Employee Turnover Rate",
+        "wrong_framework": "HR Analytics",
     },
     "hitl": {
-        "wrong_concept":   "Carbon Footprint Analysis", # Sustainability — outside KG
-        "wrong_framework": "ESG Framework",
-    },
+        "wrong_concept":   "Employee Turnover Rate",
+        "wrong_framework": "HR Analytics",
+},
 }
 
 # ══════════════════════════════════════════════════════════════════════════
