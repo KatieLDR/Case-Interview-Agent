@@ -240,19 +240,14 @@ class BlackBoxAgent:
         self._pending      = False
         self.turn_count    = 0
 
-        # ── Phase sequence: warmup → clarification → main ──────────────────
         self.phase = "warmup"
-
-        # ── Clarification phase ────────────────────────────────────────────
         self.clarification_facts = get_clarification_facts("black_box")
 
-        # ── Concept Swap experiment ────────────────────────────────────────
         self.concept_swap = ConceptSwap(
             agent_type="black_box",
             session_id=self.session_id
         )
 
-        # ── KG context ────────────────────────────────────────────────────
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
         print(f"[KG INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
@@ -266,7 +261,6 @@ class BlackBoxAgent:
             "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
         }
 
-        # ── Conversation history ───────────────────────────────────────────
         self.history = [
             types.Content(
                 role="user",
@@ -442,7 +436,6 @@ class BlackBoxAgent:
     def begin_analysis(self):
         """
         Generator — called when user clicks 'Got it, show me the full analysis'.
-        Replaces start_main_phase().
         Change log: 2026-05-12
         """
         self._start_main_phase_setup()
@@ -562,9 +555,9 @@ class BlackBoxAgent:
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase streaming
-    # Change log: 2026-05-12 — override runs before swap detection;
-    # swap gated on is_injected AND not override;
-    # explicit removal of wrong concept triggers force_detected()
+    # Change log: 2026-05-12 — override first, swap gated on is_injected AND not override
+    # Change log: 2026-05-16 — skip log_memory_override for concept_added
+    #   (log_concept_added() already increments count_memory_overrides)
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
@@ -604,12 +597,17 @@ class BlackBoxAgent:
                 )
                 print(f"[CONCEPT SWAP] detected — exclusion active from next response")
 
+        # ── 4. Override handling ───────────────────────────────────────────
         if override:
-            log_memory_override(
-                self.session_id,
-                old_context=f"override_type: {override['type']}",
-                new_context=f"detail: {override['detail'] or 'n/a'}",
-            )
+            # Skip log_memory_override for concept_added —
+            # log_concept_added() already increments count_memory_overrides
+            # Change log: 2026-05-16
+            if override["type"] != "concept_added":
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"override_type: {override['type']}",
+                    new_context=f"detail: {override['detail'] or 'n/a'}",
+                )
             print(f"[OVERRIDE] type={override['type']}, "
                   f"detail={override['detail']}, "
                   f"confidence={override['confidence']}")
@@ -801,10 +799,11 @@ class BlackBoxAgent:
         """
         Three-layer duplicate guard for concept_added path.
         Layer 2: exact string match (Python, no LLM)
-        Layer 3: fuzzy LLM check on different model
-        Layer 1 (prompt hardening) lives in WALKTHROUGH_OVERRIDE_PROMPT in explainable_agent.py
+        Layer 3: fuzzy LLM check on gemini-3.1-flash-lite
+          — different model family from CLASSIFIER_MODEL (2.5), true defense-in-depth
         Conservative error fallback: is_duplicate=True
         Change log: 2026-05-12
+        Change log: 2026-05-16 — updated model to gemini-3.1-flash-lite (2.0 deprecated)
         """
         # Layer 2 — exact string match
         for existing in existing_concepts:
@@ -812,10 +811,10 @@ class BlackBoxAgent:
                 print(f"[DUPLICATE] exact match: '{concept}' == '{existing}'")
                 return {"is_duplicate": True, "matched_concept": existing}
 
-        # Layer 3 — LLM fuzzy check, different model from override classifier
+        # Layer 3 — LLM fuzzy check, different model family from classifier
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash-lite",
+                model="gemini-3.1-flash-lite",
                 contents=(
                     f"You are checking if a user-suggested concept is essentially "
                     f"the same as an existing concept.\n\n"

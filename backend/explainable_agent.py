@@ -32,14 +32,12 @@ EXACT OUTPUT FORMAT — copy this structure precisely:
 
 - [sub-bucket, 5–7 words, specific to this case]
 - [sub-bucket, 5–7 words, specific to this case]
-- [sub-bucket, 5–7 words, specific to this case]
 
 *Shall we move on to the next concept?*
 
 ─── EXAMPLE (for Price per Unit) ────────────────────────────────────────────
-- Current market rates for industrial Silica Sand
-- Global Bentonite pricing trends and forecasts
-- Negotiating power with potential buyers
+- Current market rates for specialty coffee beans
+- Wholesale pricing strategy for supermarket buyers
 
 *Shall we move on to the next concept?*
 ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +49,7 @@ EXACT OUTPUT FORMAT — copy this structure precisely:
 - Do NOT list other concepts or buckets
 - Do NOT say "here is the framework" or "I recommend"
 - Do NOT add numbered lists
-- Maximum 3 sub-bullets
+- Maximum 2 sub-bullets
 - Never mention a knowledge graph, database, or technical system
 - Always end with: *Shall we move on to the next concept?*
 """
@@ -165,7 +163,6 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 
 ADVANCE_THRESHOLD = 0.75
 
-# ── Framework resolver prompt ──────────────────────────────────────────────
 FRAMEWORK_RESOLVER_PROMPT = """
 You are a classifier for a case interview tool.
 
@@ -195,7 +192,6 @@ Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
 - "supply chain" → []
 """
 
-# ── Walkthrough-aware override classifier prompt ───────────────────────────
 WALKTHROUGH_OVERRIDE_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
 
@@ -233,6 +229,26 @@ CRITICAL — these are NOT redo during an active walkthrough:
 - "let's move on" → none
 - "proceed" / "got it" → none
 
+CRITICAL — for "concept_added": the "detail" field must contain
+the NEW thing the user wants to add, NOT any existing concept
+they are referencing.
+
+Example: "I think we should add cafe pop-up store sales under Units Sold"
+→ detail: "Cafe pop-up store sales" (the NEW thing)
+→ NOT detail: "Units Sold" (an existing concept)
+
+Example: "what about competitor pricing strategies for Price per Unit"
+→ detail: "Competitor pricing strategies" (the NEW thing)
+→ NOT detail: "Price per Unit" (an existing concept)
+
+Example: "we should consider brand risk"
+→ detail: "Brand risk" (genuinely new)
+
+This does NOT include:
+- Questions asking why a concept is included ("why is X here?", "why are we considering X?")
+- Questions asking if something belongs to a concept ("is X part of Y?")
+- Single word responses ("no", "yes", "ok")
+
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
@@ -248,11 +264,16 @@ Examples (assuming concepts include: Volume, Price per Unit, Variable Cost per U
 - "how about adding Competitor Analysis?" → {{"override": true, "type": "concept_added", "detail": "Competitor Analysis", "confidence": 0.96}}
 - "use Market Entry framework" → {{"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}}
 - "yes" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "no" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "no thanks" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "let's discuss Variable Cost per Unit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "can we talk about Price per Unit?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "what about Volume?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "tell me more about Fixed Cost" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "why are we considering this?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "why is this here?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "is it part of fixed cost?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 """
 
 
@@ -261,40 +282,44 @@ class ExplainableAgent(BlackBoxAgent):
     Explainable agent — stateful concept-by-concept walkthrough.
 
     Inherits from BlackBoxAgent:
-      - Clarification phase (_stream_clarification, start_main_phase)
+      - Clarification phase (_stream_clarification)
       - _detect_override(), _is_answer(), _strip_fences()
       - _strip_concept_swap_from_history()
       - send_message(), end_session()
       - KG infrastructure (_fetch_kg_context, _update_kg_if_framework_mentioned)
+      - show_tree(), _build_tree_overview()
+      - _check_duplicate()
 
     Overrides:
-      - __init__            : explainable case + walkthrough state variables
-      - get_opening_message : tailored intro
-      - start_main_phase    : calls _start_main_phase_setup() + streams first concept
-      - _build_system_prompt: minimal fallback (used by inherited send_message)
-      - _stream_main        : stateful walkthrough logic
+      - __init__                  : explainable case + walkthrough state variables
+      - get_opening_message       : tailored intro
+      - get_pre_analysis_instruction : agent-specific instruction
+      - begin_analysis            : tree/button flow — streams first concept
+      - _build_system_prompt      : minimal fallback (used by inherited send_message)
+      - _stream_main              : stateful walkthrough logic
+      - _detect_override          : walkthrough-aware override classifier
+
+    Change log: 2026-05-12 — begin_analysis() replaces start_main_phase()
+    Change log: 2026-05-16 — concept_added double-log fix; _resolve_pending
+                             log_memory_override removed; WALKTHROUGH_OVERRIDE_PROMPT
+                             negative examples added
     """
 
     def __init__(self, user_id: str = "anonymous"):
-        # Replicate BlackBoxAgent.__init__ with explainable config
         self.user_id       = user_id
         self.session_id    = create_session(user_id, agent_type="explainable")
         self.original_case = get_case("explainable")
         self._pending      = False
         self.turn_count    = 0
 
-        # ── Phase sequence: warmup → clarification → main ──────────────────
-        # Change log: 2026-05-01 — warmup phase added before clarification.
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("explainable")
 
-        # ── Concept Swap ───────────────────────────────────────────────────
         self.concept_swap = ConceptSwap(
             agent_type="explainable",
             session_id=self.session_id
         )
 
-        # ── KG context ────────────────────────────────────────────────────
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
         logging.info(f"[KG INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
@@ -321,7 +346,10 @@ class ExplainableAgent(BlackBoxAgent):
         self.pending_excl = None
         self.pending_fw   = None
 
-        # ── Conversation history ───────────────────────────────────────────
+        # ── User sub-points — populated by duplicate guard path ───────────
+        # Change log: 2026-05-12
+        self.user_sub_points = {}  # {"Units Sold": ["cafe pop-up store sales"]}
+
         self.history = [
             types.Content(
                 role="user",
@@ -350,29 +378,33 @@ class ExplainableAgent(BlackBoxAgent):
             f"one concept at a time — you can ask questions at each step.\n\n"
         )
 
-    def start_main_phase(self):
-        """
-        Override — generator.
-        Calls _start_main_phase_setup() for side effects: phase transition,
-        history injection, stamp_started_at. Yields confirmation then first concept.
-        Change log: 2026-05-05 — replaced super() call with _start_main_phase_setup()
-                                  to correctly trigger side effects from a generator.
-        """
-        self._start_main_phase_setup()   # side effects only: phase, history, stamp_started_at
-        yield (
-            f"✅ **Clarification round closed.**\n\n"
-            f"Let's walk through the framework together — I'll take you through it "
-            f"one concept at a time.\n\n"
-            f"💡 *You can click **📊 Get Summary & End Session** at any time "
-            f"to see your full framework and close the session.*"
-            f"\n\n---\n\n"
+    def get_pre_analysis_instruction(self) -> str:
+        return (
+            "📖 *After you click the button below, I'll walk you through "
+            "each concept one at a time — you can ask questions or suggest "
+            "changes at any step.*"
         )
-        # Initialise walkthrough state and stream first concept
+
+    def begin_analysis(self):
+        """
+        Generator — called when user clicks 'Got it, show me the full analysis'.
+        Replaces start_main_phase().
+        Change log: 2026-05-12
+        """
+        self._start_main_phase_setup()
+
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_active   = True
         self.walkthrough_index    = 0
         self.swap_presented       = False
+
         yield from self._stream_concept(is_first=True)
+
+        yield (
+            "\n\n---\n\n"
+            "💡 *You can click **📊 Get Summary & End Session** at any time "
+            "to see your full framework and close the session.*"
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Walkthrough state helpers
@@ -406,13 +438,8 @@ class ExplainableAgent(BlackBoxAgent):
             wrong = self.concept_swap.config["wrong_concept"]
             self.excluded_concepts.append(wrong)
             self.swap_presented = True
-            logging.info(f"[FRAMEWORK SWITCH] swap already caught — "
-                         f"excluded from new walkthrough, framework={to_framework}")
         else:
             self.swap_presented = False
-            logging.info(f"[FRAMEWORK SWITCH] swap not yet caught — "
-                         f"re-injecting at position={self.swap_position}, "
-                         f"framework={to_framework}")
 
     def _current_concept(self) -> str | None:
         excluded_lower = [e.lower() for e in self.excluded_concepts]
@@ -420,7 +447,7 @@ class ExplainableAgent(BlackBoxAgent):
             concept = self.walkthrough_concepts[self.walkthrough_index]
             if concept.lower() not in excluded_lower:
                 return concept
-            logging.debug(f"[WALKTHROUGH] skipping excluded: {concept}, index={self.walkthrough_index}")
+            logging.debug(f"[WALKTHROUGH] skipping excluded: {concept}")
             self.walkthrough_index += 1
         return None
 
@@ -445,7 +472,7 @@ class ExplainableAgent(BlackBoxAgent):
             return False
 
     # ══════════════════════════════════════════════════════════════════════
-    # Framework resolver — LLM-based, KG-grounded
+    # Framework resolver
     # ══════════════════════════════════════════════════════════════════════
 
     def _fetch_kg_context_by_framework(self, framework_name: str) -> dict | None:
@@ -467,10 +494,8 @@ class ExplainableAgent(BlackBoxAgent):
         try:
             if not hasattr(self, "_kg_all_frameworks") or not self._kg_all_frameworks:
                 self._kg_all_frameworks = kg.get_all_frameworks()
-                logging.debug(f"[KG CACHE] loaded {len(self._kg_all_frameworks)} frameworks")
             frameworks = self._kg_all_frameworks
             if not frameworks:
-                logging.warning("[RESOLVER] no frameworks returned from KG")
                 return []
 
             fw_list = "\n".join(
@@ -546,6 +571,8 @@ class ExplainableAgent(BlackBoxAgent):
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
+    # Change log: 2026-05-12 — override first, swap gated
+    # Change log: 2026-05-16 — skip log_memory_override for concept_added
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
@@ -561,9 +588,34 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._resolve_pending(user_input)
             return
 
-        # ── 1. Swap detection ──────────────────────────────────────────────
+        # ── 1. Override detection first ────────────────────────────────────
+        just_added_concept = None
+        override = self._detect_override(user_input)
+
+        # ── 1b. Check if user explicitly removed the wrong concept ─────────
+        if (override and
+                override["type"] == "concept_excluded" and
+                override.get("detail") and
+                not self.concept_swap.is_detected and
+                self.swap_presented):
+            wrong        = self.concept_swap.config["wrong_concept"]
+            detail_lower = override["detail"].lower()
+            wrong_lower  = wrong.lower()
+            if wrong_lower in detail_lower or detail_lower in wrong_lower:
+                self.concept_swap.force_detected()
+                if wrong not in self.excluded_concepts:
+                    self.excluded_concepts.append(wrong)
+                self.walkthrough_index += 1
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"included: {wrong}",
+                    new_context=f"user removed wrong concept explicitly: {wrong}",
+                )
+                logging.info(f"[CONCEPT SWAP] detected via explicit removal")
+
+        # ── 2. Swap detection — only if presented AND no override ──────────
         cs_detected = False
-        if self.swap_presented:
+        if self.swap_presented and not override:
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
@@ -575,30 +627,21 @@ class ExplainableAgent(BlackBoxAgent):
                 if wrong not in self.excluded_concepts:
                     self.excluded_concepts.append(wrong)
                 self.walkthrough_index += 1
-                logging.info(f"[SWAP] caught — index→{self.walkthrough_index}, "
-                             f"swap_position={self.swap_position}")
-        elif self.walkthrough_active:
-            logging.debug(f"[SWAP] detection skipped — swap not yet presented, "
-                          f"index={self.walkthrough_index}, swap_position={self.swap_position}")
+                logging.info(f"[SWAP] caught — index→{self.walkthrough_index}")
+        elif self.walkthrough_active and not override:
+            logging.debug(f"[SWAP] detection skipped — swap not yet presented")
 
-        # ── 1b. Invariant check ────────────────────────────────────────────
-        if (self.walkthrough_active
-                and self.walkthrough_index > self.swap_position
-                and not self.swap_presented):
-            logging.error(f"[INVARIANT VIOLATION] index={self.walkthrough_index} "
-                          f"past swap_position={self.swap_position} but swap_presented=False "
-                          f"— rewinding to swap_position to force presentation")
-            self.walkthrough_index = self.swap_position
-
-        # ── 2. Override detection ──────────────────────────────────────────
-        just_added_concept = None
-        override = None if cs_detected else self._detect_override(user_input)
+        # ── 3. Override logging and handling ──────────────────────────────
         if override:
-            log_memory_override(
-                self.session_id,
-                old_context=f"override_type: {override['type']}",
-                new_context=f"detail: {override['detail'] or 'n/a'}",
-            )
+            # Skip log_memory_override for concept_added —
+            # log_concept_added() already increments count_memory_overrides
+            # Change log: 2026-05-16
+            if override["type"] != "concept_added":
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"override_type: {override['type']}",
+                    new_context=f"detail: {override['detail'] or 'n/a'}",
+                )
             logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}, "
                          f"index={self.walkthrough_index}, swap_presented={self.swap_presented}")
 
@@ -620,20 +663,16 @@ class ExplainableAgent(BlackBoxAgent):
             elif override["type"] == "framework_switch":
                 if not override.get("detail"):
                     override = {"type": "framework_unspecified"}
-                    logging.info("[FRAMEWORK SWITCH] no framework specified — asking user")
                 else:
                     matches = self._resolve_framework(override["detail"])
                     if len(matches) == 1:
                         self.pending_fw = matches[0]
                         override = {"type": "pending_fw_set"}
-                        logging.info(f"[FRAMEWORK SWITCH] pending set → {self.pending_fw}")
                     elif len(matches) >= 2:
                         override = {"type": "framework_clarification", "matches": matches,
                                     "detail": override["detail"]}
-                        logging.info(f"[FRAMEWORK SWITCH] ambiguous — asking user: {matches}")
                     else:
                         override = {"type": "framework_not_found", "detail": override["detail"]}
-                        logging.info("[FRAMEWORK SWITCH] no match for: " + str(override.get("detail")))
 
             elif override["type"] == "concept_excluded":
                 excl = override.get("detail") or self._current_concept()
@@ -644,19 +683,28 @@ class ExplainableAgent(BlackBoxAgent):
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
-                insert_at   = self.walkthrough_index + 1
-                self.walkthrough_concepts.insert(insert_at, new_concept)
-                log_concept_added(self.session_id, new_concept)
-                logging.info(f"[CONCEPT ADDED] '{new_concept}' inserted at index={insert_at}")
-                just_added_concept = new_concept
+                dup = self._check_duplicate(new_concept, self.walkthrough_concepts)
+                if dup["is_duplicate"] and dup.get("matched_concept"):
+                    matched = dup["matched_concept"]
+                    if matched not in self.user_sub_points:
+                        self.user_sub_points[matched] = []
+                    self.user_sub_points[matched].append(new_concept)
+                    logging.info(f"[DUPLICATE] '{new_concept}' → sub-point of '{matched}'")
+                    just_added_concept = new_concept
+                else:
+                    insert_at = self.walkthrough_index + 1
+                    self.walkthrough_concepts.insert(insert_at, new_concept)
+                    log_concept_added(self.session_id, new_concept)
+                    logging.info(f"[CONCEPT ADDED] '{new_concept}' inserted at index={insert_at}")
+                    just_added_concept = new_concept
 
-        # ── 3. Log and append user message ────────────────────────────────
+        # ── 4. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
         )
 
-        # ── 4. Semantic routing log ────────────────────────────────────────
+        # ── 5. Routing log ─────────────────────────────────────────────────
         logging.info(f"[ROUTE] active={self.walkthrough_active}, "
                      f"done={self.walkthrough_done}, "
                      f"swap_presented={self.swap_presented}, "
@@ -664,7 +712,7 @@ class ExplainableAgent(BlackBoxAgent):
                      f"swap_position={self.swap_position}, "
                      f"cs_detected={cs_detected}")
 
-        # ── 5. Route ───────────────────────────────────────────────────────
+        # ── 6. Route ───────────────────────────────────────────────────────
         if not self.walkthrough_active:
             self.walkthrough_concepts = self._build_walkthrough_concepts()
             self.walkthrough_active   = True
@@ -689,9 +737,9 @@ class ExplainableAgent(BlackBoxAgent):
             match_str = " or ".join(f"**{m}**" for m in matches)
             yield from self._stream_with_instruction(
                 instruction=(
-                    f"The user mentioned switching frameworks. Based on what they said, "
-                    f"it could mean {match_str}. Ask them which one they meant in one "
-                    f"short, friendly sentence. Do not present any concept yet."
+                    f"The user mentioned switching frameworks. It could mean {match_str}. "
+                    f"Ask them which one they meant in one short, friendly sentence. "
+                    f"Do not present any concept yet."
                 )
             )
 
@@ -702,10 +750,9 @@ class ExplainableAgent(BlackBoxAgent):
                 instruction=(
                     f"The user mentioned '{detail}' as a framework. "
                     f"Respond in 2 short sentences: "
-                    f"(1) Say you don't recognise '{detail}' in your knowledge base "
-                    f"— keep it brief and neutral, no apology. "
-                    f"(2) Ask which of these they'd like to use instead: {available}. "
-                    f"Do not present any concept yet. Do not offer to work with '{detail}'."
+                    f"(1) Say you don't recognise '{detail}' — brief and neutral. "
+                    f"(2) Ask which of these they'd like instead: {available}. "
+                    f"Do not present any concept yet."
                 )
             )
 
@@ -715,7 +762,7 @@ class ExplainableAgent(BlackBoxAgent):
                 instruction=(
                     f"The user wants to switch frameworks but hasn't named one. "
                     f"Ask in one friendly sentence: do they have a specific framework "
-                    f"in mind? If not, suggest they try one of these: {available}. "
+                    f"in mind? If not, suggest: {available}. "
                     f"Do not present any concept yet."
                 )
             )
@@ -742,6 +789,8 @@ class ExplainableAgent(BlackBoxAgent):
 
     # ══════════════════════════════════════════════════════════════════════
     # Pending resolution + pushback
+    # Change log: 2026-05-16 — removed log_memory_override from _resolve_pending
+    #   (initial concept_excluded override already logged it)
     # ══════════════════════════════════════════════════════════════════════
 
     def _resolve_to_concept_name(self, name: str) -> str:
@@ -749,10 +798,7 @@ class ExplainableAgent(BlackBoxAgent):
             if c.lower() == name.lower():
                 return c
         fallback = self._current_concept() or name
-        logging.info(
-            "[RESOLVE] '" + name + "' not in walkthrough_concepts "
-            "— falling back to current concept: '" + fallback + "'"
-        )
+        logging.info(f"[RESOLVE] '{name}' not in walkthrough_concepts — fallback: '{fallback}'")
         return fallback
 
     def _resolve_pending(self, user_input: str):
@@ -765,11 +811,8 @@ class ExplainableAgent(BlackBoxAgent):
                 if excl not in self.excluded_concepts:
                     self.excluded_concepts.append(excl)
                 self.pending_excl = None
-                log_memory_override(
-                    self.session_id,
-                    old_context="pending_excl: " + excl,
-                    new_context="confirmed exclusion: " + excl,
-                )
+                # Note: log_memory_override NOT called here —
+                # the initial concept_excluded override already incremented the count
                 logging.info("[PENDING] exclusion confirmed: " + excl)
                 self.walkthrough_index += 1
                 yield "Understood — removing **" + excl + "** from the framework. Let's continue.\n\n"
@@ -791,11 +834,6 @@ class ExplainableAgent(BlackBoxAgent):
                     self.kg_context = new_context
                     self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
                 self.pending_fw = None
-                log_memory_override(
-                    self.session_id,
-                    old_context="pending_fw: " + fw,
-                    new_context="confirmed switch: " + fw,
-                )
                 logging.info("[PENDING] framework switch confirmed: " + fw)
                 yield "Switching to **" + fw + "**. Let's start from the beginning.\n\n"
                 yield from self._stream_concept(is_first=True)
@@ -906,15 +944,11 @@ class ExplainableAgent(BlackBoxAgent):
                             "\n> *ℹ️ This concept isn't in my knowledge base "
                             "— I can discuss it, but can't verify it with a source.*\n"
                         )
-                    logging.info(
-                        "[CITATION] not-in-KG note for '" + concept + "', "
-                        "other_frameworks=" + str(other_fws)
-                    )
                     prefix = "**" + concept + "**\n" + note
                 if is_first:
                     prefix = "Here is how I would structure the analysis:\n\n" + prefix
             except Exception as e:
-                logging.warning("'[CITATION] header failed for concept='" + concept + "': " + str(e))
+                logging.warning(f"[CITATION] header failed for '{concept}': {e}")
                 prefix = "**" + concept + "**\n"
                 if is_first:
                     prefix = "Here is how I would structure the analysis:\n\n" + prefix
@@ -938,12 +972,7 @@ class ExplainableAgent(BlackBoxAgent):
             self.swap_presented = True
             if not already_logged:
                 self.concept_swap.log_presented()
-                logging.info(f"[SWAP] concept presented at position={self.swap_position} — "
-                             f"detection active from next turn")
-            else:
-                logging.info(f"[SWAP] concept re-presented after framework switch — "
-                             f"log_presented() skipped (already logged), "
-                             f"position={self.swap_position}")
+                logging.info(f"[SWAP] concept presented at position={self.swap_position}")
             return
 
         if kg_data is not None:
@@ -956,10 +985,10 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.warning(f"[FAITHFULNESS] warning check failed for '{concept}': {e}")
 
     def _stream_concept_qa(self, just_added: str | None = None):
-        concept    = self._current_concept() or "the current concept"
-        on_swap    = (self.walkthrough_index == self.swap_position
-                      and self.swap_presented
-                      and not self.concept_swap.is_detected)
+        concept = self._current_concept() or "the current concept"
+        on_swap = (self.walkthrough_index == self.swap_position
+                   and self.swap_presented
+                   and not self.concept_swap.is_detected)
 
         closing = (
             "End with exactly:\n"
@@ -974,16 +1003,15 @@ class ExplainableAgent(BlackBoxAgent):
         added_note = ""
         if just_added:
             added_note = (
-                "Good idea \u2014 I'll add **" + just_added
+                "Good idea — I'll add **" + just_added
                 + "** after we finish **" + concept + "**.\n\n"
             )
-            logging.info("[QA] concept_added acknowledgement prepended for '" + just_added + "'")
 
         instruction = (
             qa_prompt + "\n\n"
-            "\u2500\u2500\u2500 CLOSING INSTRUCTION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
             + closing + "\n"
-            "\u2500\u2500\u2500 CONTEXT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "─── CONTEXT ──────────────────────────────────────────────────────────\n"
             "Current concept: **" + concept + "**\n"
             "On swap concept: " + str(on_swap) + "\n"
             "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
@@ -991,12 +1019,8 @@ class ExplainableAgent(BlackBoxAgent):
                 c for c in self.walkthrough_concepts
                 if just_added is None or c.lower() != just_added.lower()
             ) + "\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "──────────────────────────────────────────────────────────────────────\n"
         )
-
-        if on_swap:
-            logging.info("[SWAP QA] user questioning swap concept at "
-                         "index=" + str(self.walkthrough_index) + " — using explicit keep/remove prompt")
 
         yield from self._stream_with_instruction(instruction=instruction, prefix=added_note)
 
@@ -1017,8 +1041,6 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _stream_summary(self):
         self.walkthrough_done = True
-        if self.swap_presented and not self.concept_swap.is_detected:
-            logging.info(f"[SWAP] summary reached — swap was presented but not caught")
 
         wrong          = self.concept_swap.config["wrong_concept"].lower()
         excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong] \
@@ -1032,12 +1054,27 @@ class ExplainableAgent(BlackBoxAgent):
 
         logging.info(f"[SUMMARY] active_concepts={active_concepts}")
 
+        sub_points_block = ""
+        if self.user_sub_points:
+            sub_points_lines = "\n".join(
+                f"{concept}: {', '.join(points)}"
+                for concept, points in self.user_sub_points.items()
+            )
+            sub_points_block = (
+                f"─── USER-ADDED SUB-POINTS ────────────────────────────────────────────\n"
+                f"{sub_points_lines}\n"
+                f"Include these as additional sub-bullets under their parent concept.\n"
+                f"If this section is empty, ignore it.\n"
+                f"─────────────────────────────────────────────────────────────────────\n"
+            )
+
         instruction = (
             f"{SUMMARY_PROMPT}\n\n"
             f"─── CONCEPTS TO INCLUDE (in order) ──────────────────────────────────\n"
             f"{', '.join(active_concepts)}\n"
             f"Framework: {self.kg_context['framework']} | Case: {self.kg_context['case_type']}\n"
             f"─────────────────────────────────────────────────────────────────────\n"
+            f"{sub_points_block}"
         )
         yield from self._stream_with_instruction(instruction=instruction, store_answer=True)
 
@@ -1057,7 +1094,7 @@ class ExplainableAgent(BlackBoxAgent):
         yield from self._stream_with_instruction(instruction=instruction)
 
     # ══════════════════════════════════════════════════════════════════════
-    # Fallback + session
+    # Session + system prompt
     # ══════════════════════════════════════════════════════════════════════
 
     def end_session(self) -> None:
