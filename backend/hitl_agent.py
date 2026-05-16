@@ -151,6 +151,7 @@ class HITLAgent(BlackBoxAgent):
       - _stream_with_instruction()
       - _start_main_phase_setup()
       - show_tree(), _build_tree_overview()
+      - _check_duplicate(concept, existing_concepts)  ← three-layer guard
 
     Overrides:
       - __init__                         : HITL case + walkthrough state
@@ -179,6 +180,8 @@ class HITLAgent(BlackBoxAgent):
     Change log: 2026-05-12 — begin_analysis() replaces start_main_phase()
     Change log: 2026-05-16 — swap detection order fix; concept_added double-log fix;
                              HITL_MAIN_SYSTEM_PROMPT updated to coffee shop case
+    Change log: 2026-05-16 — concept_added duplicate guard via BlackBoxAgent._check_duplicate();
+                             _check_duplicate renamed to _check_duplicate_proactive
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -349,6 +352,19 @@ class HITLAgent(BlackBoxAgent):
         return random.random() < 0.5
 
     def _classify_intent(self, user_input: str) -> dict:
+        """
+        Classify user response to a proactive prompt into one of three types:
+        - sub_point : user explicitly names a new thing AND a parent concept
+                      ("add X under Y", "X as part of Y", "consider X within Y")
+                      → concept=X (new thing), parent=Y (existing concept)
+        - suggestion: user names a concept with no parent
+                      ("how about market share", "what about distribution")
+                      → concept=named thing, parent=null
+        - guidance  : user defers to the agent
+                      ("you decide", "ok", "continue", "I don't know")
+
+        Change log: 2026-05-16 — added sub_point type + parent field
+        """
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -358,19 +374,26 @@ class HITLAgent(BlackBoxAgent):
                     f"explore, or would you like me to guide you?'\n\n"
                     f"User response: \"{user_input}\"\n\n"
                     f"Reply with JSON only, no markdown, no explanation:\n"
-                    f"{{\"type\": \"suggestion\" or \"guidance\", "
-                    f"\"concept\": \"extracted noun phrase or null\"}}\n\n"
+                    f"{{\"type\": \"suggestion\" or \"guidance\" or \"sub_point\", "
+                    f"\"concept\": \"extracted noun phrase or null\", "
+                    f"\"parent\": \"parent concept or null\"}}\n\n"
+                    f"type=sub_point when user names BOTH a new thing AND an existing parent:\n"
+                    f"- 'add cafe sales under Units Sold' → concept='cafe sales', parent='Units Sold'\n"
+                    f"- 'how about coffee bag sales under Units Sold' → concept='coffee bag sales', parent='Units Sold'\n"
+                    f"- 'I think we should consider packaging cost as part of Variable Cost' → concept='packaging cost', parent='Variable Cost'\n"
+                    f"- 'X should go under Y' → concept=X, parent=Y\n"
+                    f"CRITICAL for sub_point: concept = the NEW thing, parent = the EXISTING concept after 'under'/'as part of'/'within'\n\n"
+                    f"type=suggestion when user names a concept with NO parent:\n"
+                    f"- 'how about market share' → concept='market share', parent=null\n"
+                    f"- 'what about distribution costs' → concept='distribution costs', parent=null\n"
+                    f"- Names a specific business/analytical area as a noun phrase\n"
+                    f"- Could appear in a business case framework\n\n"
                     f"type=guidance ALWAYS for:\n"
                     f"- Questions: 'anything else?', 'what's next?'\n"
                     f"- Deferrals: 'you decide', 'take a lead', 'continue', 'proceed'\n"
                     f"- Uncertainty: 'I don't know', 'not sure', 'guide me', 'help me'\n"
                     f"- Affirmations: 'ok', 'sure', 'yes', 'fine'\n"
                     f"- Verb phrases without a clear business noun\n\n"
-                    f"type=suggestion ONLY if ALL true:\n"
-                    f"- Names a specific business/analytical area\n"
-                    f"- Is a noun or noun phrase\n"
-                    f"- Could appear in a business case framework\n"
-                    f"- Is NOT conversational or a verb phrase\n\n"
                     f"WHEN IN DOUBT: use guidance."
                 ),
             )
@@ -384,16 +407,18 @@ class HITLAgent(BlackBoxAgent):
             return result
         except Exception as e:
             logging.warning(f"[INTENT] classifier failed: {e} — defaulting to guidance")
-            return {"type": "guidance", "concept": None}
+            return {"type": "guidance", "concept": None, "parent": None}
 
-    def _check_duplicate(self, concept: str) -> dict:
+    def _check_duplicate_proactive(self, concept: str) -> dict:
         """
-        Check if user-suggested concept matches anything already in walkthrough.
-        Note: this is the HITL proactive-prompt duplicate check — different from
-        BlackBoxAgent._check_duplicate() which is the Bug #1 three-layer guard.
-        This uses CLASSIFIER_MODEL (same model) — acceptable here since it's
-        checking against the full walkthrough list, not the override path.
-        Change log: 2026-04-21
+        Check if user-suggested concept (from proactive prompt path) matches
+        anything already in the walkthrough list.
+
+        Note: renamed from _check_duplicate() to avoid overriding
+        BlackBoxAgent._check_duplicate(concept, existing_concepts),
+        which is the three-layer guard used in the override path.
+
+        Change log: 2026-05-16 — renamed from _check_duplicate
         """
         all_concepts = list(self.walkthrough_concepts)
         try:
@@ -431,6 +456,7 @@ class HITLAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
     # Change log: 2026-05-16 — swap detection order fix; concept_added double-log fix
+    # Change log: 2026-05-16 — concept_added duplicate guard added
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
@@ -458,27 +484,33 @@ class HITLAgent(BlackBoxAgent):
                 yield from self._stream_concept(is_first=False)
                 return
 
+            if intent["type"] == "sub_point" and intent.get("concept") and intent.get("parent"):
+                concept = intent["concept"]
+                parent  = intent["parent"]
+                logging.info(f"[PROACTIVE] sub-point: '{concept}' → '{parent}'")
+                yield from self._add_sub_point(parent, concept)
+                yield from self._stream_proactive_prompt()
+                return
+
+            # suggestion — navigate or new concept
             concept = intent.get("concept") or user_input.strip()
-            dup     = self._check_duplicate(concept)
+            dup     = self._check_duplicate_proactive(concept)
 
             if dup["is_duplicate"] and dup["matched_concept"]:
                 matched = dup["matched_concept"]
-                logging.info(f"[PROACTIVE] duplicate: '{concept}' matches '{matched}'")
+                logging.info(f"[PROACTIVE] navigate to existing: '{concept}' → '{matched}'")
+                # Re-order walkthrough so matched concept comes next
                 remaining_idx = None
                 for i in range(self.walkthrough_index, len(self.walkthrough_concepts)):
                     if self.walkthrough_concepts[i].lower() == matched.lower():
                         remaining_idx = i
                         break
-                if remaining_idx is not None:
+                if remaining_idx is not None and remaining_idx != self.walkthrough_index:
                     self.walkthrough_concepts.pop(remaining_idx)
-                    if remaining_idx < self.swap_position:
-                        self.swap_position -= 1
-                        logging.info(f"[PROACTIVE] swap_position shifted back to {self.swap_position}")
-                yield (
-                    f"Good thinking — **{matched}** is already part of the framework. "
-                    f"Let's look at it now.\n\n"
-                )
-                yield from self._stream_user_contributed_concept(matched)
+                    self.walkthrough_concepts.insert(self.walkthrough_index, matched)
+                    logging.info(f"[PROACTIVE] reordered '{matched}' to index={self.walkthrough_index}")
+                yield f"Sure — let's look at **{matched}** now.\n\n"
+                yield from self._stream_concept(is_first=False)
             else:
                 logging.info(f"[PROACTIVE] new user concept: '{concept}'")
                 yield f"Great suggestion — let's explore **{concept}** now.\n\n"
@@ -581,11 +613,26 @@ class HITLAgent(BlackBoxAgent):
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
-                insert_at   = self.walkthrough_index + 1
-                self.walkthrough_concepts.insert(insert_at, new_concept)
-                log_concept_added(self.session_id, new_concept)
-                logging.info(f"[CONCEPT ADDED] '{new_concept}' at index={insert_at}")
-                just_added_concept = new_concept
+                parent      = override.get("parent")
+                if parent:
+                    # Explicit "under Y" phrasing — add as sub-bullet directly
+                    logging.info(f"[CONCEPT ADDED] sub-point: '{new_concept}' → '{parent}'")
+                    yield from self._add_sub_point(parent, new_concept)
+                else:
+                    # No parent named — three-layer duplicate guard
+                    # If duplicate: add as sub-bullet. If new: insert as concept.
+                    dup = self._check_duplicate(new_concept, self.walkthrough_concepts)
+                    if dup["is_duplicate"]:
+                        logging.info(
+                            f"[CONCEPT ADDED] sub-point: '{new_concept}' → '{dup['matched_concept']}'"
+                        )
+                        yield from self._add_sub_point(dup["matched_concept"], new_concept)
+                    else:
+                        insert_at = self.walkthrough_index + 1
+                        self.walkthrough_concepts.insert(insert_at, new_concept)
+                        log_concept_added(self.session_id, new_concept)
+                        logging.info(f"[CONCEPT ADDED] '{new_concept}' at index={insert_at}")
+                        just_added_concept = new_concept
 
         # ── 6. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -695,6 +742,19 @@ class HITLAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Streaming sub-methods
     # ══════════════════════════════════════════════════════════════════════
+
+    def _add_sub_point(self, matched_concept: str, sub_point: str):
+        """
+        Append a user-supplied sub-point to an existing concept block and
+        yield a confirmation message. Called from both the proactive path
+        and the override path when a duplicate concept is detected.
+        Change log: 2026-05-16
+        """
+        self.concept_blocks[matched_concept] = (
+            self.concept_blocks.get(matched_concept, "")
+            + f"\n- {sub_point}"
+        )
+        yield f"Got it — adding that under **{matched_concept}**:\n- {sub_point}\n\n"
 
     def _stream_concept(self, is_first: bool):
         concept = self._current_concept()
