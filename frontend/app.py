@@ -252,12 +252,17 @@ async def on_begin_analysis(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
+    stream = agent.begin_analysis()
+
+    # First yield is always the timer message — send as separate bubble
+    timer_msg = next(stream)
+    await cl.Message(content=timer_msg).send()
+
+    # Rest streams normally
     msg = cl.Message(content="")
     await msg.send()
-
-    for token in agent.begin_analysis():
+    for token in stream:
         await msg.stream_token(token)
-
     await msg.update()
     await _attach_buttons(agent)
 
