@@ -303,6 +303,7 @@ class ExplainableAgent(BlackBoxAgent):
     Change log: 2026-05-16 — concept_added double-log fix; _resolve_pending
                              log_memory_override removed; WALKTHROUGH_OVERRIDE_PROMPT
                              negative examples added
+    Change log: 2026-05-17 — timer sentinel; UX note moved before first concept
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -390,21 +391,26 @@ class ExplainableAgent(BlackBoxAgent):
         Generator — called when user clicks 'Got it, show me the full analysis'.
         Replaces start_main_phase().
         Change log: 2026-05-12
+        Change log: 2026-05-17 — timer sentinel as first yield (split in app.py);
+                                  UX note moved before first concept
         """
         self._start_main_phase_setup()
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."  # timer sentinel — MutationObserver watches for this
+
+        # First yield — sent as separate cl.Message by app.py (timer sentinel)
+        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
+
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_active   = True
         self.walkthrough_index    = 0
         self.swap_presented       = False
 
-        yield from self._stream_concept(is_first=True)
-
+        # UX note — appears before first concept in same message bubble
         yield (
-            "\n\n---\n\n"
-            "💡 *You can click **📊 Get Summary & End Session** at any time "
-            "to see your full framework and close the session.*"
+            "💡 *When you're finished, click **📊 Get Summary & End Session** "
+            "to close your session. **Note: this cannot be undone.***\n\n---\n\n"
         )
+
+        yield from self._stream_concept(is_first=True)
 
     # ══════════════════════════════════════════════════════════════════════
     # Walkthrough state helpers
