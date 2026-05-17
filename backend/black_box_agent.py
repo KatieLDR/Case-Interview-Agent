@@ -159,26 +159,31 @@ This does NOT include:
 - Conversational rejections ("no thanks", "not needed", "no")
 - Asking what happened to a concept ("what happened to X")
 
+- "parent": the existing concept named after "under" / "as part of" / "within" — null if no parent explicitly named
+
 Respond ONLY with valid JSON, no explanation, no markdown:
-{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}
+{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "parent": string or null, "confidence": float}
 
 Examples:
-- "redo this" → {"override": true, "type": "redo", "detail": null, "confidence": 0.99}
-- "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "confidence": 0.97}
-- "remove profit per unit" → {"override": true, "type": "concept_excluded", "detail": "Profit per Unit", "confidence": 0.97}
-- "add external risks as a bucket" → {"override": true, "type": "concept_added", "detail": "External Risks", "confidence": 0.97}
-- "what about market preference?" → {"override": true, "type": "concept_added", "detail": "Market Preference", "confidence": 0.95}
-- "use profitability framework" → {"override": true, "type": "framework_switch", "detail": "profitability", "confidence": 0.96}
-- "give me a framework" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "why is variable cost here?" → {"override": false, "type": "none", "detail": null, "confidence": 0.95}
-- "yes" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "no" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "no thanks" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "ok" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "sure" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "where's variable cost" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "where is external risk" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
-- "what happened to market share" → {"override": false, "type": "none", "detail": null, "confidence": 0.99}
+- "redo this" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.99}
+- "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.97}
+- "remove profit per unit" → {"override": true, "type": "concept_excluded", "detail": "Profit per Unit", "parent": null, "confidence": 0.97}
+- "add external risks as a bucket" → {"override": true, "type": "concept_added", "detail": "External Risks", "parent": null, "confidence": 0.97}
+- "what about market preference?" → {"override": true, "type": "concept_added", "detail": "Market Preference", "parent": null, "confidence": 0.95}
+- "use profitability framework" → {"override": true, "type": "framework_switch", "detail": "profitability", "parent": null, "confidence": 0.96}
+- "give me a framework" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "why is variable cost here?" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.95}
+- "yes" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "no" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "no thanks" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "ok" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "sure" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "where's variable cost" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "where is external risk" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "what happened to market share" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "add cafe sales under Units Sold" → {"override": true, "type": "concept_added", "detail": "Cafe sales", "parent": "Units Sold", "confidence": 0.97}
+- "I think we should consider coffee bag sales as part of Units Sold" → {"override": true, "type": "concept_added", "detail": "Coffee bag sales", "parent": "Units Sold", "confidence": 0.96}
+- "add market share" → {"override": true, "type": "concept_added", "detail": "Market share", "parent": null, "confidence": 0.97}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -558,7 +563,6 @@ class BlackBoxAgent:
     # Main phase streaming
     # Change log: 2026-05-12 — override first, swap gated on is_injected AND not override
     # Change log: 2026-05-16 — skip log_memory_override for concept_added
-    #   (log_concept_added() already increments count_memory_overrides)
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
@@ -600,9 +604,6 @@ class BlackBoxAgent:
 
         # ── 4. Override handling ───────────────────────────────────────────
         if override:
-            # Skip log_memory_override for concept_added —
-            # log_concept_added() already increments count_memory_overrides
-            # Change log: 2026-05-16
             if override["type"] != "concept_added":
                 log_memory_override(
                     self.session_id,
@@ -779,6 +780,7 @@ class BlackBoxAgent:
             return False
 
     def _detect_override(self, user_input: str) -> dict | None:
+        """Single classifier for all override types. Used for research logging only."""
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
@@ -791,6 +793,7 @@ class BlackBoxAgent:
                 return {
                     "type":       parsed["type"],
                     "detail":     parsed.get("detail"),
+                    "parent":     parsed.get("parent"),
                     "confidence": parsed["confidence"],
                 }
         except Exception as e:
@@ -802,8 +805,6 @@ class BlackBoxAgent:
         Three-layer duplicate guard for concept_added path.
         Layer 2: exact string match (Python, no LLM)
         Layer 3: fuzzy LLM check on gemini-3.1-flash-lite
-          — different model family from CLASSIFIER_MODEL (2.5), true defense-in-depth
-        Conservative error fallback: is_duplicate=True
         Change log: 2026-05-12
         Change log: 2026-05-16 — updated model to gemini-3.1-flash-lite (2.0 deprecated)
         """

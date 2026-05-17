@@ -131,7 +131,7 @@ FORMAT:
 - Include ONLY concepts listed in CONCEPTS TO INCLUDE
 - Copy sub-bullets exactly from FRAMEWORK WALKTHROUGH — do not rewrite them
 - No rationale sentences — summary only
-- After the summary, ask ONE short follow-up question
+- Do NOT add a follow-up question — end after the last concept
 - Never mention a knowledge graph, database, or technical system
 ─────────────────────────────────────────────────────────────────────────────
 """
@@ -182,6 +182,8 @@ class HITLAgent(BlackBoxAgent):
                              HITL_MAIN_SYSTEM_PROMPT updated to coffee shop case
     Change log: 2026-05-16 — concept_added duplicate guard via BlackBoxAgent._check_duplicate();
                              _check_duplicate renamed to _check_duplicate_proactive
+    Change log: 2026-05-17 — proactive sub_point path: stay on current concept after
+                             adding sub-bullet (_stream_concept_qa instead of _stream_proactive_prompt)
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -457,6 +459,7 @@ class HITLAgent(BlackBoxAgent):
     # Main phase — stateful walkthrough router
     # Change log: 2026-05-16 — swap detection order fix; concept_added double-log fix
     # Change log: 2026-05-16 — concept_added duplicate guard added
+    # Change log: 2026-05-17 — proactive sub_point: _stream_concept_qa not _stream_proactive_prompt
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_main(self, user_input: str):
@@ -489,7 +492,7 @@ class HITLAgent(BlackBoxAgent):
                 parent  = intent["parent"]
                 logging.info(f"[PROACTIVE] sub-point: '{concept}' → '{parent}'")
                 yield from self._add_sub_point(parent, concept)
-                yield from self._stream_proactive_prompt()
+                yield from self._stream_concept_qa()  # stay on current concept
                 return
 
             # suggestion — navigate or new concept
@@ -750,10 +753,19 @@ class HITLAgent(BlackBoxAgent):
         and the override path when a duplicate concept is detected.
         Change log: 2026-05-16
         """
-        self.concept_blocks[matched_concept] = (
-            self.concept_blocks.get(matched_concept, "")
+        # Match concept_blocks key case-insensitively to avoid mismatch
+        # e.g. 'Price per unit' (classifier) vs 'Price per Unit' (stored key)
+        actual_key = matched_concept
+        for k in self.concept_blocks:
+            if k.lower() == matched_concept.lower():
+                actual_key = k
+                break
+        self.concept_blocks[actual_key] = (
+            self.concept_blocks.get(actual_key, "")
             + f"\n- {sub_point}"
         )
+        log_concept_added(self.session_id, sub_point)
+        logging.info(f"[SUB-POINT LOGGED] '{sub_point}' under '{actual_key}'")
         yield f"Got it — adding that under **{matched_concept}**:\n- {sub_point}\n\n"
 
     def _stream_concept(self, is_first: bool):
@@ -1032,8 +1044,6 @@ class HITLAgent(BlackBoxAgent):
         if concept not in self.excluded_concepts:
             self.excluded_concepts.append(concept)
 
-        # Note: log_memory_override IS correct here — button rejection is a
-        # separate research event from any prior text override
         log_memory_override(
             self.session_id,
             old_context=f"concept in framework: {concept}",

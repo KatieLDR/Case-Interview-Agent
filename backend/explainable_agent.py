@@ -113,7 +113,7 @@ FORMAT:
 ─── RULES ─────────────────────────────────────────────────────────────────
 - Include ONLY concepts listed in CONCEPTS TO INCLUDE below
 - No rationale sentences — summary only
-- After the summary, ask ONE short follow-up question to invite exploration
+- Do NOT add a follow-up question — end after the last concept
 
 ─── SUB-BULLET EXCLUSIONS ────────────────────────────────────────────────
 Review the full conversation history. If the user explicitly asked to remove
