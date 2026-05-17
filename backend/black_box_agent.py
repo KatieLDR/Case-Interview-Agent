@@ -691,6 +691,7 @@ class BlackBoxAgent:
             f"If the user added new concepts or sub-bullets, include those too.\n\n"
             f"Then in 2-3 sentences: note any concepts the user removed and any "
             f"concepts they added during the session."
+            f"Do NOT add a follow-up question at the end — summary only."
         )
 
         self.history.append(
