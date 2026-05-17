@@ -1,6 +1,6 @@
 (function () {
   // ── Config ──────────────────────────────────────────────────────────────
-  const DURATION_SECONDS = 30; // 30 minutes(change to 30*60)
+  const DURATION_SECONDS = 20 * 60; // 30 minutes(change to 30*60)
   const TRIGGER_TEXT     = "Your 30-minute session has started";
   const END_TEXT         = "Session Ended";
 
