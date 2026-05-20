@@ -24,6 +24,7 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
     db.collection("sessions").document(session_id).set({
         "user_id": user_id,
         "agent_type": agent_type,
+        "created_at": datetime.now(timezone.utc),
         "started_at": None,
         "ended_at": None,
         "current_answer": None,

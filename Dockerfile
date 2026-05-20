@@ -26,7 +26,9 @@ RUN poetry install --no-root --no-interaction --no-ansi
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY .chainlit/ ./.chainlit/
+COPY public/ ./public/
 COPY chainlit.md ./
+
 
 # ── Port ───────────────────────────────────────────────────────────────────
 # Cloud Run injects $PORT at runtime — Chainlit must listen on it
