@@ -21,9 +21,25 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            f"Welcome to the **Problem-Solving Assistant**!\n\n"
-            f"Please select an agent to get started:"
+            "Welcome to the **Problem-Solving Assistant**!\n\n"
+            "Before we begin, please read the guide by clicking the **Readme** button "
+            "in the top-right corner.\n\n"
+            "When you're ready, click the button below."
         ),
+        actions=[
+            cl.Action(
+                name="readme_confirmed",
+                label="I've read it ✅",
+                description="Confirm you have read the guide",
+                payload={}
+            ),
+        ]
+    ).send()
+
+@cl.action_callback("readme_confirmed")
+async def on_readme_confirmed(action: cl.Action):
+    await cl.Message(
+        content="Great! Please select an agent to get started:",
         actions=[
             cl.Action(
                 name="select_agent_1",
@@ -45,7 +61,6 @@ async def on_chat_start():
             ),
         ]
     ).send()
-
 
 # ── Agent selection callbacks ──────────────────────────────────────────────
 @cl.action_callback("select_agent_1")
