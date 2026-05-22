@@ -397,11 +397,13 @@ class ExplainableAgent(BlackBoxAgent):
         self._start_main_phase_setup()
 
         # First yield — sent as separate cl.Message by app.py (timer sentinel)
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
+        
         yield (
             "⚠️ Your goal is to build a structured plan for this case. "
             "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
         )
+
+        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_active   = True
         self.walkthrough_index    = 0

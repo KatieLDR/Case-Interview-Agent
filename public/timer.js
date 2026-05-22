@@ -1,6 +1,6 @@
 (function () {
   // ── Config ──────────────────────────────────────────────────────────────
-  const DURATION_SECONDS = 20 * 60; // 30 minutes(change to 30*60)
+  const DURATION_SECONDS = 20 * 60;
   const TRIGGER_TEXT     = "Your 20-minute session has started";
   const END_TEXT         = "Session Ended";
 
@@ -9,6 +9,23 @@
   let intervalId   = null;
   let secondsLeft  = DURATION_SECONDS;
   let overlay      = null;
+
+  // ── Session Guard ────────────────────────────────────────────────────────
+
+  function beforeUnloadHandler(e) {
+    e.preventDefault();
+    e.returnValue = ""; // Required for Chrome to trigger the native dialog
+  }
+
+  function activateGuard() {
+    window.addEventListener("beforeunload", beforeUnloadHandler);
+    console.log("[BA Guard] session guard active");
+  }
+
+  function deactivateGuard() {
+    window.removeEventListener("beforeunload", beforeUnloadHandler);
+    console.log("[BA Guard] session guard removed — session ended");
+  }
 
   // ── DOM helpers ─────────────────────────────────────────────────────────
 
@@ -133,7 +150,7 @@
       }
     }, 1000);
 
-    console.log("[BA Timer] started — 30 minutes");
+    console.log("[BA Timer] started — 20 minutes");
   }
 
   // ── MutationObserver ────────────────────────────────────────────────────
@@ -148,8 +165,9 @@
           startTimer();
         }
 
-        if (timerStarted && text.includes(END_TEXT)) {
+        if (text.includes(END_TEXT)) {
           stopTimer();
+          deactivateGuard();
         }
       }
     }
@@ -158,6 +176,7 @@
   function init() {
     observer.observe(document.body, { childList: true, subtree: true });
     console.log("[BA Timer] observer active");
+    activateGuard();
   }
 
   if (document.readyState === "loading") {

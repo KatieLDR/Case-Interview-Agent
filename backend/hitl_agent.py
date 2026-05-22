@@ -294,11 +294,14 @@ class HITLAgent(BlackBoxAgent):
         Change log: 2026-05-12
         """
         self._start_main_phase_setup()
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."  # timer sentinel — MutationObserver watches for this to trigger button attachment in app.py
+        
         yield (
             "⚠️ Your goal is to build a structured plan for this case. "
             "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
         )
+
+        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."  # timer sentinel — MutationObserver watches for this to trigger button attachment in app.py
+        
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_active   = True
         self.walkthrough_index    = 0

@@ -280,17 +280,18 @@ async def on_begin_analysis(action: cl.Action):
 
     stream = agent.begin_analysis()
 
-    # First yield is always the timer message — send as separate bubble
+    # First yield — goal instruction
+    goal_msg = next(stream)
+    await cl.Message(content=goal_msg).send()
+
+    await asyncio.sleep(8)
+
+    # Second yield is always the timer message — send as separate bubble
     timer_msg = next(stream)
     await cl.Message(content=timer_msg).send()
 
     await asyncio.sleep(2)
 
-    # Second yield — goal instruction
-    goal_msg = next(stream)
-    await cl.Message(content=goal_msg).send()
-
-    await asyncio.sleep(8)
 
     # Rest streams normally
     msg = cl.Message(content="")
