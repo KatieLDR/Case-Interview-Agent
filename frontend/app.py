@@ -4,6 +4,7 @@ import chainlit as cl
 from backend.black_box_agent import BlackBoxAgent, MAX_TURNS_PER_SESSION
 from backend.explainable_agent import ExplainableAgent
 from backend.hitl_agent import HITLAgent
+import asyncio
 
 
 # ── Security caps ──────────────────────────────────────────────────────────
@@ -138,12 +139,22 @@ async def on_lets_go(action: cl.Action):
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
 
+    await cl.Message(
+    content=(
+        "You are about to read a short business case. "
+        "Take a moment to read it carefully. "
+        "We will build a structured plan together afterwards."
+        )
+    ).send()
+
+    await asyncio.sleep(3)
     await cl.Message(content=agent.get_opening_message()).send()
 
+    await asyncio.sleep(15)
     await cl.Message(
         content=(
-            "💬 **Before we begin:** Feel free to ask any questions about the case — "
-            "I'm here to help clarify. When you're ready to build your framework, "
+            "💬 **Before we begin:** Feel free to ask any questions about the case, "
+            "I'm here to help clarify. When you're ready to build your answer, "
             "click the I'm Ready ✅ button below to start."
         ),
         actions=[
@@ -272,6 +283,14 @@ async def on_begin_analysis(action: cl.Action):
     # First yield is always the timer message — send as separate bubble
     timer_msg = next(stream)
     await cl.Message(content=timer_msg).send()
+
+    await asyncio.sleep(2)
+
+    # Second yield — goal instruction
+    goal_msg = next(stream)
+    await cl.Message(content=goal_msg).send()
+
+    await asyncio.sleep(8)
 
     # Rest streams normally
     msg = cl.Message(content="")

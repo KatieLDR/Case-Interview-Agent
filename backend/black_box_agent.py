@@ -447,6 +447,10 @@ class BlackBoxAgent:
         self._start_main_phase_setup()
 
         yield "⏱️ Your 20-minute session has started. The timer is shown on the left."  # timer sentinel — MutationObserver watches for this
+        yield (
+            "⚠️ Your goal is to build a structured plan for this case. "
+            "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
+        )
         yield from self._stream_framework_presentation()
 
         yield (
