@@ -62,7 +62,7 @@ edit_message = true
 
 [UI]
 # Name of the assistant.
-name = "Assistant"
+name = "Problem-Solving Assistant"
 
 # default_theme = "dark"
 

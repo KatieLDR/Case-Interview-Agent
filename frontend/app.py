@@ -21,7 +21,7 @@ async def on_chat_start():
 
     await cl.Message(
         content=(
-            f"👋 Welcome to the **Case Interview Assistant**!\n\n"
+            f"Welcome to the **Problem-Solving Assistant**!\n\n"
             f"Please select an agent to get started:"
         ),
         actions=[
