@@ -1,7 +1,5 @@
 # Welcome to the Problem-Solving Assistant
 
-Welcome to the Problem-Solving Assistant! Thank you for participating!
-
 This panel tells you what you are expected to deliver by the end of the task. It is also here to help you at any point during the session. You can reopen it at any time by clicking the Readme button in the top-right corner.
 
 ---
@@ -12,13 +10,15 @@ Your goal is to build a structured solution for a business case and *actively sh
 
 ### What solution to deliver in the end?
 
-You should deliver a framework and paste your Session ID into the survey at the end. A framework solution is a way of breaking down a complex business problem into clear areas and questions, like an organised plan for figuring out what matters most.
+You should deliver a framework(see the bottom section "Example Final Solution") and paste your Session ID into the survey at the end. A framework solution is a way of breaking down a complex business problem into clear areas and questions, like an organised plan for figuring out what matters most.
 
 This is not a passive task. The AI assistant will present a starting framework, but *you are expected to engage with it*. Do not just believe everything the AI says. Challenge and change any concept you disagree with:
 
 - Add a new area or question you think is missing
 - Remove something you think is not relevant
-- Challenge or change any concept suggested by the AI that does not feel right. There are no right or wrong answers. We are interested in how you think through the problem.
+- Challenge or change any concept suggested by the AI that does not feel right.
+
+There are no right or wrong answers. We are interested in how you think through the problem.
 
 ---
 
@@ -66,12 +66,15 @@ Click "📊 Get Summary & End Session" when you are satisfied with your framewor
 
 1. The participant **added** a new area:
 
+
+> I think we should also consider
 > **Channel**
 > - Is there an app or online booking system?
 
 2. The participant **removed** one question they felt was not relevant:
 
-> ~~Are the facilities in good condition?~~
+
+> I think this is not relevant ~Are the facilities in good condition?~~
 
 3. The participant **challenged** a concept suggested by the AI:
 
