@@ -190,45 +190,47 @@ Examples:
 # Warm-up content
 # Change log: 2026-05-05 — redesigned warm-up
 # Change log: 2026-05-06 — added "Let's go" cue
+# Change log: 2026-05-22 — pre-built plan, LLM merge
 # ══════════════════════════════════════════════════════════════════════════
 
 WARMUP_PROMPT = (
-    "**🧪 Practice Exercise: Build a Solution**\n\n"
-    "Before the main task, let's warm up with a quick exercise.\n\n"
-    "**The situation:**\n"
-    "You're thinking about moving to a new city. Before you go, "
-    "you want to make sure you've thought everything through.\n\n"
-    "**Your task:**\n"
-    "Break this down into the main **areas** you'd need to figure out. "
-    "For each area, list a few **questions** you'd want to answer.\n\n"
-    "**Example:**\n"
-    "> 🏠 **Housing**\n"
-    "> - Where will I live?\n"
-    "> - What's the average rent?\n"
-    "> - How far is it from work?\n\n"
-    "**Now it's your turn!**\n"
-    "Type your areas and questions below — send as many messages as you like.\n"
-    "When you're done, click the **✅ Done** button below."
+    "✏️ **Here is the practice task exercise:**\n\n"
+    "You are moving to a new city for a new job opportunity. "
+    "Before you go, you want to make sure you have a complete plan. "
+    "Let's plan this together.\n\n"
+    "*This should take about 2–3 minutes, there are no right or wrong answers.*\n\n"
+    "**Here's my suggestion:**\n\n"
+    "🏠 **Housing**\n"
+    "- Should we find temporary accommodation?\n"
+    "- How are the neighbourhoods?\n\n"
+    "📋 **Admin**\n"
+    "- Should we register at the new city hall?\n"
+    "- Do we need a local bank account?\n\n"
+    "*What else would you add, or is there anything you'd remove or change?*"
 )
 
-WARMUP_ACKNOWLEDGEMENT = (
-    "Got it! Anything else to add? "
-    "When you're ready, click the **✅ Done** button below."
-)
+WARMUP_MERGE_PROMPT = """You are helping a user build a moving-to-a-new-city plan.
 
-WARMUP_MODEL_ANSWER = (
-    "**Here's an example of a complete solution:**\n\n"
-    "> 🏠 **Housing** — Where will I live? What's the rent? How far from work?\n\n"
-    "> 💰 **Finances** — What's my budget? What's the cost of living?\n\n"
-    "> 🏢 **Work** — Do I have a job lined up? What's the commute?\n\n"
-    "> 👥 **Social** — Do I know anyone there? How will I meet people?\n\n"
-    "> 📦 **Logistics** — Moving costs, paperwork, transport\n\n"
-    "---\n"
-    "*Notice how each area has a clear theme, and each question helps you "
-    "decide whether that area needs attention. "
-    "That's exactly what you'll be doing in the main task — but for a business situation!*\n\n"
-    "👆 When you're ready to close this practice and start the main task, click **Let's go!** below."
-)
+The starting plan is:
+🏠 Housing
+- Should we find temporary accommodation?
+- How are the neighbourhoods?
+
+📋 Admin
+- Should we register at the new city hall?
+- Do we need a local bank account?
+
+The user has added the following ideas:
+{additions}
+
+Your task: produce an updated plan that incorporates the user's ideas.
+- Keep the same emoji + bold header format
+- Add new bullet points under the most relevant existing section, or create a new section if needed
+- If the user pushed back on something, remove or reframe it
+- If the user adds a new section (e.g. "Location"), generate 2 relevant sub-bullet questions for it
+- If the user's intent is ambiguous, make a reasonable interpretation and proceed
+- Keep it concise — bullet points only, no extra explanation
+- Do NOT add any intro or closing sentence — return the plan only"""
 
 # ══════════════════════════════════════════════════════════════════════════
 # Thresholds
@@ -377,11 +379,44 @@ class BlackBoxAgent:
     def get_warmup_message(self) -> str:
         return WARMUP_PROMPT
 
-    def get_warmup_acknowledgement(self) -> str:
-        return WARMUP_ACKNOWLEDGEMENT
+    
+    def merge_warmup_additions(self, additions: list[str]) -> str:
+        """
+        LLM call: merges user additions into the pre-built warmup plan.
+        Fallback: original plan + user additions listed separately.
+        Change log: 2026-05-22 — added for warmup redesign
+        """
+        if not additions:
+            return WARMUP_PROMPT
 
-    def get_warmup_model_answer(self) -> str:
-        return WARMUP_MODEL_ANSWER
+        additions_text = "\n".join(f"- {a}" for a in additions)
+        prompt = WARMUP_MERGE_PROMPT.format(additions=additions_text)
+
+        try:
+            response = client.models.generate_content(
+                model=MAIN_MODEL,
+                contents=prompt,
+            )
+            merged = response.text.strip()
+            return (
+                "**Here's your updated plan:**\n\n"
+                + merged
+            )
+        except Exception as e:
+            print(f"[WARMUP MERGE] LLM merge failed: {e}")
+            # Fallback: original plan + additions listed
+            additions_block = "\n".join(f"- {a}" for a in additions)
+            return (
+                "**Here's your updated plan:**\n\n"
+                "🏠 **Housing**\n"
+                "- Should we find temporary accommodation?\n"
+                "- How are the neighbourhoods?\n\n"
+                "📋 **Admin**\n"
+                "- Should we register at the new city hall?\n"
+                "- Do we need a local bank account?\n\n"
+                "**Your additions:**\n"
+                + additions_block
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     # Opening message

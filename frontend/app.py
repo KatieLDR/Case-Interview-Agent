@@ -191,7 +191,7 @@ async def on_done_warmup(action: cl.Action):
         await cl.Message(
             content=(
                 "It looks like you haven't typed anything yet! "
-                "Give it a try — there are no wrong answers. 😊"
+                "Give it a try — there are no right or wrong answers. 😊"
             ),
             actions=[
                 cl.Action(
@@ -204,16 +204,27 @@ async def on_done_warmup(action: cl.Action):
         ).send()
         return
 
+    # ── Retrieve last merged plan from session ────────────────────────
+    # Change log: 2026-05-22 — log final merged plan, not raw messages
+    merged_plan = cl.user_session.get("warmup_merged_plan", "")
+
     from backend.logger import log_warmup_response
-    combined = " | ".join(warmup_messages)
-    log_warmup_response(agent.session_id, combined)
+    log_warmup_response(agent.session_id, merged_plan)
 
     agent.phase = "clarification"
-    print(f"[WARMUP] combined response logged, phase → clarification "
+    print(f"[WARMUP] final plan logged, phase → clarification "
           f"for session={agent.session_id}")
 
     await cl.Message(
-        content=agent.get_warmup_model_answer(),
+        content=(
+            f"✅ **Great work!**\n\n"
+            f"Here's your final plan:\n\n"
+            f"{merged_plan}\n\n"
+            f"---\n\n"
+            f"You've just practiced breaking down a problem into structured areas, "
+            f"that's exactly what you'll do next.\n\n"
+            f"Click **Let's go! 🚀** below to start the real case."
+        ),
         actions=[
             cl.Action(
                 name="lets_go",
@@ -342,12 +353,23 @@ async def on_message(message: cl.Message):
 
     # ── Warmup phase ──────────────────────────────────────────────────────
     # Change log: 2026-05-01
+    # Change log: 2026-05-22 — show merged plan on every user message
     if hasattr(agent, "phase") and agent.phase == "warmup":
         warmup_messages = cl.user_session.get("warmup_messages", [])
         warmup_messages.append(message.content)
         cl.user_session.set("warmup_messages", warmup_messages)
+
+        merged = agent.merge_warmup_additions(warmup_messages)
+        cl.user_session.set("warmup_merged_plan", merged)
+
         await cl.Message(
-            content=agent.get_warmup_acknowledgement(),
+            content=(
+                f"Got it!\n\n"
+                f"{merged}\n\n"
+                f"---\n\n"
+                f"Anything else to add, or is there anything you'd remove or change? "
+                f"When you want to finish the practice, click the **✅ Done** button below."
+            ),
             actions=[
                 cl.Action(
                     name="done_warmup",
