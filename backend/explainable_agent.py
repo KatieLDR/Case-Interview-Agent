@@ -11,6 +11,7 @@ from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
     log_framework_switched, log_concept_added,
+    log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned
 )
 from backend import knowledge_graph as kg
 from backend.rag_explainer import build_citation_header, check_and_append_warning
@@ -901,6 +902,7 @@ class ExplainableAgent(BlackBoxAgent):
                     self.pending_excl = excl
                     override = {"type": "pending_excl_set"}
                     logging.info("[OVERRIDE] concept exclusion pending: " + excl)
+                    log_delete(self.session_id, excl, "text")   # intent (#1)
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
@@ -1005,6 +1007,12 @@ class ExplainableAgent(BlackBoxAgent):
                 yield from self._stream_concept(is_first=False)
 
         else:
+            _on_swap = (self.walkthrough_index == self.swap_position
+                        and self.swap_presented
+                        and not self.concept_swap.is_detected)
+            log_question(self.session_id, "text", detail=user_input[:200])
+            if _on_swap:
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
             yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1113,6 +1121,7 @@ class ExplainableAgent(BlackBoxAgent):
                 log_concept_added(self.session_id, matched_pillar)
                 self.pending_add = None
                 logging.info(f"[ADD] new pillar matched withheld: '{matched_pillar}'")
+                log_add_pillar(self.session_id, matched_pillar, "text")
                 yield (
                     f"Good call. **{matched_pillar}** is an important area, "
                     f"we'll cover it later in the walkthrough.\n\n"
@@ -1122,6 +1131,7 @@ class ExplainableAgent(BlackBoxAgent):
                 self.walkthrough_concepts.append(item)
                 self.user_added_pillars.append(item)
                 log_concept_added(self.session_id, item)
+                log_add_pillar(self.session_id, item, "text")
                 self.pending_add = None
                 logging.info(f"[ADD] new pillar (no match): '{item}'")
                 yield (
@@ -1141,6 +1151,7 @@ class ExplainableAgent(BlackBoxAgent):
         if match:
             self.user_sub_points[target].append(match["question"])
             log_concept_added(self.session_id, item)
+            log_add_sub_bullet(self.session_id, match["question"], "text")
             self.pending_add = None
             logging.info(f"[ADD] sub-bullet matched key_question under '{target}'")
             sources = f"\n\n{match['sources']}" if match.get("sources") else ""
@@ -1154,6 +1165,7 @@ class ExplainableAgent(BlackBoxAgent):
         else:
             self.user_sub_points[target].append(item)
             log_concept_added(self.session_id, item)
+            log_add_sub_bullet(self.session_id, item, "text")
             self.pending_add = None
             logging.info(f"[ADD] sub-bullet (no match) under '{target}'")
             yield (

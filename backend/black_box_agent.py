@@ -8,7 +8,7 @@ from backend.logger import (
     log_user_message, log_agent_response,
     log_interruption, log_memory_override,
     update_answer, log_warmup_response,
-    log_concept_added
+    log_concept_added, log_add_pillar, log_add_sub_bullet, log_delete, log_question, log_swap_questioned
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -639,6 +639,12 @@ class BlackBoxAgent:
             print(f"[OVERRIDE] type={override['type']}, "
                   f"detail={override['detail']}, "
                   f"confidence={override['confidence']}")
+            
+            if override["type"] == "concept_excluded":
+                _d = (override.get("detail") or "").lower()
+                _w = self.concept_swap.config["wrong_concept"].lower()
+                if not (_d and (_w in _d or _d in _w)):   # swap removal stays detection (#3)
+                    log_delete(self.session_id, override.get("detail") or "current concept", "text")
 
             if override["type"] == "redo":
                 if self.concept_swap.is_detected:
@@ -653,8 +659,22 @@ class BlackBoxAgent:
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
                 log_concept_added(self.session_id, new_concept)
+                if override.get("parent"):
+                    log_add_sub_bullet(self.session_id, new_concept, "text")
+                else:
+                    log_add_pillar(self.session_id, new_concept, "text")
                 print(f"[CONCEPT ADDED] '{new_concept}' — LLM will incorporate via history")
-
+                
+        # ── Question / swap-question logging — non-steering turns only ──────
+        if override is None and not cs_detected:
+            swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
+            q = self._classify_question(
+                user_input, self.concept_swap.config["wrong_concept"], swap_active
+            )
+            if q["is_question"]:
+                log_question(self.session_id, "text", detail=user_input[:200])
+                if swap_active and q["is_about_swap"]:
+                    log_swap_questioned(self.session_id, "text", detail=user_input[:200])
         self._update_kg_if_framework_mentioned(user_input)
 
         log_user_message(self.session_id, user_input)
@@ -825,7 +845,39 @@ class BlackBoxAgent:
         except Exception as e:
             print(f"[OVERRIDE] error: {e}")
         return None
-
+    
+    def _classify_question(self, user_input: str, swap_concept: str, swap_active: bool) -> dict:
+        """
+        Lite classifier: is this a question / explanation request (vs an affirmation
+        or comment), and is it specifically about the swap concept? Runs only on
+        non-steering, non-swap-rejection turns. Change log: 2026-05-30
+        """
+        swap_clause = (
+            f'Then decide whether the question is specifically ABOUT this concept:\n"{swap_concept}"\n'
+            if swap_active else 'Set is_about_swap to false.\n'
+        )
+        prompt = (
+            "You are a classifier for a case interview tool.\n"
+            "Determine whether the user's message is a QUESTION or request for explanation "
+            "about the framework/case — as opposed to an affirmation, acknowledgement, "
+            "comment, or steering command.\n\n"
+            "Questions: 'why is X here?', 'can you explain...', 'what does ... mean?', "
+            "'how does this apply?', 'is this relevant?'\n"
+            "NOT questions: 'ok', 'thanks', 'sounds good', 'yes', 'no', plain statements.\n\n"
+            f"{swap_clause}\n"
+            'Respond ONLY with valid JSON, no markdown:\n'
+            '{"is_question": true or false, "is_about_swap": true or false}\n\n'
+            f'User message: "{user_input}"'
+        )
+        try:
+            response = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
+            parsed = json.loads(self._strip_fences(response.text))
+            return {"is_question": bool(parsed.get("is_question", False)),
+                    "is_about_swap": bool(parsed.get("is_about_swap", False))}
+        except Exception as e:
+            print(f"[QUESTION] classifier error: {e}")
+            return {"is_question": False, "is_about_swap": False}
+        
     def _check_duplicate(self, concept: str, existing_concepts: list) -> dict:
         """
         Three-layer duplicate guard for concept_added path.

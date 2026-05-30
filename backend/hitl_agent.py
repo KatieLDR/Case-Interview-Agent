@@ -12,7 +12,7 @@ from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
-    log_framework_switched, log_concept_added, stamp_started_at,
+    log_framework_switched, log_concept_added, stamp_started_at,log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned,
 )
 from backend import knowledge_graph as kg          # inherited framework-switch paths only
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
@@ -541,7 +541,7 @@ class HITLAgent(BlackBoxAgent):
             logging.warning(f"[SUB-POINT FORMAT] error: {e} — keeping raw")
         return item.strip()
 
-    def _store_sub_point(self, pillar: str, item: str) -> tuple[str, bool]:
+    def _store_sub_point(self, pillar: str, item: str, modality: str = "text") -> tuple[str, bool]:
         """
         Match item to a key question (cleaned, source-free) or keep raw; store under
         pillar in user_sub_points. Returns (stored_text, is_new) — is_new is False if
@@ -559,6 +559,7 @@ class HITLAgent(BlackBoxAgent):
             return stored, False
         existing.append(stored)
         log_concept_added(self.session_id, item)
+        log_add_sub_bullet(self.session_id, stored, modality)
         logging.info(f"[SUB-POINT] '{item}' → '{stored}' under '{pillar}'")
         return stored, True
 
@@ -574,7 +575,7 @@ class HITLAgent(BlackBoxAgent):
         if self.awaiting_sub_point:
             concept = self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[SUB-POINT ADD] {user_input}")
-            stored, is_new = self._store_sub_point(concept, user_input)
+            stored, is_new = self._store_sub_point(concept, user_input, modality="button")
 
             block  = self.concept_blocks.get(concept, "").strip()
             points = self.user_sub_points.get(concept, [])
@@ -790,6 +791,7 @@ class HITLAgent(BlackBoxAgent):
                         insert_at = self.walkthrough_index + 1
                         self.walkthrough_concepts.insert(insert_at, resolved)
                         log_concept_added(self.session_id, resolved)
+                        log_add_pillar(self.session_id, resolved, "text")
                         logging.info(
                             f"[CONCEPT ADDED] '{new_concept}' inserted as "
                             f"'{resolved}' at index={insert_at}"
@@ -830,6 +832,13 @@ class HITLAgent(BlackBoxAgent):
                 yield from self._stream_proactive_prompt()
 
         else:
+            if override is None:   # pure question/comment, not a steering action
+                _on_swap = (self.walkthrough_index == self.swap_position
+                            and self.swap_presented
+                            and not self.concept_swap.is_detected)
+                log_question(self.session_id, "text", detail=user_input[:200])
+                if _on_swap:
+                    log_swap_questioned(self.session_id, "text", detail=user_input[:200])
             yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -880,6 +889,7 @@ class HITLAgent(BlackBoxAgent):
             self.swap_position += 1
             logging.info(f"[USER CONCEPT] swap_position shifted to {self.swap_position}")
         log_concept_added(self.session_id, concept)
+        log_add_pillar(self.session_id, concept, "text")
         logging.info(f"[USER CONCEPT] inserted at index={self.walkthrough_index}: '{concept}'")
 
         # Present as the current concept; Include/Skip/Add buttons handle the rest.
@@ -1195,8 +1205,10 @@ class HITLAgent(BlackBoxAgent):
             return
 
         self.pending_excl = concept
+        
         logging.info(f"[REJECT] pending set for concept='{concept}'")
-
+        if not self._is_wrong_concept(concept):
+            log_delete(self.session_id, concept, "button")   # intent (#1); swap stays detection (#3)
         yield (
             f"Are you sure you want to skip **{concept}**?\n\n"
             f"*Use the buttons below to confirm.*"

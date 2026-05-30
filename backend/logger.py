@@ -39,17 +39,29 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         "count_interruptions": 0,
         "count_memory_overrides": 0,
         "count_answer_updates": 0,
+        # ── disaggregated agency counters (added 2026-05-30) ──
+        # Parallel to count_memory_overrides (kept). count_delete = removal INTENTS.
+        "count_question":        0,
+        "count_add_pillar":      0,
+        "count_add_sub_bullet":  0,
+        "count_delete":          0,
+        "count_update":          0,
+        "count_swap_questioned": 0,
         # ── concept swap ──
         "concept_swap_presented": False,
         "concept_swap_detected": False,
-        # ── HITL-specific ──────────────────────────────────────────────
-        # Change log: 2026-04-09 — added for HITLAgent proactive clarification
-        # and explicit approval/rejection tracking.
-        # None/[] for non-HITL agents — ignored in scoring script.
-        "hitl_context":      None,   # Q1 answer — M&A familiarity
-        "hitl_exigence":     None,   # Q2 answer — session goal
-        "concepts_approved": [],     # explicitly approved concept names
-        "concepts_rejected": [],     # explicitly rejected concept names
+        # ── HITL-specific ──
+        # hitl_context / hitl_exigence removed 2026-05-30 — Q1/Q2 no longer exist.
+        "concepts_approved": [],
+        "concepts_rejected": [],
+        # ── disaggregated agency counters (added 2026-05-30) ──
+        # Parallel to count_memory_overrides (kept). Split per interaction kind.
+        "count_question":        0,
+        "count_add_pillar":      0,
+        "count_add_sub_bullet":  0,
+        "count_delete":          0,
+        "count_update":          0,
+        "count_swap_questioned": 0,
     })
     return session_id
 
@@ -94,6 +106,13 @@ _COUNTER_MAP = {
     "agent_response":  "count_agent_responses",
     "interruption":    "count_interruptions",
     "memory_override": "count_memory_overrides",
+    # ── disaggregated agency events (added 2026-05-30) ──
+    "question":        "count_question",
+    "add_pillar":      "count_add_pillar",
+    "add_sub_bullet":  "count_add_sub_bullet",
+    "delete":          "count_delete",
+    "update":          "count_update",
+    "swap_questioned": "count_swap_questioned",
 }
 
 
@@ -230,24 +249,53 @@ def log_memory_override(session_id: str, old_context: str, new_context: str) -> 
         "new_context": new_context,
     })
 
-# Change log: 2026-04-09 — added stamp_hitl_context().
-# Stamps HITL candidate context (Q1 answer — M&A familiarity, Q2 answer — session goal)
-# to Firestore after proactive clarification completes. Called once — after Q2 answer is received.
-def stamp_hitl_context(
-    session_id: str,
-    hitl_context: str,
-    hitl_exigence: str,
-) -> None:
-    """
-    Stamp HITL candidate context to Firestore after proactive clarification completes.
-    Called once — after Q2 answer is received.
-    Change log: 2026-04-09
-    """
+# Change log: 2026-05-30 — disaggregated, modality-tagged agency events.
+# Fires its own counter via _COUNTER_MAP (same mechanism as count_memory_overrides),
+# which is kept untouched. Events are the source of truth; counters are a cache —
+# derive final counts from events offline. Uniform across all three agents.
+_INTERACTION_TYPES = frozenset({
+    "question", "add_pillar", "add_sub_bullet", "delete", "update", "swap_questioned",
+})
+_INTERACTION_MODALITIES = frozenset({"button", "text"})
+
+def log_interaction_event(session_id: str, event_type: str, modality: str, detail: str = "") -> None:
+    if event_type not in _INTERACTION_TYPES:
+        print(f"[INTERACTION] WARNING unknown event_type='{event_type}' (still logged)")
+    if modality not in _INTERACTION_MODALITIES:
+        print(f"[INTERACTION] WARNING unknown modality='{modality}' (still logged)")
     try:
-        db.collection("sessions").document(session_id).update({
-            "hitl_context":  hitl_context,
-            "hitl_exigence": hitl_exigence,
-        })
-        print(f"[HITL] context stamped for session={session_id}")
+        _log_event(session_id, event_type, {"modality": modality, "detail": detail})
+        print(f"[INTERACTION] {event_type}/{modality} logged for session={session_id}")
     except Exception as e:
-        print(f"[HITL] failed to stamp context: {e}")
+        print(f"[INTERACTION] failed to log: {e}")
+
+# Thin named helpers — keep the taxonomy strings in one place across all agents.
+def log_question(session_id, modality, detail=""):       log_interaction_event(session_id, "question", modality, detail)
+def log_add_pillar(session_id, name, modality):          log_interaction_event(session_id, "add_pillar", modality, name)
+def log_add_sub_bullet(session_id, text, modality):      log_interaction_event(session_id, "add_sub_bullet", modality, text)
+def log_delete(session_id, name, modality):              log_interaction_event(session_id, "delete", modality, name)
+def log_swap_questioned(session_id, modality, detail=""): log_interaction_event(session_id, "swap_questioned", modality, detail)
+
+# Change log: 2026-05-30 — added log_interaction_event().
+# Records each user agency act as a separate, modality-tagged event AND
+# increments its own counter via _COUNTER_MAP (same mechanism as
+# count_memory_overrides). count_memory_overrides is kept and untouched —
+# an add still bumps both the legacy override count and the new counter.
+_INTERACTION_TYPES = frozenset({
+    "question", "add_pillar", "add_sub_bullet", "delete", "update", "swap_questioned",
+})
+_INTERACTION_MODALITIES = frozenset({"button", "text"})
+
+def log_interaction_event(session_id: str, event_type: str, modality: str, detail: str = "") -> None:
+    if event_type not in _INTERACTION_TYPES:
+        print(f"[INTERACTION] WARNING unknown event_type='{event_type}' (still logged)")
+    if modality not in _INTERACTION_MODALITIES:
+        print(f"[INTERACTION] WARNING unknown modality='{modality}' (still logged)")
+    try:
+        _log_event(session_id, event_type, {
+            "modality": modality,
+            "detail":   detail,
+        })
+        print(f"[INTERACTION] {event_type}/{modality} logged for session={session_id}")
+    except Exception as e:
+        print(f"[INTERACTION] failed to log: {e}")
