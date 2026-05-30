@@ -87,7 +87,7 @@
     const msg = document.createElement("p");
     msg.style.cssText = "font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;";
     msg.textContent =
-      "Please click the 📊 Get Summary & End Session button, " +
+      "Please click the ‼️End Session, " +
       "then copy your Session ID into the survey.";
 
     const btn = document.createElement("button");

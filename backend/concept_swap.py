@@ -31,17 +31,17 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 # ══════════════════════════════════════════════════════════════════════════
 SWAP_CONFIG = {
     "black_box": {
-        "wrong_concept":   "Employee Turnover Rate",  # HR metric — outside KG
-        "wrong_framework": "HR Analytics",
+        "wrong_concept":   "Average number of steps walked per day by the IT team",
+        "wrong_framework": "Employee Wellness Analytics",
     },
     "explainable": {
-        "wrong_concept":   "Employee Turnover Rate",
-        "wrong_framework": "HR Analytics",
+        "wrong_concept":   "Average number of steps walked per day by the IT team",
+        "wrong_framework": "Employee Wellness Analytics",
     },
     "hitl": {
-        "wrong_concept":   "Employee Turnover Rate",
-        "wrong_framework": "HR Analytics",
-},
+        "wrong_concept":   "Average number of steps walked per day by the IT team",
+        "wrong_framework": "Employee Wellness Analytics",
+    },
 }
 
 # ══════════════════════════════════════════════════════════════════════════

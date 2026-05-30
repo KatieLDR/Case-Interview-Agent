@@ -1,13 +1,115 @@
 # cases.py
-# Last updated: 2026-05-08
+# Last updated: 2026-05-25
 # Change log:
+#   2026-05-25 — All three agents migrated to your company GenAI use case.
+#                Coffee shop case moved to backup section below.
 #   2026-05-08 — All three agents migrated to coffee shop case (same case across conditions).
 #                Previous cases moved to backup section below.
 #                Coffee shop case adapted from Mining Co. profitability case.
 #                Clarification facts researched and sourced (see coffee_shop_case_v1.md).
 
-# ── Coffee Shop Case Prompt ────────────────────────────────────────────────────
+# ── your company GenAI Case Prompt ─────────────────────────────────────────
 # Shared across all three agents (BlackBox, Explainable, HITL).
+
+_ALLIANZ_PROMPT = """\
+A colleague on your team has identified a GenAI use case that could automate \
+a repetitive part of the team's workflow and has already built a rough \
+prototype. Your manager has asked you to prepare a structured plan covering \
+everything the team needs to consider before rolling it out more broadly, \
+just like you practised in the warm-up exercise.\
+"""
+
+# ── your company Clarification Facts ───────────────────────────────────────
+# Shared across all three agents.
+#
+# ⚠️  FLAGS:
+#   [VERIFY MONDAY] — source content needs verification (4 your company sources)
+#   [PLACEHOLDER]   — internal your company document title not yet supplied (5 docs)
+#
+# Sources documented in allianz_bavaria_case_design_plan.md.
+
+_ALLIANZ_FACTS = {
+    "objective": (
+        "The manager's objective is to evaluate whether the prototype is ready to be rolled "
+        "out more broadly within the team. The team is not being asked to build from scratch "
+        "— a rough prototype already exists. The task is to assess whether it is worth "
+        "proceeding and, if so, what needs to be in place before rollout. "
+        "⚠️ [VERIFY MONDAY] your company Group responsible AI principles: "
+        "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html"
+    ),
+    "strategic_fit": (
+        "The use case involves automating a repetitive workflow task within the your company "
+        "Bavaria IT team. The manager has not yet confirmed whether a comparable use case "
+        "has already been deployed via an existing internal tool, or whether a simpler rules-based "
+        "automation would achieve the same result. Any GenAI use case at your company must be "
+        "consistent with your company's responsible AI principles, which include "
+        "transparency, human oversight, and accountability. "
+        "⚠️ [VERIFY MONDAY] your company 8 responsible AI principles: "
+        "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html"
+    ),
+    "use_case_and_solution": (
+        "The prototype has been built by a single colleague on the IT team. It is not yet "
+        "known whether the output is consumed internally by IT colleagues only, or whether "
+        "it reaches business stakeholders or customers. The input data classification level "
+        "has not been confirmed — this determines the compliance path. The team has not yet "
+        "evaluated whether to build on the prototype or procure an enterprise GenAI tool "
+        "with compliance and support already built in. "
+        "⚠️ [PLACEHOLDER] your company Data Classification and Handling Policy"
+    ),
+    "feasibility": (
+        "The prototype was built by a single developer on the IT team. There is currently "
+        "no designated owner for long-term maintenance, and no formal handover process. "
+        "The technical environment has not been assessed for stability or compatibility with "
+        "approved approved IT infrastructure. Data quality and compliance with GDPR Article 5 "
+        "data minimisation principles have not been verified. "
+        "Source: GDPR Article 5 — https://gdpr-info.eu/art-5-gdpr/; "
+        "NIST AI RMF 1.0 — https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10; "
+        "⚠️ [PLACEHOLDER] your company IT Infrastructure and Tool Standards; "
+        "⚠️ [PLACEHOLDER] your company IT Tool Ownership and Handover Guidelines"
+    ),
+    "financial_impact": (
+        "No formal cost or benefit analysis has been conducted. One-time costs include "
+        "any tooling, API access, or infrastructure required for production deployment. "
+        "Ongoing costs include API usage fees, maintenance effort, and monitoring overhead. "
+        "Expected benefits should be framed in terms of time saved per week and the "
+        "equivalent FTE cost. A clear payback period is required to justify the investment "
+        "internally. "
+        "Source: McKinsey QuantumBlack, From Promise to Impact (2025) — "
+        "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai"
+    ),
+    "implementation": (
+        "No rollout plan exists yet. A formal approval process is required before any "
+        "GenAI tool can be shared more broadly within your company. The team must also "
+        "define mandatory human review checkpoints before rollout. "
+        "⚠️ [VERIFY MONDAY] your company's GenAI use case approval process: "
+        "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html; "
+        "⚠️ [PLACEHOLDER] your company Group GenAI Use Case Review and Approval Process; "
+        "⚠️ [PLACEHOLDER] your company Internal GenAI Use Case Approval Policy"
+    ),
+    "risks": (
+        "Key risks include: EU AI Act classification requirements even for lower-risk tools "
+        "(Article 6); reputational exposure if colleagues act on poor GenAI output without "
+        "a defined accountability owner; over-reliance risk where colleagues treat output "
+        "as final without review; model or API deprecation causing silent output degradation "
+        "with no owner to fix it; and prompt injection or data leakage via external API. "
+        "Sources: EU AI Act Article 6 — https://artificialintelligenceact.eu/article/6/; "
+        "NIST AI RMF 1.0 — https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10; "
+        "Bucinca et al. (2021) cognitive forcing functions and over-reliance; "
+        "⚠️ [VERIFY MONDAY] your company 8 responsible AI principles — human oversight: "
+        "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html; "
+        "⚠️ [PLACEHOLDER] your company Internal GenAI Use Case Approval Policy"
+    ),
+    "scope": (
+        "The manager wants to understand what needs to be in place before the prototype "
+        "can be rolled out more broadly. The team is not starting from scratch — the "
+        "prototype exists. The task is structured planning and risk assessment before "
+        "internal deployment."
+    ),
+}
+
+
+# ── Coffee Shop Case Prompt ────────────────────────────────────────────────────
+# Moved to backup 2026-05-25. Previously shared across all three agents.
 
 _COFFEE_SHOP_PROMPT = """\
 Your friend Anna owns a small coffee shop in Munich that has been profitable \
@@ -22,10 +124,6 @@ decision, focusing on whether this would be profitable and what risks exist. \
 For each key area, identify the most important factors — questions you might \
 want to deep dive into — just like you practised in the warm-up exercise.\
 """
-
-# ── Coffee Shop Clarification Facts ───────────────────────────────────────────
-# Shared across all three agents.
-# Sources documented in coffee_shop_case_v1.md.
 
 _COFFEE_SHOP_FACTS = {
     "objective": (
@@ -124,18 +222,18 @@ _COFFEE_SHOP_FACTS = {
 CASES = {
 
     "black_box": {
-        "prompt": _COFFEE_SHOP_PROMPT,
-        "clarification_facts": _COFFEE_SHOP_FACTS,
+        "prompt": _ALLIANZ_PROMPT,
+        "clarification_facts": _ALLIANZ_FACTS,
     },
 
     "explainable": {
-        "prompt": _COFFEE_SHOP_PROMPT,
-        "clarification_facts": _COFFEE_SHOP_FACTS,
+        "prompt": _ALLIANZ_PROMPT,
+        "clarification_facts": _ALLIANZ_FACTS,
     },
 
     "hitl": {
-        "prompt": _COFFEE_SHOP_PROMPT,
-        "clarification_facts": _COFFEE_SHOP_FACTS,
+        "prompt": _ALLIANZ_PROMPT,
+        "clarification_facts": _ALLIANZ_FACTS,
     },
 
     "coach": {
@@ -146,7 +244,6 @@ after opening.
 
 What aspects will you analyze to make sure the client's burger store \
 breaks even in the first year?""",
-        # TODO: add clarification facts for coach case
         "clarification_facts": {},
     },
 
@@ -154,8 +251,13 @@ breaks even in the first year?""",
     # ── Backup / unused cases ──────────────────────────────────────────────────
     # Preserved for reference. Not used by any active agent.
 
+    "backup_coffee_shop": {
+        # Coffee shop case — used 2026-05-08 to 2026-05-25
+        "prompt": _COFFEE_SHOP_PROMPT,
+        "clarification_facts": _COFFEE_SHOP_FACTS,
+    },
+
     "backup_blackbox_china": {
-        # Original BlackBox case — SF medical devices entering China
         "prompt": """Your client is a San Francisco-based medical device company that has been \
 operating for 10 years and has a successful product line of innovative \
 wearable health monitors. They are considering expanding their business \
@@ -211,7 +313,6 @@ Chinese market?""",
     },
 
     "backup_explainable_mining": {
-        # Original Explainable case — Mining Co. profitability
         "prompt": """You and your team are advising the Strategy team for one of the largest \
 soft-rock mining companies in the world (Mining Co.). The mine primarily \
 extracts potash (a fertilizer) and some smaller quantities of various other \
@@ -261,7 +362,7 @@ forward.""",
             ),
             "infrastructure": (
                 "The company already has existing transport routes that can be utilized. "
-                "Transportation costs to end markets are approximately $20–25 per ton."
+                "Transportation costs to end markets are approximately $20-25 per ton."
             ),
             "operations": (
                 "The company has some capacity to mine these resources with current equipment "
@@ -272,36 +373,25 @@ forward.""",
             "regulatory": (
                 "Regulatory requirements are stringent, with strict environmental and safety "
                 "standards. Potential environmental impacts include water pollution and habitat "
-                "destruction, which could lead to fines and sanctions if not properly managed. "
-                "Specific permits, approvals, and reclamation obligations apply but detailed "
-                "specifics are not available for this case."
+                "destruction, which could lead to fines and sanctions if not properly managed."
             ),
             "risks": (
-                "Key risks include commodity price swings — if demand weakens, oversupply could "
-                "reduce selling prices and compress margins. Execution risks include the $10 "
+                "Key risks include commodity price swings, execution risks including the $10 "
                 "million capex requirement, remote location labor challenges, and environmental "
-                "compliance. The client is also exposed to cost overruns given the complex "
-                "extraction process for Bentonite."
+                "compliance."
             ),
             "timeline": (
                 "The client is looking to make a decision within the next 3 months and aims to "
                 "start production within 6 months if the project is deemed feasible."
             ),
-            "sustainability": (
-                "The client is interested in sustainable mining practices to minimize "
-                "environmental impact and maintain their social license to operate. Community "
-                "and indigenous stakeholder considerations are part of their overall objective."
-            ),
             "scope": (
                 "The client is interested in knowing whether it would be profitable to mine "
-                "both Silica Sand and Bentonite. They are open to mining both minerals but "
-                "also want to understand the potential risks of moving forward."
+                "both Silica Sand and Bentonite and the potential risks of moving forward."
             ),
         },
     },
 
     "backup_hitl_ma": {
-        # Original HITL case — Rainbow & Gumdrops M&A
         "prompt": """A global foods maker and marketer, which is based in the US, is \
 contemplating a strategic acquisition of a smaller British confectionery \
 company to bolster its presence in emerging markets and establish a \
@@ -312,75 +402,33 @@ look at to guide them?""",
         "clarification_facts": {
             "objective": (
                 "The client's primary objective is to diversify their product portfolio and "
-                "establish a stronger presence in the confectionery market. They also see "
-                "potential in leveraging the British company's established brand and "
-                "distribution channels to enter new markets, particularly in Asia and Africa."
+                "establish a stronger presence in the confectionery market."
             ),
             "target_company": (
                 "The British confectionery company specializes in gum and candy products and "
-                "has a strong presence in the UK and some European markets. They have a "
-                "diverse product line and a loyal customer base, particularly among younger "
-                "consumers."
+                "has a strong presence in the UK and some European markets."
             ),
             "financials": (
-                "The British confectionery company has annual revenues of approximately "
-                "$500 million, with an EBITDA margin of around 15%. They have been growing "
-                "at a rate of 5% annually over the past three years."
+                "Annual revenues of approximately $500 million, with an EBITDA margin of "
+                "around 15%. Growing at 5% annually over the past three years."
             ),
             "synergies": (
                 "Potential synergies include cost savings from combined manufacturing and "
-                "distribution networks, as well as revenue synergies from cross-selling "
-                "products in new markets."
+                "distribution networks, and revenue synergies from cross-selling in new markets."
             ),
             "integration": (
-                "The client has experience in integrating acquired companies, having "
-                "successfully integrated several smaller firms, but also had a couple of "
-                "acquisitions that did not meet expectations due to cultural clashes and "
-                "integration challenges."
-            ),
-            "client_capabilities": (
-                "The client currently has a small presence in the confectionery market, "
-                "primarily through a line of chocolate bars that account for about 5% of "
-                "their total sales. They do not currently have strong on-the-ground "
-                "capability in Asia or Africa."
-            ),
-            "deal_structure": (
-                "The client is considering a full acquisition of the British confectionery "
-                "company as part of their strategic growth plan, looking to fully integrate "
-                "the company into their operations."
+                "The client has experience integrating acquired companies but has had some "
+                "acquisitions fail due to cultural clashes and integration challenges."
             ),
             "regulatory": (
-                "The regulatory environment in the UK is relatively straightforward. However, "
-                "the emerging markets the client is looking to enter have more complex and "
-                "unpredictable regulatory environments, with potential foreign ownership "
+                "The regulatory environment in the UK is relatively straightforward. Emerging "
+                "markets have more complex environments with potential foreign ownership "
                 "restrictions and antitrust concerns."
-            ),
-            "target_willingness": (
-                "The British confectionery company has not publicly disclosed their "
-                "willingness to sell at this time."
-            ),
-            "competing_bidders": (
-                "The confectionery company does not currently have any known competing "
-                "bidders for acquisition."
-            ),
-            "ip_patents": (
-                "The British confectionery company does not have any significant intellectual "
-                "property, proprietary recipes, or patents that would be considered a key "
-                "asset in this potential acquisition."
-            ),
-            "exit_option": (
-                "The client has not specifically mentioned any plans for a clear exit option "
-                "such as divestment or spin-off for this potential acquisition."
-            ),
-            "financing": (
-                "The client is considering financing options to minimise the impact on their "
-                "cash flow."
             ),
         },
     },
 
     "backup_ghost_restaurant": {
-        # Original ghost restaurant case — unused
         "prompt": """Leading food delivery companies like Uber Eats and DoorDash are amassing \
 an unprecedented amount of data about consumer preferences for restaurant \
 takeout meals. Among the many uses for this data, it's also powering an \

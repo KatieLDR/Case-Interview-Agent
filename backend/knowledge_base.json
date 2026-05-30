@@ -1,0 +1,719 @@
+{
+  "framework": {
+    "name": "5-Part AI Implementation Framework",
+    "academic_origin": "PPT Framework (Leavitt, 1964; Schneier, 1990s)",
+    "sources": [
+      {
+        "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+        "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+      },
+      {
+        "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+        "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai"
+      }
+    ]
+  },
+  "pillars": [
+    {
+      "id": "strategic_fit",
+      "name": "Strategic Fit",
+      "shown": true,
+      "order": 1,
+      "ppt_mapping": "Above all three PPT buckets \u2014 the why question",
+      "description": "The team must first determine whether the use case is worth pursuing before entering the planning phase. This initial checkpoint ensures that GenAI is the appropriate and necessary solution and that a simpler alternative would not suffice. This covers business relevance, technical appropriateness, strategic alignment, and consistency with your company's responsible AI principles.",
+      "sub_bullets": [
+        "GenAI vs. simpler automation would a rules-based solution achieve the same result with less overhead? [a][b]",
+        "Consistency with responsible AI principles transparency, human oversight, accountability [c][d]"
+      ],
+      "sub_bullets_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries) \u00b7 [c](https://artificialintelligenceact.eu/article/13/) \u00b7 [d](https://artificialintelligenceact.eu/article/14/)",
+      "key_questions": [
+        "Problem significance and frequency is the workflow problem real and frequent enough to justify governance investment? [a]",
+        "GenAI vs. simpler automation would a rules-based solution achieve the same result with less overhead? [a][b]",
+        "Alignment with team priorities is this use case consistent with current objectives or a distraction? [a]",
+        "Consistency with responsible AI principles transparency, human oversight, accountability [c][d]",
+        "Internal reuse check has a comparable use case already been deployed that could be reused rather than rebuilt? [a]"
+      ],
+      "key_questions_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries) \u00b7 [c](https://artificialintelligenceact.eu/article/13/) \u00b7 [d](https://artificialintelligenceact.eu/article/14/)"
+    },
+    {
+      "id": "use_case_and_solution",
+      "name": "Use Case and Solution",
+      "shown": true,
+      "order": 2,
+      "ppt_mapping": "Process (right process solution?) and Technology (right technical approach?)",
+      "description": "This pillar focuses on defining the solution in well-scoped terms and verifying that the prototype is the right strategic choice. This covers prototype scope, governance requirements, target audience, data sensitivity, and the build vs. buy decision. Clarifying these early minimizes future compliance and operational risks.",
+      "sub_bullets": [
+        "Prototype scope and governability is the use case tightly scoped enough to be reviewable? [a]",
+        "Input data classification level public, internal, confidential, or PII determines compliance path before anything else [b][c]"
+      ],
+      "sub_bullets_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries) \u00b7 [c](https://gdpr-info.eu/art-5-gdpr/)",
+      "key_questions": [
+        "Prototype scope and governability is the use case tightly scoped enough to be reviewable? [a]",
+        "Output audience internal colleagues only, or does output reach business stakeholders or customers? [b]",
+        "Input data classification level public, internal, confidential, or PII determines compliance path before anything else [b][c]",
+        "Build vs. buy decision build on prototype vs. procure enterprise tool with compliance and support built in [a][b]",
+        "Existing internal platform or approved vendor check is a custom build even necessary? [b]"
+      ],
+      "key_questions_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries) \u00b7 [c](https://gdpr-info.eu/art-5-gdpr/)"
+    },
+    {
+      "id": "feasibility",
+      "name": "Feasibility",
+      "shown": true,
+      "order": 3,
+      "ppt_mapping": "People (talent), Process (data readiness), Technology (infrastructure)",
+      "description": "This pillar evaluates the practical foundation required to implement and maintain the use case. It focuses on data quality and compliance, technical environment stability, and team capability and ownership for long-term maintenance. Many enterprise GenAI projects fail not at the design stage, but when the team tries to run and maintain them in production.",
+      "sub_bullets": [
+        "Data classification is data correctly classified under company data handling standards? [a][b]",
+        "Single-developer dependency critical point of failure if original developer leaves or moves [a]"
+      ],
+      "sub_bullets_sources": "Sources: [a](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10) \u00b7 [b](https://gdpr-info.eu/art-5-gdpr/)",
+      "key_questions": [
+        "Data cleanliness and availability is input data clean and consistently available? [c]",
+        "Data classification is data correctly classified under company data handling standards? [a][b]",
+        "GDPR-restricted data processed by third-party provider where is data processed and stored? [b]",
+        "Data stability over time could data changes degrade output quality without anyone noticing? [a]",
+        "Stable and documented technology foundation can someone other than the original developer maintain it? [c]",
+        "System integration does the tool work within existing IT infrastructure at team scale? [a]",
+        "Fallback if underlying model or API changes or is deprecated [a]",
+        "Team maintenance skills does the team have capability to maintain and monitor post-rollout? [c]",
+        "Single-developer dependency critical point of failure if original developer leaves or moves [a]"
+      ],
+      "key_questions_sources": "Sources: [a](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10) \u00b7 [b](https://gdpr-info.eu/art-5-gdpr/) \u00b7 [c](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview)"
+    },
+    {
+      "id": "financial_impact",
+      "name": "Financial Impact",
+      "shown": false,
+      "order": 4,
+      "ppt_mapping": "Crosses all three PPT buckets \u2014 People (training cost), Process (governance cost), Technology (infrastructure cost)",
+      "description": "This pillar assesses the balance between investment and expected business value. It covers costs, value creation, and payback period. A GenAI rollout that cannot demonstrate a clear financial case is difficult to justify internally.",
+      "sub_bullets": [
+        "One-time costs governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
+        "Ongoing costs maintenance, monitoring, model updates, tool ownership time [a]"
+      ],
+      "sub_bullets_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai)",
+      "key_questions": [
+        "One-time costs governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
+        "Ongoing costs maintenance, monitoring, model updates, tool ownership time [a]",
+        "Value creation efficiency improvements, strategic contribution, and net financial return [b]",
+        "Payback period how long until cumulative benefits exceed total costs; primary go or no-go metric [a][b]"
+      ],
+      "key_questions_sources": "Sources: [a](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview) \u00b7 [b](https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai)"
+    },
+    {
+      "id": "risks",
+      "name": "Risks",
+      "shown": false,
+      "order": 5,
+      "ppt_mapping": "People (over-reliance, change resistance), Process (approval gaps, escalation), Technology (model drift, security)",
+      "description": "This pillar identifies what could fail during and after rollout. It covers regulatory compliance, reputational risk, user over-reliance, operational risk from model deprecation, and security vulnerabilities specific to GenAI tools. Risk management is commonly underprioritized or engaged too late in enterprise GenAI rollouts.",
+      "sub_bullets": [
+        "EU AI Act classification check risk level assessment required before rollout [a]",
+        "Company approval gate formal governance process must not be bypassed [b]"
+      ],
+      "sub_bullets_sources": "Sources: [a](https://artificialintelligenceact.eu/article/6/) \u00b7 [b](https://artificialintelligenceact.eu/article/26/)",
+      "key_questions": [
+        "EU AI Act classification check risk level assessment required before rollout [a]",
+        "Company approval gate formal governance process must not be bypassed [b]",
+        "Accountability for poor output who is responsible if a colleague acts on a bad GenAI output? [b][f]",
+        "Reputational exposure documentation accountability must be defined before rollout not after an incident [f]",
+        "Over-reliance colleagues treating GenAI output as final without reviewing it [c][d]",
+        "Mandatory human review definition rollout plan must define when human review is required not optional [d]",
+        "Model or API deprecation monitoring silent output degradation with no owner to fix it [e]",
+        "Designated owner and escalation path who is responsible post-rollout and how are issues escalated? [e]",
+        "Prompt injection and data leakage via external API [e]"
+      ],
+      "key_questions_sources": "Sources: [a](https://artificialintelligenceact.eu/article/6/) \u00b7 [b](https://artificialintelligenceact.eu/article/26/) \u00b7 [c](https://artificialintelligenceact.eu/article/13/) \u00b7 [d](https://artificialintelligenceact.eu/article/14/) \u00b7 [e](https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10) \u00b7 [f](https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview)"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "problem_significance",
+      "number": 1,
+      "pillar_id": "strategic_fit",
+      "name": "Problem significance and frequency",
+      "explanation": "Is the workflow problem real and frequent enough to justify the governance investment required for a GenAI rollout?",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "genai_vs_simpler_automation",
+      "number": 2,
+      "pillar_id": "strategic_fit",
+      "name": "GenAI vs. simpler automation",
+      "explanation": "Would a rules-based or simpler automation solution achieve the same result with less governance overhead? GenAI is not always the right tool.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        },
+        {
+          "title": "ZenML Panel \u2014 Allianz Technology (Axel Schell): Enterprise GenAI Implementation Strategies",
+          "url": "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries"
+        }
+      ]
+    },
+    {
+      "id": "alignment_with_team_priorities",
+      "number": 3,
+      "pillar_id": "strategic_fit",
+      "name": "Alignment with team priorities",
+      "explanation": "Is this use case consistent with current IT objectives, or does it divert time and resources from higher-value work?",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "allianz_responsible_ai_principles",
+      "number": 4,
+      "pillar_id": "strategic_fit",
+      "name": "Consistency with your company 8 responsible AI principles",
+      "explanation": "The use case must be consistent with your company's 8 responsible AI principles \u2014 specifically transparency, human oversight, and accountability \u2014 before any further planning.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Allianz \u2014 Responsible Use of Artificial Intelligence",
+          "url": "https://www.allianz.com/en/about-us/strategy-values/responsible-use-of-artificial-intelligence.html",
+          "verification_status": "VERIFY MONDAY"
+        }
+      ]
+    },
+    {
+      "id": "allianzgpt_reuse_check",
+      "number": 5,
+      "pillar_id": "strategic_fit",
+      "name": "an existing internal tool reuse check",
+      "explanation": "Has a comparable use case already been deployed via an existing internal tool that could be reused rather than rebuilt from scratch?",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Allianz \u2014 The Impact of AllianzGPT",
+          "url": "https://www.allianz.com/en/mediacenter/news/articles/250218-ai-at-allianz-the-impact-of-allianzgpt.html",
+          "verification_status": "VERIFY MONDAY"
+        }
+      ]
+    },
+    {
+      "id": "prototype_scope_governability",
+      "number": 6,
+      "pillar_id": "use_case_and_solution",
+      "name": "Prototype scope and governability",
+      "explanation": "Is the use case tightly scoped enough to be reviewable and governable? Broad or vague scope makes compliance sign-off and risk assessment impossible.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "output_audience",
+      "number": 7,
+      "pillar_id": "use_case_and_solution",
+      "name": "Output audience",
+      "explanation": "Who receives the GenAI output \u2014 internal IT colleagues only, or does output reach business stakeholders or customers? The audience determines the compliance and quality bar.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "ZenML Panel \u2014 Adobe A-F Framework (Dimension E: Audience), Allianz Technology",
+          "url": "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries"
+        }
+      ]
+    },
+    {
+      "id": "input_data_classification",
+      "number": 8,
+      "pillar_id": "use_case_and_solution",
+      "name": "Input data classification level",
+      "explanation": "Is input data public, internal, confidential, or personally identifiable? Data classification determines the compliance path and must be established before any other planning proceeds.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "ZenML Panel \u2014 Adobe A-F Framework (Dimension C: Input Data), Allianz Technology",
+          "url": "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries"
+        }
+      ]
+    },
+    {
+      "id": "build_vs_buy",
+      "number": 9,
+      "pillar_id": "use_case_and_solution",
+      "name": "Build vs. buy decision",
+      "explanation": "Should the team build on the existing prototype or procure an enterprise GenAI tool with compliance and support already built in? This decision affects cost, maintenance, and governance burden significantly.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "ZenML Panel \u2014 Allianz Technology (Axel Schell): Build vs. Procure",
+          "url": "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries"
+        },
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "existing_platform_check",
+      "number": 10,
+      "pillar_id": "use_case_and_solution",
+      "name": "Existing your company Group platform or approved vendor check",
+      "explanation": "Is there an existing your company platform or approved vendor that already covers this use case, making a custom build unnecessary?",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "ZenML Panel \u2014 Allianz Technology: Enterprise GenAI Implementation Strategies",
+          "url": "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries"
+        }
+      ]
+    },
+    {
+      "id": "data_cleanliness_availability",
+      "number": 11,
+      "pillar_id": "feasibility",
+      "name": "Data cleanliness and availability",
+      "explanation": "Is input data clean, consistently available, and correctly structured? Poor data quality at input directly degrades GenAI output quality regardless of model capability.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "data_classification_standards",
+      "number": 12,
+      "pillar_id": "feasibility",
+      "name": "Data classification under your company standards",
+      "explanation": "Is data correctly classified and handled according to your company data handling standards? Misclassification creates downstream compliance exposure.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Govern and Map Functions",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        },
+        {
+          "title": "Allianz Bavaria Data Classification and Handling Policy",
+          "url": null,
+          "verification_status": "PLACEHOLDER \u2014 internal document title to be supplied"
+        }
+      ]
+    },
+    {
+      "id": "gdpr_third_party",
+      "number": 13,
+      "pillar_id": "feasibility",
+      "name": "GDPR-restricted data processed by third-party provider",
+      "explanation": "Does the tool send GDPR-restricted data to a third-party model provider? If so, data processing agreements and transfer assessments are required before any pilot can proceed.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "GDPR Article 5 \u2014 Data Minimization and Purpose Limitation",
+          "url": "https://gdpr-info.eu/art-5-gdpr/"
+        }
+      ]
+    },
+    {
+      "id": "data_stability",
+      "number": 14,
+      "pillar_id": "feasibility",
+      "name": "Data stability over time",
+      "explanation": "Could changes in input data degrade output quality over time without anyone noticing? Data drift is a common and silent failure mode in production AI systems.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Manage Function (Monitoring for Data Drift Post-Deployment)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "stable_documented_foundation",
+      "number": 15,
+      "pillar_id": "feasibility",
+      "name": "Stable and documented technology foundation",
+      "explanation": "Can someone other than the original developer understand, maintain, and extend the prototype? Undocumented code creates a hidden operational risk.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "allianz_system_integration",
+      "number": 16,
+      "pillar_id": "feasibility",
+      "name": "your company system integration",
+      "explanation": "Does the tool integrate with existing your company IT infrastructure and work at team scale, not just as a personal prototype?",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Manage Function",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        },
+        {
+          "title": "Allianz Bavaria IT Infrastructure and Tool Standards",
+          "url": null,
+          "verification_status": "PLACEHOLDER \u2014 internal document title to be supplied"
+        }
+      ]
+    },
+    {
+      "id": "model_api_deprecation_fallback",
+      "number": 17,
+      "pillar_id": "feasibility",
+      "name": "Fallback if underlying model or API changes or is deprecated",
+      "explanation": "What happens if the underlying model or API is updated or deprecated? Without a fallback plan, a silent provider change can break the tool with no one responsible for fixing it.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Manage Function (Operational Continuity)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "team_maintenance_skills",
+      "number": 18,
+      "pillar_id": "feasibility",
+      "name": "Team maintenance skills",
+      "explanation": "Does the team have the technical skills to maintain and monitor the tool after rollout? A tool that no one can maintain is a liability, not an asset.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "single_developer_dependency",
+      "number": 19,
+      "pillar_id": "feasibility",
+      "name": "Single-developer dependency",
+      "explanation": "Is the tool dependent on a single developer who built it? This creates a critical point of failure if that person leaves, moves to another team, or is unavailable.",
+      "shown": true,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Govern Function (Accountability and Ownership Gaps)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "one_time_costs",
+      "number": 20,
+      "pillar_id": "financial_impact",
+      "name": "One-time costs",
+      "explanation": "One-time costs include governance review, compliance sign-off, colleague onboarding, training, and any infrastructure changes required for rollout.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "ongoing_costs",
+      "number": 21,
+      "pillar_id": "financial_impact",
+      "name": "Ongoing costs",
+      "explanation": "Ongoing costs include maintenance, monitoring, model updates, and the tool ownership time that must be allocated to a named owner post-rollout.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "layer1_technical_performance",
+      "number": 22,
+      "pillar_id": "financial_impact",
+      "name": "Layer 1 \u2014 Technical Performance",
+      "explanation": "Is the tool reliable and fast enough for daily use? Technical performance is the foundation of the McKinsey 5-layer value chain \u2014 without it, the higher layers cannot be realised.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+          "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai"
+        }
+      ]
+    },
+    {
+      "id": "layer2_user_adoption",
+      "number": 23,
+      "pillar_id": "financial_impact",
+      "name": "Layer 2 \u2014 User Adoption",
+      "explanation": "Will colleagues actually use the tool given their current trust levels in GenAI output? Adoption is the bridge between technical capability and operational impact.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+          "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-realize-the-full-value-of-ai"
+        }
+      ]
+    },
+    {
+      "id": "layer3_operational_kpis",
+      "number": 24,
+      "pillar_id": "financial_impact",
+      "name": "Layer 3 \u2014 Operational KPIs",
+      "explanation": "Operational KPIs include time saved per task, task frequency, and rework reduction. These are the measurable efficiency gains that justify the investment.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+          "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-realize-the-full-value-of-ai"
+        }
+      ]
+    },
+    {
+      "id": "layer4_strategic_outcomes",
+      "number": 25,
+      "pillar_id": "financial_impact",
+      "name": "Layer 4 \u2014 Strategic Outcomes",
+      "explanation": "How does this tool contribute to your company IT's efficiency or quality goals? Strategic outcomes connect operational gains to team-level objectives.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+          "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-realize-the-full-value-of-ai"
+        }
+      ]
+    },
+    {
+      "id": "layer5_financial_impact",
+      "number": 26,
+      "pillar_id": "financial_impact",
+      "name": "Layer 5 \u2014 Financial Impact",
+      "explanation": "Net saving in euros and payback period are the key go or no-go metrics. Payback period is the single number that justifies the investment to leadership.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "McKinsey QuantumBlack \u2014 From Promise to Impact (2025)",
+          "url": "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-realize-the-full-value-of-ai"
+        }
+      ]
+    },
+    {
+      "id": "eu_ai_act_classification",
+      "number": 27,
+      "pillar_id": "risks",
+      "name": "EU AI Act classification check",
+      "explanation": "What risk level does the EU AI Act assign to this use case? Even lower-risk tools require a formal classification check before rollout.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "EU AI Act \u2014 Article 6 (Classification Rules)",
+          "url": "https://artificialintelligenceact.eu/article/6/"
+        }
+      ]
+    },
+    {
+      "id": "allianz_approval_gate",
+      "number": 28,
+      "pillar_id": "risks",
+      "name": "your company Group or Bavaria approval gate",
+      "explanation": "Is there a formal your company or Bavaria approval process that must not be bypassed? Skipping an approval gate creates regulatory and reputational exposure for the team.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Allianz \u2014 Responsible Use of Artificial Intelligence",
+          "url": "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html",
+          "verification_status": "VERIFY MONDAY"
+        },
+        {
+          "title": "Allianz Bavaria Internal GenAI Use Case Approval Policy",
+          "url": null,
+          "verification_status": "PLACEHOLDER \u2014 internal document title to be supplied"
+        }
+      ]
+    },
+    {
+      "id": "gdpr_pii_assessment",
+      "number": 29,
+      "pillar_id": "risks",
+      "name": "GDPR assessment for PII or confidential data",
+      "explanation": "If PII or confidential data flows to a third-party model provider, a GDPR data protection assessment is required. This is a legal prerequisite, not an optional step.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "GDPR Article 5 \u2014 Data Minimization and Purpose Limitation",
+          "url": "https://gdpr-info.eu/art-5-gdpr/"
+        }
+      ]
+    },
+    {
+      "id": "data_classification_consistency",
+      "number": 30,
+      "pillar_id": "risks",
+      "name": "your company data classification consistency",
+      "explanation": "Is data handling consistent with your company internal data classification and handling standards throughout the tool's operation?",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Allianz Bavaria Data Classification and Handling Policy",
+          "url": null,
+          "verification_status": "PLACEHOLDER \u2014 internal document title to be supplied"
+        }
+      ]
+    },
+    {
+      "id": "over_reliance",
+      "number": 31,
+      "pillar_id": "risks",
+      "name": "Over-reliance risk",
+      "explanation": "Will colleagues treat GenAI output as final without reviewing it? Over-reliance on AI without critical evaluation is a well-documented risk that the rollout plan must explicitly address.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Bu\u00e7inca et al. (2021) \u2014 Cognitive Forcing Functions and Over-Reliance in AI-Assisted Decision-Making",
+          "url": null
+        },
+        {
+          "title": "Allianz \u2014 Responsible Use of Artificial Intelligence (Human Oversight Requirement)",
+          "url": "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html",
+          "verification_status": "VERIFY MONDAY"
+        }
+      ]
+    },
+    {
+      "id": "mandatory_human_review",
+      "number": 32,
+      "pillar_id": "risks",
+      "name": "Mandatory human review definition",
+      "explanation": "The rollout plan must define explicitly when human review of GenAI output is mandatory, not optional. Leaving this undefined means it will not happen consistently.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Allianz \u2014 Responsible Use of Artificial Intelligence (Human Oversight Principle)",
+          "url": "https://www.allianz.com/en/mediacenter/news/articles/260323-top-questions-and-answers-on-responsible-use-of-ai.html",
+          "verification_status": "VERIFY MONDAY"
+        }
+      ]
+    },
+    {
+      "id": "model_deprecation_monitoring",
+      "number": 33,
+      "pillar_id": "risks",
+      "name": "Model or API deprecation monitoring",
+      "explanation": "Who monitors for silent output degradation if the underlying model or API is updated or deprecated with no one assigned to track it?",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Manage Function (Operational Continuity)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "designated_owner_escalation",
+      "number": 34,
+      "pillar_id": "risks",
+      "name": "Designated owner and escalation path",
+      "explanation": "Who is responsible for the tool post-rollout and how are issues escalated? Without a designated owner, problems accumulate with no one accountable for resolving them.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Govern Function (Accountability and Ownership)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "accountability_poor_output",
+      "number": 35,
+      "pillar_id": "risks",
+      "name": "Accountability for poor output",
+      "explanation": "Who is responsible if a colleague acts on a bad GenAI output and it causes a visible error? Accountability must be defined before rollout, not after an incident.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "Hacking the Case Interview \u2014 AI Implementation Guide",
+          "url": "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview"
+        }
+      ]
+    },
+    {
+      "id": "prompt_injection_data_leakage",
+      "number": 36,
+      "pillar_id": "risks",
+      "name": "Prompt injection and data leakage",
+      "explanation": "Does the tool create prompt injection or data leakage exposure via an external API? This is a security risk specific to GenAI tools that connect to third-party providers.",
+      "shown": false,
+      "swap": false,
+      "sources": [
+        {
+          "title": "NIST AI RMF 1.0 \u2014 Map Function (Security and Adversarial Input Risks)",
+          "url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
+        }
+      ]
+    },
+    {
+      "id": "steps_walked_per_day",
+      "number": null,
+      "pillar_id": null,
+      "name": "Average number of steps walked per day by the IT team",
+      "explanation": "This metric tracks physical activity levels among IT team members.",
+      "shown": true,
+      "swap": true,
+      "sources": [],
+      "sub_bullets": [
+        "Does the IT team currently log this data as part of their productivity tracking?",
+        "Could this metric serve as a baseline indicator for measuring the impact of the GenAI rollout on team workload?"
+      ]
+    }
+  ]
+}

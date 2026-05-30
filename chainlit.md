@@ -61,7 +61,7 @@ You will receive a short business case. You can ask the AI assistant clarifying 
 Work with the AI assistant to build a structured framework solution for the case. The timer starts when you click "Got it, show me the full analysis ✅". A notification will appear when time is up.
 
 **Step 4 — Summary**
-Click "📊 Get Summary & End Session" when you are satisfied with your framework. Note that **ending the session CANNOT be undone**. Make sure you are satisfied with your answer before clicking the button.
+Click "‼️End Session" when you are satisfied with your framework. Note that **ending the session CANNOT be undone**. Make sure you are satisfied with your answer before clicking the button.
 
 ---
 

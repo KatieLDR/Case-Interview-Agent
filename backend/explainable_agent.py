@@ -13,10 +13,10 @@ from backend.logger import (
     log_framework_switched, log_concept_added,
 )
 from backend import knowledge_graph as kg
-from backend.rag_explainer import build_citation_header, check_and_append_warning, build_and_check_citation
+from backend.rag_explainer import build_citation_header, check_and_append_warning
 
 # ── Case config ────────────────────────────────────────────────────────────
-CASE_TYPE = "Profitability"
+CASE_TYPE = "AI Implementation"
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
@@ -25,19 +25,19 @@ CASE_TYPE = "Profitability"
 SINGLE_CONCEPT_PROMPT = """
 You are a strategic consultant walking a user through a framework ONE concept at a time.
 
-The concept name and rationale have already been presented to the user above.
+The concept name, explanation, and sources have already been presented to the user above.
 YOUR ONLY JOB: Output the sub-bullets and closing question — nothing else.
 
 EXACT OUTPUT FORMAT — copy this structure precisely:
 
-- [sub-bucket, 5–7 words, specific to this case]
-- [sub-bucket, 5–7 words, specific to this case]
+- [analytical question, 5-7 words, specific to this case]
+- [analytical question, 5-7 words, specific to this case]
 
 *Shall we move on to the next concept?*
 
-─── EXAMPLE (for Price per Unit) ────────────────────────────────────────────
-- Current market rates for specialty coffee beans
-- Wholesale pricing strategy for supermarket buyers
+─── EXAMPLE (for Strategic Fit) ────────────────────────────────────────────
+- Is the workflow problem frequent enough to justify governance overhead?
+- Would a simpler rules-based solution achieve the same result?
 
 *Shall we move on to the next concept?*
 ─────────────────────────────────────────────────────────────────────────────
@@ -101,12 +101,12 @@ FORMAT:
 **Full Framework Summary**
 
 **[Bucket 1]**
-- sub-bucket (5–7 words)
-- sub-bucket (5–7 words)
+- sub-bullet (5–7 words)
+- sub-bullet (5–7 words)
 
 **[Bucket 2]**
-- sub-bucket (5–7 words)
-- sub-bucket (5–7 words)
+- sub-bullet (5–7 words)
+- sub-bullet (5–7 words)
 
 (continue for all buckets)
 
@@ -192,6 +192,91 @@ Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
 - "supply chain" → []
 """
 
+# ══════════════════════════════════════════════════════════════════════════
+# Addition flow prompts — Change log: 2026-05-28
+# ══════════════════════════════════════════════════════════════════════════
+
+ADD_CLASSIFY_PROMPT = """
+You are a classifier for a case interview framework tool.
+
+The user wants to add something to the framework. Determine whether they are adding:
+- "sub_bullet" : a specific point/question that belongs UNDER one of the existing pillars
+- "pillar"     : a whole new top-level area of analysis
+
+Then identify the best-guess target pillar from the list below (for sub_bullet),
+or null (for a new pillar).
+
+─── EXISTING PILLARS ─────────────────────────────────────────────────────
+{pillars}
+────────────────────────────────────────────────────────────────────────────
+
+─── USER WANTS TO ADD ──────────────────────────────────────────────────────
+{item}
+────────────────────────────────────────────────────────────────────────────
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{{"kind": "sub_bullet" or "pillar", "target": "pillar name or null", "confidence": float}}
+"""
+
+ADD_RESOLVE_PROMPT = """
+You are a classifier for a case interview framework tool.
+
+The agent asked the user where they want to add "{item}".
+Options were: add it under an existing pillar, or add it as a new separate area.
+
+─── EXISTING PILLARS ─────────────────────────────────────────────────────
+{pillars}
+────────────────────────────────────────────────────────────────────────────
+
+─── USER REPLY ──────────────────────────────────────────────────────────────
+{reply}
+────────────────────────────────────────────────────────────────────────────
+
+Interpret the user's reply:
+- If they confirm adding under a specific pillar, return that pillar name as target
+- If they want it as a new separate area/pillar, set as_new_pillar=true
+- If they cancel or change their mind (no, never mind, forget it), set confirmed=false
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{{"confirmed": true or false, "target": "pillar name or null", "as_new_pillar": true or false}}
+"""
+
+ADD_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+
+The user added "{item}" under the pillar "{pillar}".
+Check whether it matches one of the pillar's existing key questions below.
+
+─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
+{key_questions}
+────────────────────────────────────────────────────────────────────────────
+
+A match means the user's addition is essentially the same point as one of the
+key questions above — same topic, possibly different wording.
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
+"""
+
+ADD_PILLAR_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+
+The user wants to add a new pillar: "{item}".
+Check whether it matches one of the framework's other (currently hidden) pillars below.
+
+─── OTHER PILLARS ───────────────────────────────────────────────────────────
+{pillars}
+────────────────────────────────────────────────────────────────────────────
+
+A match means the user's new pillar is essentially the same area of analysis
+as one of the pillars above — same topic, possibly different wording.
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
+"""
+
+ADD_MATCH_THRESHOLD = 0.75
+
 WALKTHROUGH_OVERRIDE_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
 
@@ -233,16 +318,12 @@ CRITICAL — for "concept_added": the "detail" field must contain
 the NEW thing the user wants to add, NOT any existing concept
 they are referencing.
 
-Example: "I think we should add cafe pop-up store sales under Units Sold"
-→ detail: "Cafe pop-up store sales" (the NEW thing)
-→ NOT detail: "Units Sold" (an existing concept)
+Example: "I think we should add financial impact as a pillar"
+→ detail: "Financial impact" (the NEW thing)
 
-Example: "what about competitor pricing strategies for Price per Unit"
-→ detail: "Competitor pricing strategies" (the NEW thing)
-→ NOT detail: "Price per Unit" (an existing concept)
-
-Example: "we should consider brand risk"
-→ detail: "Brand risk" (genuinely new)
+Example: "what about regulatory risks under Feasibility"
+→ detail: "Regulatory risks" (the NEW thing)
+→ NOT detail: "Feasibility" (an existing concept)
 
 This does NOT include:
 - Questions asking why a concept is included ("why is X here?", "why are we considering X?")
@@ -252,28 +333,27 @@ This does NOT include:
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
-Examples (assuming concepts include: Volume, Price per Unit, Variable Cost per Unit, Fixed Cost):
+Examples (assuming concepts include: Strategic Fit, Use Case and Solution, Feasibility):
 - "start over" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.99}}
 - "restart from scratch" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.98}}
 - "move on" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "let's move on to the next one" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "next concept please" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "remove Variable Cost per Unit" → {{"override": true, "type": "concept_excluded", "detail": "Variable Cost per Unit", "confidence": 0.97}}
-- "what about Market Demand?" → {{"override": true, "type": "concept_added", "detail": "Market Demand", "confidence": 0.96}}
-- "can we also consider Risk Analysis?" → {{"override": true, "type": "concept_added", "detail": "Risk Analysis", "confidence": 0.95}}
-- "how about adding Competitor Analysis?" → {{"override": true, "type": "concept_added", "detail": "Competitor Analysis", "confidence": 0.96}}
-- "use Market Entry framework" → {{"override": true, "type": "framework_switch", "detail": "Market Entry", "confidence": 0.96}}
+- "remove Feasibility" → {{"override": true, "type": "concept_excluded", "detail": "Feasibility", "confidence": 0.97}}
+- "what about Financial Impact?" → {{"override": true, "type": "concept_added", "detail": "Financial Impact", "confidence": 0.96}}
+- "can we also consider Risks?" → {{"override": true, "type": "concept_added", "detail": "Risks", "confidence": 0.95}}
+- "how about adding regulatory compliance?" → {{"override": true, "type": "concept_added", "detail": "Regulatory compliance", "confidence": 0.96}}
+- "use a different framework" → {{"override": true, "type": "framework_switch", "detail": null, "confidence": 0.96}}
 - "yes" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "no" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "no thanks" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "let's discuss Variable Cost per Unit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "can we talk about Price per Unit?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "what about Volume?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "tell me more about Fixed Cost" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "let's discuss Strategic Fit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "can we talk about Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "what about Use Case and Solution?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "why are we considering this?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "why is this here?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "is it part of fixed cost?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "is it part of Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 """
 
 
@@ -304,6 +384,9 @@ class ExplainableAgent(BlackBoxAgent):
                              log_memory_override removed; WALKTHROUGH_OVERRIDE_PROMPT
                              negative examples added
     Change log: 2026-05-17 — timer sentinel; UX note moved before first concept
+    Change log: 2026-05-25 — citation block updated for JSON knowledge base;
+                             CASE_TYPE updated to AI Implementation;
+                             WALKTHROUGH_OVERRIDE_PROMPT examples updated for Allianz case
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -346,10 +429,21 @@ class ExplainableAgent(BlackBoxAgent):
         # ── Pending confirmation states ────────────────────────────────────
         self.pending_excl = None
         self.pending_fw   = None
+        self.pending_add  = None   # {"item": str, "kind": str, "target": str}
 
         # ── User sub-points — populated by duplicate guard path ───────────
         # Change log: 2026-05-12
-        self.user_sub_points = {}  # {"Units Sold": ["cafe pop-up store sales"]}
+        self.user_sub_points = {}
+
+        # ── User-added pillars — explicit tracking for summary ─────────────
+        # Change log: 2026-05-28 — separate from walkthrough_concepts so summary
+        # can distinguish "user added" from "not yet reached"
+        self.user_added_pillars = []
+
+        # ── User-added pillars — tracked separately so summary always
+        #    includes them regardless of walkthrough position.
+        # Change log: 2026-05-28
+        self.user_added_pillars = []
 
         self.history = [
             types.Content(
@@ -396,8 +490,6 @@ class ExplainableAgent(BlackBoxAgent):
         """
         self._start_main_phase_setup()
 
-        # First yield — sent as separate cl.Message by app.py (timer sentinel)
-        
         yield (
             "⚠️ Your goal is to build a structured plan for this case. "
             "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
@@ -409,9 +501,8 @@ class ExplainableAgent(BlackBoxAgent):
         self.walkthrough_index    = 0
         self.swap_presented       = False
 
-        # UX note — appears before first concept in same message bubble
         yield (
-            "💡 *When you're finished, click **📊 Get Summary & End Session** "
+            "💡 *When you're finished, click **‼️End Session** "
             "to close your session. **Note: this cannot be undone.***\n\n---\n\n"
         )
 
@@ -548,6 +639,104 @@ class ExplainableAgent(BlackBoxAgent):
             return "the available frameworks"
 
     # ══════════════════════════════════════════════════════════════════════
+    # Addition flow helpers — Change log: 2026-05-28
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _classify_addition(self, item: str) -> dict:
+        """LLM: is this a sub-bullet or a new pillar? Best-guess target pillar."""
+        from backend import knowledge_base as kb
+        pillars = ", ".join(p["name"] for p in kb.get_shown_pillars())
+        prompt = ADD_CLASSIFY_PROMPT.format(pillars=pillars, item=item)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            return {
+                "kind":   parsed.get("kind", "sub_bullet"),
+                "target": parsed.get("target"),
+            }
+        except Exception as e:
+            logging.warning(f"[ADD CLASSIFY] error: {e}")
+            return {"kind": "sub_bullet", "target": self._current_concept()}
+
+    def _resolve_addition(self, reply: str) -> dict:
+        """LLM: interpret user's confirmation reply for placement."""
+        from backend import knowledge_base as kb
+        pillars = ", ".join(p["name"] for p in kb.get_all_pillars())
+        item    = self.pending_add["item"] if self.pending_add else ""
+        prompt  = ADD_RESOLVE_PROMPT.format(pillars=pillars, item=item, reply=reply)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            return {
+                "confirmed":     parsed.get("confirmed", False),
+                "target":        parsed.get("target"),
+                "as_new_pillar": parsed.get("as_new_pillar", False),
+            }
+        except Exception as e:
+            logging.warning(f"[ADD RESOLVE] error: {e}")
+            return {"confirmed": False, "target": None, "as_new_pillar": False}
+
+    def _match_key_question(self, item: str, pillar_name: str) -> dict | None:
+        """LLM: does item match a key_question in this pillar? Return matched text+sources."""
+        from backend import knowledge_base as kb
+        pillar = next(
+            (p for p in kb.get_all_pillars() if p["name"].lower() == pillar_name.lower()),
+            None
+        )
+        if pillar is None:
+            return None
+        key_questions = pillar.get("key_questions", [])
+        if not key_questions:
+            return None
+
+        kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(key_questions))
+        prompt   = ADD_MATCH_PROMPT.format(
+            item=item, pillar=pillar_name, key_questions=kq_block
+        )
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            if (parsed.get("matched") and
+                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
+                idx = parsed.get("matched_index")
+                if idx is not None and 0 <= idx < len(key_questions):
+                    return {
+                        "question": key_questions[idx],
+                        "sources":  pillar.get("key_questions_sources", ""),
+                    }
+        except Exception as e:
+            logging.warning(f"[ADD MATCH] error: {e}")
+        return None
+
+    def _match_withheld_pillar(self, item: str) -> str | None:
+        """LLM: does new pillar match a withheld pillar (Financial Impact / Risks)?"""
+        from backend import knowledge_base as kb
+        shown_ids = {p["id"] for p in kb.get_shown_pillars()}
+        withheld  = [p for p in kb.get_all_pillars() if p["id"] not in shown_ids]
+        if not withheld:
+            return None
+
+        pillars_block = "\n".join(f"- {p['name']}" for p in withheld)
+        prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            if (parsed.get("matched") and
+                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
+                return parsed.get("matched_pillar")
+        except Exception as e:
+            logging.warning(f"[ADD PILLAR MATCH] error: {e}")
+        return None
+
+    # ══════════════════════════════════════════════════════════════════════
     # Override detection — walkthrough-aware
     # ══════════════════════════════════════════════════════════════════════
 
@@ -591,6 +780,14 @@ class ExplainableAgent(BlackBoxAgent):
             log_interruption(self.session_id, context=user_input)
 
         # ── 0. Resolve pending state ───────────────────────────────────────
+        if self.pending_add is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(
+                types.Content(role="user", parts=[types.Part(text=user_input)])
+            )
+            yield from self._resolve_pending_add(user_input)
+            return
+
         if self.pending_excl is not None or self.pending_fw is not None:
             log_user_message(self.session_id, user_input)
             self.history.append(
@@ -604,15 +801,22 @@ class ExplainableAgent(BlackBoxAgent):
         override = self._detect_override(user_input)
 
         # ── 1b. Check if user explicitly removed the wrong concept ─────────
+        cs_detected = False
         if (override and
                 override["type"] == "concept_excluded" and
-                override.get("detail") and
                 not self.concept_swap.is_detected and
                 self.swap_presented):
             wrong        = self.concept_swap.config["wrong_concept"]
-            detail_lower = override["detail"].lower()
-            wrong_lower  = wrong.lower()
-            if wrong_lower in detail_lower or detail_lower in wrong_lower:
+            detail_lower = (override.get("detail") or "").lower().strip()
+            wrong_lower  = wrong.lower().strip()
+            current      = self._current_concept()
+            names_swap = (
+                detail_lower == wrong_lower or
+                (len(detail_lower) >= 5 and detail_lower in wrong_lower) or
+                (len(wrong_lower) >= 5 and wrong_lower in detail_lower)
+            )
+            on_swap_now = current is not None and current.lower() == wrong_lower
+            if names_swap or on_swap_now:
                 self.concept_swap.force_detected()
                 if wrong not in self.excluded_concepts:
                     self.excluded_concepts.append(wrong)
@@ -623,10 +827,11 @@ class ExplainableAgent(BlackBoxAgent):
                     new_context=f"user removed wrong concept explicitly: {wrong}",
                 )
                 logging.info(f"[CONCEPT SWAP] detected via explicit removal")
+                cs_detected = True
+                override = None
 
         # ── 2. Swap detection — only if presented AND no override ──────────
-        cs_detected = False
-        if self.swap_presented and not override:
+        if not cs_detected and self.swap_presented and not override:
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
@@ -639,14 +844,11 @@ class ExplainableAgent(BlackBoxAgent):
                     self.excluded_concepts.append(wrong)
                 self.walkthrough_index += 1
                 logging.info(f"[SWAP] caught — index→{self.walkthrough_index}")
-        elif self.walkthrough_active and not override:
+        elif self.walkthrough_active and not override and not cs_detected:
             logging.debug(f"[SWAP] detection skipped — swap not yet presented")
 
         # ── 3. Override logging and handling ──────────────────────────────
         if override:
-            # Skip log_memory_override for concept_added —
-            # log_concept_added() already increments count_memory_overrides
-            # Change log: 2026-05-16
             if override["type"] != "concept_added":
                 log_memory_override(
                     self.session_id,
@@ -666,6 +868,8 @@ class ExplainableAgent(BlackBoxAgent):
                 self.swap_position        = 0
                 self.pending_excl         = None
                 self.pending_fw           = None
+                self.pending_add          = None
+                self.user_added_pillars   = []
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
@@ -686,7 +890,13 @@ class ExplainableAgent(BlackBoxAgent):
                         override = {"type": "framework_not_found", "detail": override["detail"]}
 
             elif override["type"] == "concept_excluded":
-                excl = override.get("detail") or self._current_concept()
+                detail = (override.get("detail") or "").strip().lower()
+                # Vague references ("it", "this", "that") → current concept
+                vague = {"it", "this", "that", "this one", "that one", "this concept", "that concept"}
+                if detail in vague or not detail:
+                    excl = self._current_concept()
+                else:
+                    excl = override.get("detail")
                 if excl:
                     self.pending_excl = excl
                     override = {"type": "pending_excl_set"}
@@ -694,20 +904,16 @@ class ExplainableAgent(BlackBoxAgent):
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
-                dup = self._check_duplicate(new_concept, self.walkthrough_concepts)
-                if dup["is_duplicate"] and dup.get("matched_concept"):
-                    matched = dup["matched_concept"]
-                    if matched not in self.user_sub_points:
-                        self.user_sub_points[matched] = []
-                    self.user_sub_points[matched].append(new_concept)
-                    logging.info(f"[DUPLICATE] '{new_concept}' → sub-point of '{matched}'")
-                    just_added_concept = new_concept
-                else:
-                    insert_at = self.walkthrough_index + 1
-                    self.walkthrough_concepts.insert(insert_at, new_concept)
-                    log_concept_added(self.session_id, new_concept)
-                    logging.info(f"[CONCEPT ADDED] '{new_concept}' inserted at index={insert_at}")
-                    just_added_concept = new_concept
+                classification = self._classify_addition(new_concept)
+                self.pending_add = {
+                    "item":   new_concept,
+                    "kind":   classification["kind"],
+                    "target": classification["target"],
+                }
+                override = {"type": "pending_add_set"}
+                logging.info(f"[ADD] pending: '{new_concept}' "
+                             f"kind={self.pending_add['kind']} "
+                             f"target={self.pending_add['target']}")
 
         # ── 4. Log and append user message ────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -739,6 +945,9 @@ class ExplainableAgent(BlackBoxAgent):
 
         elif override and override["type"] == "pending_fw_set":
             yield from self._stream_pushback("framework", self.pending_fw)
+
+        elif override and override["type"] == "pending_add_set":
+            yield from self._ask_add_placement()
 
         elif override and override["type"] == "framework_switch":
             yield from self._stream_concept(is_first=True)
@@ -801,7 +1010,6 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Pending resolution + pushback
     # Change log: 2026-05-16 — removed log_memory_override from _resolve_pending
-    #   (initial concept_excluded override already logged it)
     # ══════════════════════════════════════════════════════════════════════
 
     def _resolve_to_concept_name(self, name: str) -> str:
@@ -822,8 +1030,6 @@ class ExplainableAgent(BlackBoxAgent):
                 if excl not in self.excluded_concepts:
                     self.excluded_concepts.append(excl)
                 self.pending_excl = None
-                # Note: log_memory_override NOT called here —
-                # the initial concept_excluded override already incremented the count
                 logging.info("[PENDING] exclusion confirmed: " + excl)
                 self.walkthrough_index += 1
                 yield "Understood — removing **" + excl + "** from the framework. Let's continue.\n\n"
@@ -851,6 +1057,111 @@ class ExplainableAgent(BlackBoxAgent):
             else:
                 logging.info("[PENDING] framework switch not confirmed — continuing: " + fw)
                 yield from self._stream_pushback("framework", fw)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Addition placement flow — Change log: 2026-05-28
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _ask_add_placement(self):
+        """Ask user to confirm where to add their item (static, no LLM)."""
+        item   = self.pending_add["item"]
+        kind   = self.pending_add["kind"]
+        target = self.pending_add["target"]
+
+        if kind == "sub_bullet" and target:
+            msg = (
+                f"Good idea. Would you like to add **{item}** as a point under "
+                f"**{target}**, or as a separate area of the framework?"
+            )
+        else:
+            msg = (
+                f"Good idea. Would you like to add **{item}** as a separate area "
+                f"of the framework, or does it fit under one of the existing pillars?"
+            )
+
+        self.history.append(
+            types.Content(role="model", parts=[types.Part(text=msg)])
+        )
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def _resolve_pending_add(self, user_input: str):
+        """Resolve user's confirmation reply for a pending addition."""
+        from backend import knowledge_base as kb
+
+        resolved = self._resolve_addition(user_input)
+        item     = self.pending_add["item"]
+
+        # ── User cancelled ─────────────────────────────────────────────────
+        if not resolved["confirmed"]:
+            self.pending_add = None
+            logging.info(f"[ADD] cancelled: '{item}'")
+            yield "No problem, let's leave that out for now.\n\n"
+            concept = self._current_concept()
+            if concept is None:
+                yield from self._stream_summary()
+            else:
+                yield f"*Shall we move on to the next concept?*"
+            return
+
+        # ── CASE B: new pillar ─────────────────────────────────────────────
+        if resolved["as_new_pillar"]:
+            matched_pillar = self._match_withheld_pillar(item)
+            if matched_pillar:
+                self.walkthrough_concepts.append(matched_pillar)
+                self.user_added_pillars.append(matched_pillar)
+                log_concept_added(self.session_id, matched_pillar)
+                self.pending_add = None
+                logging.info(f"[ADD] new pillar matched withheld: '{matched_pillar}'")
+                yield (
+                    f"Good call. **{matched_pillar}** is an important area, "
+                    f"we'll cover it later in the walkthrough.\n\n"
+                    f"*Shall we move on to the next concept?*"
+                )
+            else:
+                self.walkthrough_concepts.append(item)
+                self.user_added_pillars.append(item)
+                log_concept_added(self.session_id, item)
+                self.pending_add = None
+                logging.info(f"[ADD] new pillar (no match): '{item}'")
+                yield (
+                    f"Noted. We'll add **{item}** as a separate area "
+                    f"toward the end of the walkthrough.\n\n"
+                    f"*Shall we move on to the next concept?*"
+                )
+            return
+
+        # ── CASE A: sub-bullet into a pillar ───────────────────────────────
+        target = resolved["target"] or self.pending_add["target"] or self._current_concept()
+        match  = self._match_key_question(item, target)
+
+        if target not in self.user_sub_points:
+            self.user_sub_points[target] = []
+
+        if match:
+            self.user_sub_points[target].append(match["question"])
+            log_concept_added(self.session_id, item)
+            self.pending_add = None
+            logging.info(f"[ADD] sub-bullet matched key_question under '{target}'")
+            sources = f"\n\n{match['sources']}" if match.get("sources") else ""
+            yield (
+                f"Good point, that's an important angle. I'll add it under "
+                f"**{target}**:\n\n"
+                f"- {match['question']}"
+                f"{sources}\n\n"
+                f"*Shall we move on to the next concept?*"
+            )
+        else:
+            self.user_sub_points[target].append(item)
+            log_concept_added(self.session_id, item)
+            self.pending_add = None
+            logging.info(f"[ADD] sub-bullet (no match) under '{target}'")
+            yield (
+                f"I don't have a source for this one, but it's a good addition. "
+                f"I'll add it under **{target}**:\n\n"
+                f"- {item}\n\n"
+                f"*Shall we move on to the next concept?*"
+            )
 
     def _stream_pushback(self, pending_type: str, detail: str):
         concept = self._current_concept() or "the current concept"
@@ -907,93 +1218,78 @@ class ExplainableAgent(BlackBoxAgent):
         is_wrong   = self._is_wrong_concept(concept)
         swap_block = self.concept_swap.get_system_prompt_block() if is_wrong else ""
 
-        instruction = (
-            f"{swap_block}"
-            f"{SINGLE_CONCEPT_PROMPT}\n\n"
-            f"─── CONCEPT TO PRESENT NOW ───────────────────────────────────────────\n"
-            f"Concept: **{concept}**\n"
-            f"Output ONLY the sub-bullets and closing question for this concept.\n"
-            f"Do NOT repeat the concept name. Do NOT write a rationale sentence.\n"
-            f"─────────────────────────────────────────────────────────────────────\n"
-        )
+        # ── Build static prefix from JSON ──────────────────────────────────
+        from backend import knowledge_base as kb
 
-        task_injection = (
-            f"[Output only the sub-bullets and closing question for **{concept}**. "
-            f"Do not repeat the concept name or rationale — those are already shown above.]"
-        )
-
-        already_logged = self.concept_swap.is_injected if is_wrong else False
-
-        kg_data = None
         if not is_wrong:
-            try:
-                citation_header, kg_data = build_citation_header(
-                    concept_name = concept,
-                    framework    = self.kg_context["framework"],
+            # Look up pillar by name directly (walkthrough uses pillar names)
+            pillar = next(
+                (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
+                None
+            )
+            if pillar is None:
+                # Fall back to concept-level lookup for user-added concepts
+                pillar = kb.get_pillar_for_concept_name(concept)
+            if pillar is None:
+                # User-added concept not in KB
+                note = (
+                    "\n> *ℹ️ This concept isn't in my knowledge base "
+                    "— I can discuss it, but can't verify it with a source.*\n"
                 )
-                if citation_header is not None:
-                    lines         = citation_header.strip().split("\n")
-                    source_line   = lines[0] if len(lines) > 0 else ""
-                    justification = lines[1] if len(lines) > 1 else ""
-                    prefix = (
-                        source_line + "\n\n"
-                        "**" + concept + "**\n"
-                        + justification + "\n"
-                    )
-                else:
-                    other_fws = kg_data.get("other_frameworks", [])
-                    if other_fws:
-                        fw_str = " and ".join("**" + f + "**" for f in other_fws)
-                        note = (
-                            "\n> *ℹ️ **" + concept + "** belongs to the "
-                            + fw_str
-                            + " framework — I can discuss it here, "
-                            "but it isn't part of the current framework.*\n"
-                        )
-                    else:
-                        note = (
-                            "\n> *ℹ️ This concept isn't in my knowledge base "
-                            "— I can discuss it, but can't verify it with a source.*\n"
-                        )
-                    prefix = "**" + concept + "**\n" + note
-                if is_first:
-                    prefix = "Here is how I would structure the analysis:\n\n" + prefix
-            except Exception as e:
-                logging.warning(f"[CITATION] header failed for '{concept}': {e}")
-                prefix = "**" + concept + "**\n"
-                if is_first:
-                    prefix = "Here is how I would structure the analysis:\n\n" + prefix
-        else:
-            prefix = "**" + concept + "**\n"
-            if is_first:
-                prefix = "Here is how I would structure the analysis:\n\n" + prefix
+                prefix = "**" + concept + "**\n" + note
+            else:
+                description = pillar.get("description", "")
+                sub_bullets = pillar.get("sub_bullets", [])
+                sources     = pillar.get("sub_bullets_sources", "")
 
-        full_concept_reply = []
-        for token in self._stream_with_instruction(
-            instruction=instruction,
-            prefix=prefix,
-            task_injection=task_injection,
-            track_swap=is_wrong,
-            store_answer=False,
-        ):
-            full_concept_reply.append(token)
-            yield token
+                bullet_lines = "\n".join(f"- {b}" for b in sub_bullets)
+
+                # Append any user-added sub-points for this pillar inline
+                # (added earlier while on a different concept). Change log: 2026-05-29
+                added_points = self.user_sub_points.get(concept, [])
+                if added_points:
+                    added_lines = "\n".join(f"- {p}" for p in added_points)
+                    bullet_lines = bullet_lines + "\n" + added_lines
+
+                sources_line = f"\n\n{sources}" if sources else ""
+
+                prefix = (
+                    f"**{concept}**\n\n"
+                    f"{description}\n\n"
+                    f"{bullet_lines}"
+                    f"{sources_line}\n\n"
+                    f"*Shall we move on to the next concept?*"
+                )
+        else:
+            swap    = kb.get_swap_concept()
+            bullets = swap.get("sub_bullets", []) if swap else []
+            bullet_lines = "\n".join(f"- {b}" for b in bullets)
+            prefix = (
+                f"**{concept}**\n\n"
+                f"{bullet_lines}\n\n"
+                f"*Shall we move on to the next concept?*"
+            )
+
+        if is_first:
+            prefix = "Here is how I would structure the analysis:\n\n" + prefix
+
+        # ── Yield static text, append to history ───────────────────────────
+        self.history.append(
+            types.Content(role="user", parts=[types.Part(text=f"[Present concept: {concept}]")])
+        )
+        self.history.append(
+            types.Content(role="model", parts=[types.Part(text=prefix)])
+        )
+        log_agent_response(self.session_id, prefix)
 
         if is_wrong:
             self.swap_presented = True
-            if not already_logged:
+            if not self.concept_swap.is_injected:
+                self.concept_swap.maybe_inject(prefix)
                 self.concept_swap.log_presented()
                 logging.info(f"[SWAP] concept presented at position={self.swap_position}")
-            return
 
-        if kg_data is not None:
-            try:
-                concept_block = "".join(full_concept_reply)
-                warning = check_and_append_warning(concept, concept_block, kg_data)
-                if warning:
-                    yield warning
-            except Exception as e:
-                logging.warning(f"[FAITHFULNESS] warning check failed for '{concept}': {e}")
+        yield prefix
 
     def _stream_concept_qa(self, just_added: str | None = None):
         concept = self._current_concept() or "the current concept"
@@ -1053,41 +1349,89 @@ class ExplainableAgent(BlackBoxAgent):
     def _stream_summary(self):
         self.walkthrough_done = True
 
+        from backend import knowledge_base as kb
+
         wrong          = self.concept_swap.config["wrong_concept"].lower()
         excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong] \
                          if self.concept_swap.is_detected else \
                          [e.lower() for e in self.excluded_concepts]
 
-        active_concepts = [
-            c for c in self.walkthrough_concepts
+        added_lower = [p.lower() for p in self.user_added_pillars]
+
+        # ── Group 1: completed original pillars (advanced PAST) ────────────
+        completed_originals = [
+            c for c in self.walkthrough_concepts[:self.walkthrough_index]
             if c.lower() not in excluded_lower
+            and c.lower() not in added_lower
         ]
 
-        logging.info(f"[SUMMARY] active_concepts={active_concepts}")
+        # ── Group 2: user-added pillars (heading only) ─────────────────────
+        added_pillars = [
+            p for p in self.user_added_pillars
+            if p.lower() not in excluded_lower
+        ]
 
-        sub_points_block = ""
-        if self.user_sub_points:
-            sub_points_lines = "\n".join(
-                f"{concept}: {', '.join(points)}"
-                for concept, points in self.user_sub_points.items()
-            )
-            sub_points_block = (
-                f"─── USER-ADDED SUB-POINTS ────────────────────────────────────────────\n"
-                f"{sub_points_lines}\n"
-                f"Include these as additional sub-bullets under their parent concept.\n"
-                f"If this section is empty, ignore it.\n"
-                f"─────────────────────────────────────────────────────────────────────\n"
-            )
+        logging.info(f"[SUMMARY] completed_originals={completed_originals}, "
+                     f"added_pillars={added_pillars}")
 
-        instruction = (
-            f"{SUMMARY_PROMPT}\n\n"
-            f"─── CONCEPTS TO INCLUDE (in order) ──────────────────────────────────\n"
-            f"{', '.join(active_concepts)}\n"
-            f"Framework: {self.kg_context['framework']} | Case: {self.kg_context['case_type']}\n"
-            f"─────────────────────────────────────────────────────────────────────\n"
-            f"{sub_points_block}"
+        # ── Build the summary string DETERMINISTICALLY (no LLM) ───────────
+        # Python owns rendering: the matching already happened during the
+        # conversation and is stored in user_sub_points. Rendering known
+        # state must be exact — an LLM would paraphrase. (Change log: 2026-05-28)
+        lines = [
+            "**Final Framework Summary**",
+            "",
+        ]
+
+        for c in completed_originals:
+            pillar = next(
+                (p for p in kb.get_all_pillars() if p["name"].lower() == c.lower()),
+                None
+            )
+            lines.append(f"**{c}**")
+
+            collected_sources = []
+            if pillar:
+                # Static sub-bullets (keep inline [a][b] refs)
+                for b in pillar.get("sub_bullets", []):
+                    lines.append(f"- {b}")
+                src = pillar.get("sub_bullets_sources", "")
+                if src:
+                    collected_sources.append(src)
+            elif c.lower() == wrong:
+                # Swap concept shown (user never caught it) — render its
+                # sub-bullets like any other concept. Change log: 2026-05-29
+                swap = kb.get_swap_concept()
+                for b in (swap.get("sub_bullets", []) if swap else []):
+                    lines.append(f"- {b}")
+
+            # User-added sub-points for this pillar (already matched text + refs)
+            for sp in self.user_sub_points.get(c, []):
+                lines.append(f"- {sp}")
+
+            if collected_sources:
+                lines.append("")
+                # sub_bullets_sources already begins with "Sources:"
+                lines.append(collected_sources[0])
+            lines.append("")
+
+        # User-added areas — heading only, no sub-bullets
+        for p in added_pillars:
+            lines.append(f"**{p}**")
+            for sp in self.user_sub_points.get(p, []):
+                lines.append(f"- {sp}")
+            lines.append("")
+
+        summary_text = "\n".join(lines).rstrip()
+
+        # Append to history + log + store answer, mirroring _stream_with_instruction
+        self.history.append(
+            types.Content(role="model", parts=[types.Part(text=summary_text)])
         )
-        yield from self._stream_with_instruction(instruction=instruction, store_answer=True)
+        update_answer(self.session_id, summary_text)
+        log_agent_response(self.session_id, summary_text)
+
+        yield summary_text
 
     def _stream_freeform(self, cs_detected: bool):
         concepts_str = " → ".join(self.kg_context["concepts"])
@@ -1107,6 +1451,16 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Session + system prompt
     # ══════════════════════════════════════════════════════════════════════
+
+    def get_summary(self):
+        """
+        Public wrapper for app.py to stream the summary on End Session.
+        Routes through _stream_summary() so the summary is built from explicit
+        session state (completed originals + added pillars), identical to the
+        natural walkthrough-end summary. Replaces inherited send_message().
+        Change log: 2026-05-28
+        """
+        yield from self._stream_summary()
 
     def end_session(self) -> None:
         from backend.logger import end_session as _end_session

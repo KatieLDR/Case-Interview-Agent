@@ -434,6 +434,32 @@ async def on_reject_concept(action: cl.Action):
 
     await _attach_buttons(agent)
 
+@cl.action_callback("add_to_concept")
+async def on_add_to_concept(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_add_to_concept():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
+@cl.action_callback("done_adding")
+async def on_done_adding(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_done_adding():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
 
 # ── HITL — Confirm reject (commit exclusion) ───────────────────────────────
 @cl.action_callback("confirm_reject")
@@ -522,22 +548,25 @@ async def _attach_buttons(agent):
                 ]
             ).send()
 
+        elif agent.awaiting_sub_point:
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(name="done_adding", label="✅ Done adding",
+                              description="Finish adding points to this concept", payload={}),
+                ]
+            ).send()
+
         elif agent.should_show_buttons():
             await cl.Message(
                 content="",
                 actions=[
-                    cl.Action(
-                        name="approve_concept",
-                        label="✅ Include",
-                        description="Include this concept in the framework",
-                        payload={}
-                    ),
-                    cl.Action(
-                        name="reject_concept",
-                        label="❌ Skip",
-                        description="Skip this concept",
-                        payload={}
-                    ),
+                    cl.Action(name="approve_concept", label="✅ Include",
+                              description="Include this concept in the framework", payload={}),
+                    cl.Action(name="reject_concept", label="❌ Skip",
+                              description="Skip this concept", payload={}),
+                    cl.Action(name="add_to_concept", label="➕ Add point to consider in this area",
+                              description="Add your own point under this concept", payload={}),
                 ]
             ).send()
 
@@ -548,8 +577,8 @@ async def _attach_buttons(agent):
                     actions=[
                         cl.Action(
                             name="get_summary",
-                            label="📊 Get Summary & End Session",
-                            description="Get your session summary and end the session",
+                            label="‼️End Session",
+                            description="End your session",
                             payload={}
                         ),
                     ]
@@ -577,8 +606,8 @@ async def _attach_buttons(agent):
             actions=[
                 cl.Action(
                     name="get_summary",
-                    label="📊 Get Summary & End Session",
-                    description="Get your session summary and end the session",
+                    label="‼️End Session",
+                    description="End your session",
                     payload={}
                 ),
             ]
@@ -612,7 +641,7 @@ async def _send_summary():
         return
 
     # ── HITL — stream summary directly from walkthrough state ─────────
-    if agent_type == "hitl":
+    if agent_type in ("hitl", "explainable"):
         cl.user_session.set("ended", True)
         agent.end_session()
 

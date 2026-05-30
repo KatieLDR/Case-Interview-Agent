@@ -24,7 +24,7 @@ MAIN_MODEL       = "gemini-2.5-flash"
 CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # ── Case config ────────────────────────────────────────────────────────────
-CASE_TYPE = "Profitability"
+CASE_TYPE = "AI Implementation"
 
 # ══════════════════════════════════════════════════════════════════════════
 # System Prompts
@@ -60,36 +60,29 @@ One single question the framework aims to solve.
 
 **The Framework**
 
-**[Branch concept]**
-- **[Leaf concept]**
-  - [analytical question, 5-7 words]
-  - [analytical question, 5-7 words]
+**[Pillar]**
+- [analytical question, 5-7 words, specific to this case]
+- [analytical question, 5-7 words, specific to this case]
 
-**[Branch concept]**
-- **[Leaf concept]**
-  - [analytical question, 5-7 words]
-- **[Branch+Leaf concept]**
-  - **[Leaf concept]**
-    - [analytical question, 5-7 words]
+**[Pillar]**
+- [analytical question, 5-7 words, specific to this case]
+- [analytical question, 5-7 words, specific to this case]
 
-(continue for all branches — do NOT add any not in KG context above,
+(continue for all pillars — do NOT add any not in FRAMEWORK CONTEXT above,
 UNLESS the user explicitly requests it)
 
 ─── STRUCTURAL EXAMPLE (format only — do not copy these questions) ──────
-**Revenue**
-- **Price per Unit**
-  - [your question here]
-  - [your question here]
-- **Units Sold**
-  - [your question here]
-  - [your question here]
+**Strategic Fit**
+- Is GenAI the right tool, or would simpler rules-based automation achieve the same result?
+- Is the use case consistent with responsible AI principles — transparency, human oversight, and accountability?
 
-**Costs**
-- **Fixed Cost**
-  - [your question here]
-- **Variable Cost**
-  - **Cost per Unit**
-    - [your question here]
+**Use Case and Solution**
+- Is the prototype scoped tightly enough to be reviewable and governable?
+- What is the input data classification level — this determines the compliance path?
+
+**Feasibility**
+- Is the input data GDPR-compliant and sufficient in quality and volume?
+- Is there a single-developer dependency with no designated long-term owner?
 ─────────────────────────────────────────────────────────────────────────
 
 **Key Considerations** *(only if relevant)*
@@ -102,23 +95,23 @@ a framework, ask ONE short natural follow-up question to invite exploration.
 
 If the user wants to ADD a new concept or bucket:
 - Add it immediately, no pushback
-- If it fits within Revenue or Costs → add as a sub-bucket under the right branch
-- If it is a new top-level area (e.g. Risks, Market) → add as a new primary bucket
+- If it fits within Strategic Fit, Use Case and Solution, or Feasibility → add as a sub-bullet under the right pillar
+- If it is a new top-level area (e.g. Risks, Financial Impact) → add as a new primary pillar
 - Never refuse user additions
 - When a user explicitly asks to add a sub-bullet, always honour it — no limit applies
 
-If the user wants to REMOVE or CHANGE an existing KG concept:
+If the user wants to REMOVE or CHANGE an existing concept:
 - Briefly explain your reasoning in one sentence
 - Ask if they still want to proceed
 - If they confirm, honour it immediately
 
 ─── RULES ────────────────────────────────────────────────────────────────
-- Always use the exact format above — bold headers, bullet sub-buckets
-- Never use numbered lists for framework buckets
+- Always use the exact format above — bold pillar headers, bullet questions
+- Never use numbered lists for framework pillars
 - Be direct and concise
 - Never evaluate or score the user
 - Ask only ONE follow-up question per response
-- When initially presenting concepts, aim for 2 analytical questions per leaf concept
+- Always present exactly 2 analytical questions per pillar
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -167,23 +160,21 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 Examples:
 - "redo this" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.99}
 - "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.97}
-- "remove profit per unit" → {"override": true, "type": "concept_excluded", "detail": "Profit per Unit", "parent": null, "confidence": 0.97}
-- "add external risks as a bucket" → {"override": true, "type": "concept_added", "detail": "External Risks", "parent": null, "confidence": 0.97}
-- "what about market preference?" → {"override": true, "type": "concept_added", "detail": "Market Preference", "parent": null, "confidence": 0.95}
-- "use profitability framework" → {"override": true, "type": "framework_switch", "detail": "profitability", "parent": null, "confidence": 0.96}
+- "remove feasibility" → {"override": true, "type": "concept_excluded", "detail": "Feasibility", "parent": null, "confidence": 0.97}
+- "add financial impact as a bucket" → {"override": true, "type": "concept_added", "detail": "Financial Impact", "parent": null, "confidence": 0.97}
+- "what about regulatory risks?" → {"override": true, "type": "concept_added", "detail": "Regulatory risks", "parent": null, "confidence": 0.95}
+- "use a different framework" → {"override": true, "type": "framework_switch", "detail": null, "parent": null, "confidence": 0.96}
 - "give me a framework" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "why is variable cost here?" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.95}
+- "why is feasibility here?" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.95}
 - "yes" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "no" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "no thanks" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "ok" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "sure" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "where's variable cost" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "where is external risk" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "what happened to market share" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "add cafe sales under Units Sold" → {"override": true, "type": "concept_added", "detail": "Cafe sales", "parent": "Units Sold", "confidence": 0.97}
-- "I think we should consider coffee bag sales as part of Units Sold" → {"override": true, "type": "concept_added", "detail": "Coffee bag sales", "parent": "Units Sold", "confidence": 0.96}
-- "add market share" → {"override": true, "type": "concept_added", "detail": "Market share", "parent": null, "confidence": 0.97}
+- "where's strategic fit" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "what happened to feasibility" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
+- "add data quality under Feasibility" → {"override": true, "type": "concept_added", "detail": "Data quality", "parent": "Feasibility", "confidence": 0.97}
+- "add cost analysis as part of Financial Impact" → {"override": true, "type": "concept_added", "detail": "Cost analysis", "parent": "Financial Impact", "confidence": 0.96}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -257,7 +248,7 @@ class BlackBoxAgent:
         )
 
         self.kg_context = self._fetch_kg_context(CASE_TYPE)
-        print(f"[KG INIT] case_type={CASE_TYPE}, "
+        print(f"[KB INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
               f"concepts={self.kg_context['concepts']}")
 
@@ -288,8 +279,13 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _fetch_kg_context(self, case_type: str) -> dict:
-        framework = kg.get_framework_for_case(case_type) or "Unknown Framework"
-        concepts  = kg.get_ordered_concepts(framework) if framework else []
+        """
+        Load framework context from JSON knowledge base.
+        Change log: 2026-05-28 — migrated from KG to JSON knowledge base.
+        """
+        from backend import knowledge_base as kb
+        framework = kb.get_framework_name()
+        concepts  = [p["name"] for p in kb.get_shown_pillars()]
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
     def _update_kg_if_framework_mentioned(self, user_input: str) -> None:
@@ -329,45 +325,32 @@ class BlackBoxAgent:
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_system_prompt(self) -> str:
-        framework = self.kg_context["framework"]
+        framework    = self.kg_context["framework"]
+        concepts_str = ", ".join(self.kg_context["concepts"]) \
+                       if self.kg_context["concepts"] else \
+                       "Strategic Fit, Use Case and Solution, Feasibility"
 
-        try:
-            tree = kg.get_framework_tree(framework)
-            concept_lines = []
-            for node in tree:
-                indent = "  " * (node["depth"] - 1)
-                concept_lines.append(f"{indent}{node['parent']} → {node['concept']}")
-            concepts_str = "\n".join(concept_lines) if concept_lines else "N/A"
-        except Exception as e:
-            print(f"[SYSTEM PROMPT] tree fetch failed: {e}")
-            concepts_str = " → ".join(self.kg_context["concepts"])
-
-        kg_block = (
-            f"─── KNOWLEDGE GRAPH CONTEXT ──────────────────────────────────────────\n"
+        framework_block = (
+            f"─── FRAMEWORK CONTEXT ────────────────────────────────────────────────\n"
             f"Case Type : {self.kg_context['case_type']}\n"
             f"Framework : {framework}\n"
-            f"Concepts  :\n{concepts_str}\n"
-            f"CRITICAL: Use branch nodes as PRIMARY BUCKET HEADERS (e.g. Revenue, Costs).\n"
-            f"Use leaf nodes as SUB-BUCKET HEADERS under their parent branch.\n"
-            f"Generate 2 analytical questions under each leaf concept.\n"
-            f"Do NOT add any bucket or concept not listed here UNLESS the user explicitly requests it.\n"
+            f"Pillars   : {concepts_str}\n"
+            f"CRITICAL: Use pillars as PRIMARY BUCKET HEADERS.\n"
+            f"Generate exactly 2 analytical questions directly under each pillar — no sub-headers.\n"
+            f"Do NOT add any pillar not listed here UNLESS the user explicitly requests it.\n"
             f"──────────────────────────────────────────────────────────────────────\n\n"
         )
 
         swap_block = self.concept_swap.get_system_prompt_block()
-        return kg_block + swap_block + SYSTEM_PROMPT
+        return framework_block + swap_block + SYSTEM_PROMPT
 
     def _build_tree_overview(self) -> str:
-        return (
-            "**Framework Overview**\n\n"
-            "- **Revenue**\n"
-            "  - Price per Unit\n"
-            "  - Units Sold\n\n"
-            "- **Costs**\n"
-            "  - Fixed Cost\n"
-            "  - **Variable Cost**\n"
-            "    - Cost per Unit\n"
-        )
+        from backend import knowledge_base as kb
+        shown = kb.get_shown_pillars()
+        lines = ["**Framework Overview**\n"]
+        for pillar in shown:
+            lines.append(f"- {pillar['name']}")
+        return "\n".join(lines)
 
     def show_tree(self) -> str:
         return self._build_tree_overview()
@@ -379,7 +362,6 @@ class BlackBoxAgent:
     def get_warmup_message(self) -> str:
         return WARMUP_PROMPT
 
-    
     def merge_warmup_additions(self, additions: list[str]) -> str:
         """
         LLM call: merges user additions into the pre-built warmup plan.
@@ -404,7 +386,6 @@ class BlackBoxAgent:
             )
         except Exception as e:
             print(f"[WARMUP MERGE] LLM merge failed: {e}")
-            # Fallback: original plan + additions listed
             additions_block = "\n".join(f"- {a}" for a in additions)
             return (
                 "**Here's your updated plan:**\n\n"
@@ -486,14 +467,14 @@ class BlackBoxAgent:
             "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
         )
 
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."  # timer sentinel — MutationObserver watches for this to trigger button attachment in app.py
+        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
 
         yield from self._stream_framework_presentation()
 
         yield (
             "\n\n---\n\n"
             "📖 *When you are satisfied with the analysis, click "
-            "**📊 Get Summary & End Session** to finish. "
+            "**‼️End Session** to finish. "
             "Note that ending the session cannot be undone.*"
         )
 
@@ -555,51 +536,54 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_framework_presentation(self):
+        """
+        Static framework presentation — no LLM call.
+        Builds text from knowledge_base.py and appends to history.
+        Swap concept injected at midpoint, sub-bullets from JSON.
+        Change log: 2026-05-28 — replaced LLM call with static text
+        """
+        from backend import knowledge_base as kb
+
+        shown      = kb.get_shown_pillars()
+        swap       = kb.get_swap_concept()
+        wrong      = self.concept_swap.config["wrong_concept"]
+        position   = len(shown) // 2
+        swap_bullets = swap.get("sub_bullets", []) if swap else []
+
+        lines = ["Here is how I would structure the analysis:\n"]
+        for i, pillar in enumerate(shown):
+            if i == position:
+                lines.append(f"**{wrong}**")
+                for bullet in swap_bullets:
+                    lines.append(f"- {bullet}")
+                lines.append("")
+            lines.append(f"**{pillar['name']}**")
+            for bullet in pillar.get("sub_bullets", []):
+                clean = bullet.split(" [")[0].strip()
+                lines.append(f"- {clean}")
+            lines.append("")
+
+        lines.append("*Feel free to add, remove, or question any part of this — let's build this together.*")
+
+        reply = "\n".join(lines)
+
         self.history.append(
             types.Content(
                 role="user",
-                parts=[types.Part(text=(
-                    "Please present the full structured framework for this case."
-                ))]
+                parts=[types.Part(text="Please present the full structured framework for this case.")]
             )
         )
+        self.history.append(
+            types.Content(role="model", parts=[types.Part(text=reply)])
+        )
 
-        self._pending = True
-        full_reply = []
-        try:
-            for chunk in client.models.generate_content_stream(
-                model=MAIN_MODEL,
-                contents=self.history,
-                config=types.GenerateContentConfig(
-                    system_instruction=self._build_system_prompt(),
-                ),
-            ):
-                token = chunk.text or ""
-                full_reply.append(token)
-                yield token
+        self.concept_swap.maybe_inject(reply)
+        self.concept_swap.log_presented()
 
-            reply = "".join(full_reply)
+        update_answer(self.session_id, reply)
+        log_agent_response(self.session_id, reply)
 
-            was_injected   = self.concept_swap.is_injected
-            injected_reply = self.concept_swap.maybe_inject(reply)
-            if injected_reply != reply:
-                yield injected_reply[len(reply):]
-            reply = injected_reply
-
-            if self.concept_swap.is_injected and not was_injected:
-                self.concept_swap.log_presented()
-
-            self.history.append(
-                types.Content(role="model", parts=[types.Part(text=reply)])
-            )
-
-            update_answer(self.session_id, reply)
-            log_agent_response(self.session_id, reply)
-
-        except Exception as e:
-            yield f"Sorry, I encountered an error: {str(e)}"
-        finally:
-            self._pending = False
+        yield reply
 
     # ══════════════════════════════════════════════════════════════════════
     # Main phase streaming
@@ -727,9 +711,8 @@ class BlackBoxAgent:
             f"Based on our conversation, provide a summary in this exact format:\n\n"
             f"**Final Framework: [Framework Name]**\n\n"
             f"**The Framework:**\n"
-            f"For each primary bucket, list its leaf concepts as bold sub-headers.\n"
-            f"Under each leaf concept, copy the EXACT analytical questions from our "
-            f"conversation — do not paraphrase or omit them.\n"
+            f"For each primary pillar, list its analytical questions as bullet points.\n"
+            f"Copy the EXACT analytical questions from our conversation — do not paraphrase or omit them.\n"
             f"If the user added new concepts or sub-bullets, include those too.\n\n"
             f"Then in 2-3 sentences: note any concepts the user removed and any "
             f"concepts they added during the session."
@@ -857,7 +840,7 @@ class BlackBoxAgent:
                 print(f"[DUPLICATE] exact match: '{concept}' == '{existing}'")
                 return {"is_duplicate": True, "matched_concept": existing}
 
-        # Layer 3 — LLM fuzzy check, different model family from classifier
+        # Layer 3 — LLM fuzzy check
         try:
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite",
@@ -871,8 +854,6 @@ class BlackBoxAgent:
                     f"\"matched_concept\": \"exact string from list or null\"}}\n\n"
                     f"is_duplicate=true ONLY if clearly the same concept — "
                     f"same topic, possibly different wording.\n"
-                    f"Examples: 'revenue' matches 'Price per Unit' → false. "
-                    f"'unit sales' matches 'Units Sold' → true.\n"
                     f"WHEN IN DOUBT: is_duplicate=false."
                 ),
             )

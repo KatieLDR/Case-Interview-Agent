@@ -1,11 +1,9 @@
-import os
 import json
 import logging
+import os
 from google import genai
 from dotenv import load_dotenv
-from backend import knowledge_graph as kg
-# Change log: 2026-04-02 — get_framework_for_concept used for cross-framework citation
-from backend.knowledge_graph import get_framework_for_concept
+from backend import knowledge_base as kb
 
 load_dotenv()
 
@@ -16,35 +14,59 @@ CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 # ── Faithfulness threshold ─────────────────────────────────────────────────
 FAITHFULNESS_THRESHOLD = 0.85
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # Prompts
 # ══════════════════════════════════════════════════════════════════════════
 
+_PILLAR_MATCH_PROMPT = """
+You are a classifier for a case interview coaching system.
+
+The agent is presenting a concept to the user. Your job is to match the concept
+name to one of the pillars in the knowledge base below.
+
+─── KNOWLEDGE BASE PILLARS ───────────────────────────────────────────────
+{pillars_block}
+──────────────────────────────────────────────────────────────────────────
+
+─── CONCEPT NAME ─────────────────────────────────────────────────────────
+{concept_name}
+──────────────────────────────────────────────────────────────────────────
+
+Rules:
+- Match if the concept name is clearly a sub-concept of one of the pillars above
+- Match if the concept name is a close paraphrase or synonym of a sub-concept
+- Match the pillar the concept most naturally belongs to
+- If the concept does not match any pillar, return null
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{{"matched_pillar_id": "pillar_id string or null", "confidence": float between 0.0 and 1.0}}
+"""
+
 _FAITHFULNESS_PROMPT = """
-You are a grounding classifier for a knowledge-graph-backed case interview system.
+You are a grounding classifier for a knowledge-base-backed case interview system.
 
 Your job is to check whether an agent's concept block stays within the analytical
-scope defined by the Knowledge Graph data below.
+scope defined by the knowledge base data below.
 
-─── KNOWLEDGE GRAPH DATA ──────────────────────────────────────────────────
-{kg_data_block}
-───────────────────────────────────────────────────────────────────────────
+─── KNOWLEDGE BASE DATA ──────────────────────────────────────────────────
+Pillar      : {pillar_name}
+Description : {pillar_description}
+Sub-concepts: {sub_concepts}
+──────────────────────────────────────────────────────────────────────────
 
 ─── AGENT CONCEPT BLOCK ───────────────────────────────────────────────────
 {concept_block}
 ───────────────────────────────────────────────────────────────────────────
 
 Mark as NOT faithful if the concept block:
-- Introduces concepts from a completely different framework
-  (e.g. NPS or market sizing in a cost analysis block)
-- Makes claims that clearly contradict the concept's Description or scope
-- Introduces analytical lenses not mentioned in the concept's Description
+- Introduces concepts from a completely different domain
+- Makes claims that clearly contradict the pillar description or scope
+- Introduces analytical lenses not mentioned in the pillar description
 
 Mark as FAITHFUL if:
-- The block stays within the analytical scope described in the Description field
-- The block uses case-specific elaboration consistent with the concept's scope
-- The block references sibling or parent concepts in passing — this is normal
-  consulting practice and does NOT indicate unfaithfulness
+- The block stays within the analytical scope described in the pillar description
+- The block uses case-specific elaboration consistent with the pillar scope
 - The block uses consulting framing language without introducing new domains
 
 When in doubt, mark as faithful.
@@ -53,132 +75,153 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {{"faithful": true or false, "confidence": float between 0.0 and 1.0}}
 """
 
-_CITATION_PROMPT = """
-You are a knowledge graph citation assistant for a case interview coaching system.
-
-Write a concise 2-3 sentence natural language justification explaining:
-1. Why this concept belongs in this framework (one sentence)
-2. Where it sits in the analytical sequence — what comes before and after it (one sentence)
-3. Why it matters specifically for this case (one sentence)
-
-─── KNOWLEDGE GRAPH DATA ──────────────────────────────────────────────────
-{kg_data_block}
-───────────────────────────────────────────────────────────────────────────
-
-Rules:
-- Plain language only — no jargon, no technical terms
-- Do NOT mention "Knowledge Graph", "KG", "database", or any technical system
-- Do NOT start with "This concept" — vary your opening
-- Stay grounded in the KG data provided — do not invent context
-- Maximum 3 sentences total
-
-Respond with ONLY the justification text — no labels, no markdown, no preamble.
-"""
+PILLAR_MATCH_THRESHOLD = 0.80
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# KG data builder
+# Pillar matcher — LLM fuzzy match
 # ══════════════════════════════════════════════════════════════════════════
 
-def build_kg_data(concept_name: str, framework: str) -> dict:
+def _match_pillar(concept_name: str) -> dict | None:
     """
-    Pull KG node data for faithfulness check and citation.
+    LLM fuzzy-match a concept name to a pillar in the knowledge base.
+    Returns the matched pillar dict, or None if no confident match.
+    """
+    all_pillars = kb.get_all_pillars()
 
-    Change log: 2026-04-01 — added 'in_kg' boolean flag to returned dict.
-    Callers use in_kg to decide whether to show citation or unverified note.
-    Previously, build_citation_header() would fabricate a citation for
-    user-added concepts not in KG because there was no way to detect the miss.
-    """
+    # Build pillars block for the prompt
+    lines = []
+    for p in all_pillars:
+        sub_concepts = [c["name"] for c in kb.get_concepts_for_pillar(p["id"])]
+        sub_str = ", ".join(sub_concepts) if sub_concepts else "none"
+        lines.append(
+            f"- id: {p['id']}\n"
+            f"  name: {p['name']}\n"
+            f"  sub-concepts: {sub_str}"
+        )
+    pillars_block = "\n".join(lines)
+
+    prompt = _PILLAR_MATCH_PROMPT.format(
+        pillars_block=pillars_block,
+        concept_name=concept_name,
+    )
+
     try:
-        ordered = kg.get_ordered_concepts(framework)
+        response = client.models.generate_content(
+            model=CLASSIFIER_MODEL,
+            contents=prompt,
+        )
+        raw    = _strip_fences(response.text)
+        parsed = json.loads(raw)
+
+        pillar_id  = parsed.get("matched_pillar_id")
+        confidence = parsed.get("confidence", 0.0)
+
+        if pillar_id and confidence >= PILLAR_MATCH_THRESHOLD:
+            pillar = kb.get_pillar_by_id(pillar_id)
+            logging.info(
+                f"[PILLAR MATCH] concept='{concept_name}' "
+                f"matched to pillar='{pillar_id}' confidence={confidence:.2f}"
+            )
+            return pillar
+
+        logging.info(
+            f"[PILLAR MATCH] concept='{concept_name}' "
+            f"no confident match (id={pillar_id}, confidence={confidence:.2f})"
+        )
+        return None
+
     except Exception as e:
-        logging.warning(f"[RAG] build_kg_data failed to fetch ordered concepts: {e}")
-        ordered = []
+        logging.warning(f"[PILLAR MATCH] error for '{concept_name}': {e}")
+        return None
 
-    parent      = None
-    siblings    = []
-    children    = []
-    is_branch   = False
-    description = ""
-    in_kg            = False   # True if concept in current framework
-    other_frameworks = []      # Non-empty if concept exists in other frameworks
-    # Change log: 2026-04-01 — in_kg flag
-    # Change log: 2026-04-02 — other_frameworks for cross-framework citation
 
-    if concept_name in ordered or _concept_exists_in_kg(concept_name, framework):
-        in_kg = True
-        try:
-            full = kg.get_concept_full_data(concept_name, framework)
-            parent      = full["parent"]
-            siblings    = full["siblings"]
-            children    = full["children"]
-            is_branch   = full["is_branch"]
-            description = full["description"]
-        except Exception as e:
-            logging.warning(f"[RAG] tree data fetch failed for '{concept_name}': {e}")
-    else:
-        logging.info(f"[RAG] concept '{concept_name}' not found in KG for framework '{framework}'")
-        # Check if concept exists in any other framework
-        try:
-            other_frameworks = kg.get_framework_for_concept(concept_name)
-        except Exception as e:
-            logging.warning(f"[RAG] cross-framework lookup failed for '{concept_name}': {e}")
+# ══════════════════════════════════════════════════════════════════════════
+# Citation builder
+# ══════════════════════════════════════════════════════════════════════════
 
-    return {
-        "concept":           concept_name,
-        "framework":         framework,
-        "description":       description,
-        "parent":            parent,
-        "siblings":          siblings,
-        "children":          children,
-        "is_branch":         is_branch,
-        "all_concepts":      ordered,
-        "in_kg":             in_kg,
-        "other_frameworks":  other_frameworks,
+def build_citation_header(concept_name: str, framework: str) -> tuple[str | None, dict]:
+    """
+    Build citation header for a concept.
+
+    Two states:
+      State 1 — concept matches a pillar in JSON:
+        Returns (header, kb_data) with pillar description + HTML source links.
+      State 2 — concept not matched:
+        Returns (None, kb_data). Caller shows unverified note.
+
+    kb_data dict always returned for faithfulness check downstream.
+
+    Change log: 2026-05-25 — replaced KG lookup with JSON pillar match
+    """
+    pillar = _match_pillar(concept_name)
+
+    kb_data = {
+        "concept":     concept_name,
+        "framework":   framework,
+        "pillar":      pillar,
+        "in_kb":       pillar is not None,
     }
 
+    if pillar is None:
+        logging.info(f"[CITATION] '{concept_name}' not matched to any pillar")
+        return None, kb_data
 
-def _concept_exists_in_kg(concept_name: str, framework: str) -> bool:
-    try:
-        return kg.concept_belongs_to_framework(concept_name, framework)
-    except Exception:
-        return False
+    # Build source links
+    sources      = kb.get_sources_for_pillar(pillar["id"])
+    sources_html = kb.render_sources_as_html(sources)
 
+    description = pillar.get("description", "")
 
-def _format_kg_block(kg_data: dict) -> str:
-    parent    = kg_data["parent"]    or f"{kg_data['framework']} (top-level bucket)"
-    siblings  = ", ".join(kg_data.get("siblings", [])) or "None (no siblings)"
-    children  = ", ".join(kg_data["children"])          or "None (leaf concept)"
-    all_c     = ", ".join(kg_data["all_concepts"])       or "N/A"
-    node_type = "Branch node (groups sub-concepts)" if kg_data["is_branch"] else "Leaf concept (analysed directly)"
-    desc      = kg_data.get("description") or "No description available."
-
-    return (
-        f"Concept     : {kg_data['concept']}\n"
-        f"Description : {desc}\n"
-        f"Framework   : {kg_data['framework']}\n"
-        f"Node type   : {node_type}\n"
-        f"Parent      : {parent}\n"
-        f"Siblings    : {siblings}\n"
-        f"Children    : {children}\n"
-        f"All concepts: {all_c}"
+    # Build header block
+    # Format:
+    # **Concept Name**
+    # [pillar description]
+    #
+    # 📚 **Sources:** [link1] · [link2]
+    #
+    sources_line = (
+        f"\n\n📚 **Sources:** {sources_html}" if sources_html else ""
     )
+
+    header = (
+        f"{description}"
+        f"{sources_line}"
+        f"\n\n"
+    )
+
+    logging.info(
+        f"[CITATION] built for '{concept_name}' "
+        f"pillar='{pillar['id']}' sources={len(sources)}"
+    )
+    return header, kb_data
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # Faithfulness check
 # ══════════════════════════════════════════════════════════════════════════
 
-def check_faithfulness(concept_name: str, concept_block: str, kg_data: dict) -> dict:
+def check_and_append_warning(concept_name: str, concept_block: str, kb_data: dict) -> str | None:
     """
-    Check whether the streamed concept block stays within KG-supported bounds.
-    Returns {"faithful": bool, "confidence": float}
-    Defaults to faithful=True on error.
+    Run faithfulness check after concept block streams.
+    Returns warning string if unfaithful, None if faithful.
+
+    Change log: 2026-05-25 — grounded in JSON pillar description instead of KG block
     """
-    kg_block = _format_kg_block(kg_data)
-    prompt   = _FAITHFULNESS_PROMPT.format(
-        kg_data_block=kg_block,
-        concept_block=concept_block[:1000],
+    pillar = kb_data.get("pillar")
+
+    if pillar is None:
+        # No pillar matched — skip faithfulness check
+        return None
+
+    sub_concepts = [c["name"] for c in kb.get_concepts_for_pillar(pillar["id"])]
+    sub_str      = ", ".join(sub_concepts) if sub_concepts else "none"
+
+    prompt = _FAITHFULNESS_PROMPT.format(
+        pillar_name        = pillar["name"],
+        pillar_description = pillar.get("description", ""),
+        sub_concepts       = sub_str,
+        concept_block      = concept_block[:1000],
     )
 
     try:
@@ -197,124 +240,28 @@ def check_faithfulness(concept_name: str, concept_block: str, kg_data: dict) -> 
             f"[FAITHFULNESS] concept='{concept_name}', "
             f"faithful={faithful}, confidence={confidence:.2f}, result={result}"
         )
-        return {"faithful": result, "confidence": confidence}
+
+        if not result:
+            return "\n\n⚠️ *I may have added context beyond what the framework specifies — please verify.*"
+        return None
 
     except Exception as e:
         logging.warning(f"[FAITHFULNESS] classifier error for '{concept_name}': {e}")
-        return {"faithful": True, "confidence": 0.0}
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Citation generator
+# Legacy compatibility — kept for any remaining callers
 # ══════════════════════════════════════════════════════════════════════════
-
-def generate_citation(concept_name: str, kg_data: dict, faithful: bool) -> str:
-    kg_block     = _format_kg_block(kg_data)
-    entity_id    = f"KG::Concept::{concept_name}"
-    framework    = kg_data["framework"]
-    justification = _generate_justification(kg_block, concept_name)
-
-    lines = [
-        "\n\n---",
-        f"📚 **Source:** `{entity_id}` — {framework}",
-        justification,
-    ]
-
-    if not faithful:
-        lines.append(
-            "\n⚠️ *I may have added context beyond what the framework specifies — please verify.*"
-        )
-
-    return "\n".join(lines)
-
-
-def _generate_justification(kg_block: str, concept_name: str) -> str:
-    prompt = _CITATION_PROMPT.format(kg_data_block=kg_block)
-    try:
-        response = client.models.generate_content(
-            model=CLASSIFIER_MODEL,
-            contents=prompt,
-        )
-        justification = response.text.strip()
-        logging.info(f"[CITATION] justification generated for '{concept_name}'")
-        return justification
-    except Exception as e:
-        logging.warning(f"[CITATION] justification generation failed for '{concept_name}': {e}")
-        return "This concept is part of the structured framework for this analysis."
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Public functions
-# ══════════════════════════════════════════════════════════════════════════
-
-def build_citation_header(concept_name: str, framework: str) -> tuple[str | None, dict]:
-    """
-    Build citation header + NL justification — called BEFORE streaming concept.
-
-    Three states — Change log: 2026-04-02:
-      State 1 — concept in current framework:
-        Returns (header, kg_data) with full KG citation + NL justification.
-      State 2 — concept in a different framework:
-        Returns (header, kg_data) with cross-framework citation + NL justification
-        sourced from the correct framework. Source line includes (not current framework).
-      State 3 — concept not in KG anywhere:
-        Returns (None, kg_data). Caller shows unverified note + LLM answer.
-    """
-    kg_data = build_kg_data(concept_name, framework)
-
-    # ── State 1: Concept in current framework — full citation ──────────────
-    if kg_data["in_kg"]:
-        entity_id     = "KG::Concept::" + concept_name
-        fw_name       = kg_data["framework"]
-        justification = _generate_justification(_format_kg_block(kg_data), concept_name)
-        header = (
-            "\U0001F4DA **Source:** `" + entity_id + "` \u2014 " + fw_name + "\n"
-            + justification + "\n\n"
-        )
-        logging.info("[CITATION] full citation for '" + concept_name + "' in '" + framework + "'")
-        return header, kg_data
-
-    # ── State 2: Concept in a different framework — cross-framework citation
-    other = kg_data.get("other_frameworks", [])
-    if other:
-        other_fw   = other[0]["framework"]
-        # Fetch full KG data from the framework it actually belongs to
-        cross_data = build_kg_data(concept_name, other_fw)
-        entity_id  = "KG::Concept::" + concept_name
-        justification = _generate_justification(_format_kg_block(cross_data), concept_name)
-        header = (
-            "\U0001F4DA **Source:** `" + entity_id + "` \u2014 "
-            + other_fw + " (not current framework)\n"
-            + justification + "\n\n"
-        )
-        logging.info(
-            "[CITATION] cross-framework citation for '" + concept_name
-            + "' \u2014 belongs to '" + other_fw + "', not '" + framework + "'"
-        )
-        return header, cross_data
-
-    # ── State 3: Concept not in KG anywhere — caller shows unverified note ──
-    logging.info("[CITATION] '" + concept_name + "' not found in any framework")
-    return None, kg_data
-
-
-def check_and_append_warning(concept_name: str, concept_block: str, kg_data: dict) -> str | None:
-    """
-    Run faithfulness check after concept block streams.
-    Returns warning string if unfaithful, None if faithful.
-    """
-    result = check_faithfulness(concept_name, concept_block, kg_data)
-    if not result["faithful"]:
-        return "\n⚠️ *I may have added context beyond what the framework specifies — please verify.*"
-    return None
-
 
 def build_and_check_citation(concept_name: str, framework: str, concept_block: str) -> str:
     """Legacy single-call pipeline — kept for backward compatibility with tests."""
-    kg_data      = build_kg_data(concept_name, framework)
-    faith_result = check_faithfulness(concept_name, concept_block, kg_data)
-    citation     = generate_citation(concept_name, kg_data, faith_result["faithful"])
-    return citation
+    header, kb_data = build_citation_header(concept_name, framework)
+    warning         = check_and_append_warning(concept_name, concept_block, kb_data)
+    result          = header or ""
+    if warning:
+        result += warning
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
