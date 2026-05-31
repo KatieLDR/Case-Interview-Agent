@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from google.genai import types
 from backend.black_box_agent import (
     BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
@@ -15,6 +16,41 @@ from backend.logger import (
 )
 from backend import knowledge_graph as kg
 from backend.rag_explainer import build_citation_header, check_and_append_warning
+
+# ── Source display: letter scheme kept, entries shown as named links ────────
+# Change log: 2026-05-30
+SOURCE_NAMES = {
+    "https://gdpr-info.eu/art-4-gdpr/": "GDPR Article 4",
+    "https://gdpr-info.eu/art-5-gdpr/": "GDPR Article 5",
+    "https://gdpr-info.eu/art-25-gdpr/": "GDPR Article 25",
+    "https://gdpr-info.eu/art-35-gdpr/": "GDPR Article 35",
+    "https://artificialintelligenceact.eu/article/3/": "EU AI Act Article 3",
+    "https://artificialintelligenceact.eu/article/6/": "EU AI Act Article 6",
+    "https://artificialintelligenceact.eu/": "EU AI Act Recital 12",
+    "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10": "NIST AI RMF 1.0",
+    "https://www.mckinsey.com/capabilities/quantumblack/our-insights/one-year-of-agentic-ai-six-lessons-from-the-people-doing-the-work": "McKinsey: One Year of Agentic AI",
+    "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai": "McKinsey QuantumBlack",
+    "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries": "ZenML Panel",
+    "https://www.bcg.com/publications/2026/ai-risk-management-needs-a-better-model": "BCG Smart Governance",
+    "https://media-publications.bcg.com/global-scaling-strategic-workforce-planning-bcg-allianz.pdf": "BCG Strategic Workforce Planning",
+    "https://www.deloitte.com/us/en/about/press-room/state-of-ai-report-2026.html": "Deloitte State of AI 2026",
+    "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview": "Hacking the Case Interview",
+    "https://www.allianz.com/en/mediacenter/news/articles/260318-responsible-use-of-ai-at-allianz.html": "Allianz Responsible AI",
+}
+
+_SRC_ENTRY_RE  = re.compile(r"\[([a-z])\]\(([^)]+)\)")   # [a](url) entries
+_INLINE_REF_RE = re.compile(r"\[([a-z])\]")               # [a] inline refs in bullets
+
+def _parse_source_line(line: str) -> list[tuple[str, str]]:
+    """'Sources: [a](url) · [b](url)' → [('a', url), ('b', url)]."""
+    return _SRC_ENTRY_RE.findall(line or "")
+
+def _format_named_sources(entries: list[tuple[str, str]]) -> str:
+    """Ordered (letter, url) → 'Sources: a [Name](url) · b [Name](url)'."""
+    if not entries:
+        return ""
+    parts = [f"{letter} [{SOURCE_NAMES.get(url, url)}]({url})" for letter, url in entries]
+    return "Sources: " + " · ".join(parts)
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "AI Implementation"
@@ -43,16 +79,22 @@ EXACT OUTPUT FORMAT — copy this structure precisely:
 *Shall we move on to the next concept?*
 ─────────────────────────────────────────────────────────────────────────────
 
-─── STRICT RULES ────────────────────────────────────────────────────────────
-- Do NOT repeat the concept name as a header — it is already shown above
-- Do NOT write a rationale sentence — it is already shown above
-- Do NOT write an intro paragraph
-- Do NOT list other concepts or buckets
-- Do NOT say "here is the framework" or "I recommend"
-- Do NOT add numbered lists
-- Maximum 2 sub-bullets
-- Never mention a knowledge graph, database, or technical system
-- Always end with: *Shall we move on to the next concept?*
+─── STRICT RULE ─────────────────────────────────────────────────────────────
+Answer ONLY about the concept named in CURRENT CONCEPT below.
+If the user mentions a different concept by name:
+- Check the FRAMEWORK CONTEXT below for already-planned concepts.
+  Only say a concept is already planned if you are highly confident it
+  matches one from the list — exact name or a clear, unambiguous synonym.
+  If uncertain, do not mention it — just answer about the CURRENT CONCEPT.
+- If it is clearly not in the list, briefly acknowledge it in one clause
+  ("we can look at that next") — then answer about the CURRENT CONCEPT only
+
+You do NOT control the framework. NEVER claim to add, remove, keep, include, or
+leave anything out (no "I'll leave that out", no "I've added that"). NEVER
+present, name, or describe another concept, and NEVER output a concept heading
+or its sub-bullets. Answer only about the CURRENT CONCEPT — the system makes all
+changes separately.
+─────────────────────────────────────────────────────────────────────────────
 """
 
 CONCEPT_QA_PROMPT = """
@@ -192,7 +234,42 @@ Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
 - "blockchain framework" → []
 - "supply chain" → []
 """
+CLARIFY_DOUBT_PROMPT = """
+You classify a user's message during a framework walkthrough.
 
+The agent presented a concept and asked whether to move on. Decide whether the
+user is expressing DOUBT about whether this concept belongs — WITHOUT a clear
+remove command and WITHOUT a clear information question.
+
+doubt = true:
+- "I don't think it makes sense", "this doesn't seem relevant", "not sure this belongs",
+  "is this really necessary?", "this seems off", "I'm not convinced", "this feels wrong"
+doubt = false:
+- Clear removal command ("remove this", "skip this", "drop it", "take it out")
+- Genuine information question ("what does this mean?", "how does this apply?",
+  "why is this here?", "can you explain?")
+- Agreement / advance ("makes sense", "ok", "sure", "next", "move on")
+
+Respond ONLY with valid JSON, no markdown:
+{"doubt": true or false, "confidence": float}
+"""
+
+CLARIFY_DOUBT_THRESHOLD = 0.7
+
+CLARIFY_RESOLVE_PROMPT = """
+The agent asked whether the user wants to REMOVE the current concept from the
+framework, or have it EXPLAINED.
+
+User reply: "{reply}"
+
+Classify:
+- "remove"  : wants it removed / left out ("remove it", "take it out", "move on without it")
+- "explain" : wants to understand why it's included ("explain", "why", "tell me more")
+- "advance" : fine with it, keep and continue ("it's fine", "keep it", "ok move on")
+
+Respond ONLY with valid JSON, no markdown:
+{{"decision": "remove" | "explain" | "advance", "confidence": float}}
+"""
 # ══════════════════════════════════════════════════════════════════════════
 # Addition flow prompts — Change log: 2026-05-28
 # ══════════════════════════════════════════════════════════════════════════
@@ -277,6 +354,26 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 """
 
 ADD_MATCH_THRESHOLD = 0.75
+
+SUB_BULLET_FORMAT_PROMPT = """
+You reformat a user's note into the style of a sub-bullet in this case framework.
+
+Rules:
+- Keep the user's MEANING exactly — add no new content, examples, or sources.
+- Output ONE concise line in the framework's voice: a short topic followed by a
+  clarifying question or qualifying clause. Phrasing it as a natural question is fine.
+- Drop filler ("I think", "we should also", "maybe", "consider").
+- No leading dash, no inline source markers. End with a question mark only if it is a question.
+- Match the style of these existing framework sub-bullets:
+    "Does the IT team currently log this data as part of their productivity tracking?"
+    "Data classification is data correctly classified under company data handling standards?"
+    "Single-developer dependency critical point of failure if original developer leaves or moves"
+    "Prototype scope and governability is the use case tightly scoped enough to be reviewable?"
+
+User note: "{item}"
+
+Output ONLY the reformatted sub-bullet, nothing else.
+"""
 
 WALKTHROUGH_OVERRIDE_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
@@ -431,6 +528,7 @@ class ExplainableAgent(BlackBoxAgent):
         self.pending_excl = None
         self.pending_fw   = None
         self.pending_add  = None   # {"item": str, "kind": str, "target": str}
+        self.pending_clarify = None
 
         # ── User sub-points — populated by duplicate guard path ───────────
         # Change log: 2026-05-12
@@ -736,7 +834,164 @@ class ExplainableAgent(BlackBoxAgent):
         except Exception as e:
             logging.warning(f"[ADD PILLAR MATCH] error: {e}")
         return None
+    
+    def _format_sub_bullet(self, item: str) -> str:
+        """Reformat an unmatched user sub-point into terse bullet style. Style only —
+        no new content, no source. Falls back to raw input on error. Change log: 2026-05-30"""
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
+            )
+            out = self._strip_fences(response.text).strip().strip("-• ").rstrip(".")
+            if out:
+                logging.info(f"[SUB-POINT FORMAT] '{item}' → '{out}'")
+                return out
+        except Exception as e:
+            logging.warning(f"[SUB-POINT FORMAT] error: {e} — keeping raw")
+        return item.strip()
 
+    def _render_pillar_block(self, concept: str) -> str:
+        """Read-only. Heading + static sub-bullets (unchanged) + user sub-points
+        (matched refs re-lettered to continue after the static ones, deduped by URL)
+        + one merged, named Sources line. No side-effects. Change log: 2026-05-30"""
+        from backend import knowledge_base as kb
+        pillar = next(
+            (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
+            None
+        )
+        lines = [f"**{concept}**"]
+
+        if pillar is None:
+            for sp in self.user_sub_points.get(concept, []):
+                lines.append(f"- {sp}")
+            return "\n".join(lines)
+
+        # Static sources keep their original letters/order (only cited == all, for shown pillars)
+        merged        = _parse_source_line(pillar.get("sub_bullets_sources", ""))
+        url_to_letter = {url: letter for letter, url in merged}
+        next_ord      = (max(ord(l) for l, _ in merged) + 1) if merged else ord("a")
+
+        # Static bullets — refs untouched
+        for b in pillar.get("sub_bullets", []):
+            lines.append(f"- {b}")
+
+        # User sub-points — matched refs resolve via key_questions_sources, continue letters
+        kq_map = dict(_parse_source_line(pillar.get("key_questions_sources", "")))
+
+        def _repl(m):
+            nonlocal next_ord
+            url = kq_map.get(m.group(1))
+            if not url:
+                return ""                       # drop a ref with no resolvable source
+            if url in url_to_letter:
+                return f"[{url_to_letter[url]}]"  # dedup by URL
+            letter = chr(next_ord); next_ord += 1
+            url_to_letter[url] = letter
+            merged.append((letter, url))
+            return f"[{letter}]"
+
+        for sp in self.user_sub_points.get(concept, []):
+            lines.append(f"- {_INLINE_REF_RE.sub(_repl, sp)}")
+
+        src_line = _format_named_sources(merged)
+        if src_line:
+            lines.append("")
+            lines.append(src_line)
+        return "\n".join(lines)
+    
+    def _concept_grounding(self, concept: str) -> str:
+        """Q&A grounding: description + key-questions, refs stripped. Change log: 2026-05-31"""
+        from backend import knowledge_base as kb
+        pillar = next(
+            (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
+            None
+        )
+        if pillar:
+            pts = [re.sub(r"\s+", " ", _INLINE_REF_RE.sub("", q)).strip()
+                for q in pillar.get("key_questions", [])]
+            parts = []
+            if pillar.get("description"):
+                parts.append(pillar["description"])
+            if pts:
+                parts.append("\n".join(f"- {p}" for p in pts))
+            return "\n\n".join(parts).strip()
+        swap = kb.get_swap_concept()
+        if swap and concept.lower() == self.concept_swap.config["wrong_concept"].lower():
+            return "\n".join(f"- {b}" for b in swap.get("sub_bullets", []))
+        return ""
+
+    def _is_removal_doubt(self, user_input: str) -> bool:
+        """Vague doubt about whether the current concept belongs. Change log: 2026-05-31"""
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=f"{CLARIFY_DOUBT_PROMPT}\n\nUser message: \"{user_input}\"",
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            return bool(parsed.get("doubt")) and parsed.get("confidence", 0.0) >= CLARIFY_DOUBT_THRESHOLD
+        except Exception as e:
+            logging.warning(f"[CLARIFY] doubt classifier error: {e}")
+            return False
+
+    def _classify_clarify(self, reply: str) -> str:
+        """remove | explain | advance. Change log: 2026-05-31"""
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=CLARIFY_RESOLVE_PROMPT.format(reply=reply),
+            )
+            parsed   = json.loads(self._strip_fences(response.text))
+            decision = parsed.get("decision", "explain")
+            return decision if decision in ("remove", "explain", "advance") else "explain"
+        except Exception as e:
+            logging.warning(f"[CLARIFY] resolve classifier error: {e}")
+            return "explain"
+
+    def _ask_clarify(self):
+        concept = self._current_concept() or "this concept"
+        msg = (
+            f"Just to make sure I understand — would you like to remove "
+            f"**{concept}** from the framework, or shall I explain why it's included?"
+        )
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def _resolve_pending_clarify(self, user_input: str):
+        concept = self.pending_clarify
+        self.pending_clarify = None
+        decision = self._classify_clarify(user_input)
+        wrong    = self.concept_swap.config["wrong_concept"]
+        on_swap  = (concept is not None and concept.lower() == wrong.lower()
+                    and self.swap_presented and not self.concept_swap.is_detected)
+        logging.info(f"[CLARIFY] concept='{concept}' decision={decision} on_swap={on_swap}")
+
+        if decision == "remove":
+            if on_swap:
+                self.concept_swap.force_detected()
+                if wrong not in self.excluded_concepts:
+                    self.excluded_concepts.append(wrong)
+                self.walkthrough_index += 1
+                log_memory_override(self.session_id, old_context=f"included: {wrong}",
+                                    new_context=f"user removed wrong concept via clarify: {wrong}")
+                log_delete(self.session_id, wrong, "text")
+                yield from self._stream_swap_caught()
+                yield "\n\n"
+                nxt = self._current_concept()
+                yield from (self._stream_summary() if nxt is None
+                            else self._stream_concept(is_first=False))
+            else:
+                self.pending_excl = self._resolve_to_concept_name(concept)
+                log_delete(self.session_id, self.pending_excl, "text")
+                yield from self._stream_pushback("concept", self.pending_excl)
+        elif decision == "advance":
+            self.walkthrough_index += 1
+            nxt = self._current_concept()
+            yield from (self._stream_summary() if nxt is None
+                        else self._stream_concept(is_first=False))
+        else:  # explain — grounded answer, stay on concept
+            yield from self._stream_concept_qa()
     # ══════════════════════════════════════════════════════════════════════
     # Override detection — walkthrough-aware
     # ══════════════════════════════════════════════════════════════════════
@@ -788,7 +1043,13 @@ class ExplainableAgent(BlackBoxAgent):
             )
             yield from self._resolve_pending_add(user_input)
             return
-
+        
+        if self.pending_clarify is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._resolve_pending_clarify(user_input)
+            return
+        
         if self.pending_excl is not None or self.pending_fw is not None:
             log_user_message(self.session_id, user_input)
             self.history.append(
@@ -870,6 +1131,7 @@ class ExplainableAgent(BlackBoxAgent):
                 self.pending_excl         = None
                 self.pending_fw           = None
                 self.pending_add          = None
+                self.pending_clarify = None
                 self.user_added_pillars   = []
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
@@ -1013,7 +1275,12 @@ class ExplainableAgent(BlackBoxAgent):
             log_question(self.session_id, "text", detail=user_input[:200])
             if _on_swap:
                 log_swap_questioned(self.session_id, "text", detail=user_input[:200])
-            yield from self._stream_concept_qa(just_added=just_added_concept)
+            if self._is_removal_doubt(user_input):
+                self.pending_clarify = self._current_concept()
+                logging.info(f"[CLARIFY] doubt on '{self.pending_clarify}' — asking")
+                yield from self._ask_clarify()
+            else:
+                yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
     # Pending resolution + pushback
@@ -1149,29 +1416,29 @@ class ExplainableAgent(BlackBoxAgent):
             self.user_sub_points[target] = []
 
         if match:
-            self.user_sub_points[target].append(match["question"])
+            stored = match["question"]                  # keeps its inline refs
+            self.user_sub_points[target].append(stored)
             log_concept_added(self.session_id, item)
-            log_add_sub_bullet(self.session_id, match["question"], "text")
+            log_add_sub_bullet(self.session_id, stored, "text")
             self.pending_add = None
             logging.info(f"[ADD] sub-bullet matched key_question under '{target}'")
-            sources = f"\n\n{match['sources']}" if match.get("sources") else ""
             yield (
-                f"Good point, that's an important angle. I'll add it under "
-                f"**{target}**:\n\n"
-                f"- {match['question']}"
-                f"{sources}\n\n"
+                f"Good point, that's an important angle. I've added it under "
+                f"**{target}**. Here's how it looks now:\n\n"
+                f"{self._render_pillar_block(target)}\n\n"
                 f"*Shall we move on to the next concept?*"
             )
         else:
-            self.user_sub_points[target].append(item)
+            stored = self._format_sub_bullet(item)       # Fix 1: terse, no raw input
+            self.user_sub_points[target].append(stored)
             log_concept_added(self.session_id, item)
-            log_add_sub_bullet(self.session_id, item, "text")
+            log_add_sub_bullet(self.session_id, stored, "text")
             self.pending_add = None
-            logging.info(f"[ADD] sub-bullet (no match) under '{target}'")
+            logging.info(f"[ADD] sub-bullet (no match, formatted) under '{target}'")
             yield (
                 f"I don't have a source for this one, but it's a good addition. "
-                f"I'll add it under **{target}**:\n\n"
-                f"- {item}\n\n"
+                f"I've added it under **{target}**. Here's how it looks now:\n\n"
+                f"{self._render_pillar_block(target)}\n\n"
                 f"*Shall we move on to the next concept?*"
             )
 
@@ -1263,7 +1530,8 @@ class ExplainableAgent(BlackBoxAgent):
                     added_lines = "\n".join(f"- {p}" for p in added_points)
                     bullet_lines = bullet_lines + "\n" + added_lines
 
-                sources_line = f"\n\n{sources}" if sources else ""
+                named_sources = _format_named_sources(_parse_source_line(sources))
+                sources_line  = f"\n\n{named_sources}" if named_sources else ""
 
                 prefix = (
                     f"**{concept}**\n\n"
@@ -1318,6 +1586,36 @@ class ExplainableAgent(BlackBoxAgent):
         )
 
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
+
+        grounding = self._concept_grounding(concept)
+        grounding_block = ""
+        if grounding:
+            grounding_block = (
+                "─── KNOWN POINTS FOR THIS CONCEPT (ground your answer here) ──────────\n"
+                + grounding + "\n"
+                "─── GROUNDING RULE ──────────────────────────────────────────────────\n"
+                "Base your answer on the KNOWN POINTS above and the case. You may explain\n"
+                "or apply them to this case, but do NOT introduce regulations, statistics,\n"
+                "named sources, or framework concepts that are not among the known points.\n"
+                "Do NOT output bracketed letter markers like [a].\n"
+                "──────────────────────────────────────────────────────────────────────\n"
+            )
+
+        instruction = (
+            qa_prompt + "\n\n"
+            "─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
+            + closing + "\n"
+            + grounding_block
+            + "─── CONTEXT ──────────────────────────────────────────────────────────\n"
+            "Current concept: **" + concept + "**\n"
+            "On swap concept: " + str(on_swap) + "\n"
+            "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
+            "Framework concepts (in order): " + ", ".join(
+                c for c in self.walkthrough_concepts
+                if just_added is None or c.lower() != just_added.lower()
+            ) + "\n"
+            "──────────────────────────────────────────────────────────────────────\n"
+        )
 
         added_note = ""
         if just_added:
@@ -1400,32 +1698,18 @@ class ExplainableAgent(BlackBoxAgent):
                 (p for p in kb.get_all_pillars() if p["name"].lower() == c.lower()),
                 None
             )
-            lines.append(f"**{c}**")
-
-            collected_sources = []
             if pillar:
-                # Static sub-bullets (keep inline [a][b] refs)
-                for b in pillar.get("sub_bullets", []):
-                    lines.append(f"- {b}")
-                src = pillar.get("sub_bullets_sources", "")
-                if src:
-                    collected_sources.append(src)
-            elif c.lower() == wrong:
-                # Swap concept shown (user never caught it) — render its
-                # sub-bullets like any other concept. Change log: 2026-05-29
-                swap = kb.get_swap_concept()
-                for b in (swap.get("sub_bullets", []) if swap else []):
-                    lines.append(f"- {b}")
-
-            # User-added sub-points for this pillar (already matched text + refs)
-            for sp in self.user_sub_points.get(c, []):
-                lines.append(f"- {sp}")
-
-            if collected_sources:
+                lines.append(self._render_pillar_block(c))   # named + merged sources
                 lines.append("")
-                # sub_bullets_sources already begins with "Sources:"
-                lines.append(collected_sources[0])
-            lines.append("")
+            else:
+                lines.append(f"**{c}**")
+                if c.lower() == wrong:
+                    swap = kb.get_swap_concept()
+                    for b in (swap.get("sub_bullets", []) if swap else []):
+                        lines.append(f"- {b}")
+                for sp in self.user_sub_points.get(c, []):
+                    lines.append(f"- {sp}")
+                lines.append("")
 
         # User-added areas — heading only, no sub-bullets
         for p in added_pillars:
