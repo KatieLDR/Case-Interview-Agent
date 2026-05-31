@@ -468,13 +468,15 @@ class HITLAgent(BlackBoxAgent):
             logging.warning(f"[DUPLICATE] check failed: {e} — defaulting to not duplicate")
             return {"is_duplicate": False, "matched_concept": None}
 
-    def _match_withheld_pillar(self, item: str) -> str | None:
-        """LLM: does a new area match a withheld pillar (Financial Impact / Risks)?"""
-        shown_ids = {p["id"] for p in kb.get_shown_pillars()}
-        withheld  = [p for p in kb.get_all_pillars() if p["id"] not in shown_ids]
-        if not withheld:
+    def _match_pillar(self, item: str) -> str | None:
+        """LLM: does a suggested area match any framework pillar (shown OR withheld)?
+        Returns the matched pillar name, or None. Change log: 2026-05-31
+        (was _match_withheld_pillar — widened to all pillars so suggestions overlapping
+        an already-shown pillar resolve consistently, not only withheld ones.)"""
+        pillars = kb.get_all_pillars()
+        if not pillars:
             return None
-        pillars_block = "\n".join(f"- {p['name']}" for p in withheld)
+        pillars_block = "\n".join(f"- {p['name']}" for p in pillars)
         prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
         try:
             response = client.models.generate_content(
@@ -485,7 +487,7 @@ class HITLAgent(BlackBoxAgent):
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 return parsed.get("matched_pillar")
         except Exception as e:
-            logging.warning(f"[ADD PILLAR MATCH] error: {e}")
+            logging.warning(f"[PILLAR MATCH] error: {e}")
         return None
 
     def _match_key_question(self, item: str, pillar_name: str) -> str | None:
@@ -641,7 +643,7 @@ class HITLAgent(BlackBoxAgent):
                 target           = dup["matched_concept"]
                 matched_withheld = None
             else:
-                matched_withheld = self._match_withheld_pillar(concept)
+                matched_withheld = self._match_pillar(concept)
                 target           = matched_withheld or concept
 
             idx = self._locate_concept(target)
@@ -1021,6 +1023,18 @@ class HITLAgent(BlackBoxAgent):
         )
 
         added_note = ""
+        grounding = self._concept_grounding(concept)
+        grounding_block = ""
+        if grounding:
+            grounding_block = (
+                f"─── KNOWN POINTS FOR THIS CONCEPT (ground your answer here) ───\n"
+                f"{grounding}\n"
+                f"─── GROUNDING RULE ───────────────────────────────────────────\n"
+                f"Base your answer on the KNOWN POINTS above and the case. Do NOT\n"
+                f"introduce regulations, statistics, or framework concepts that are\n"
+                f"not among the known points. Do NOT output bracketed letter markers.\n"
+                f"─────────────────────────────────────────────────────────────\n\n"
+            )
         if just_added:
             added_note = (
                 f"Good idea — I'll add **{just_added}** after we finish "
@@ -1037,10 +1051,14 @@ class HITLAgent(BlackBoxAgent):
             f"Framework concepts (in order): "
             f"{', '.join(c for c in self.walkthrough_concepts if just_added is None or c.lower() != just_added.lower())}\n"
             f"─────────────────────────────────────────────────────────────\n\n"
+            f"─────────────────────────────────────────────────────────────\n\n"
+            f"{grounding_block}"
             f"─── RULES ────────────────────────────────────────────────────\n"
             f"Answer in 2–3 sentences. Plain language only.\n"
             f"Do NOT end with a question — buttons handle advancement.\n"
             f"Do NOT re-present the concept block.\n"
+            f"Do NOT present or describe any other concept.\n"
+            f"Do NOT claim to add, remove, keep, or skip anything.\n"
             f"Do NOT suggest whether the candidate should approve or reject.\n"
             f"─────────────────────────────────────────────────────────────\n"
         )
@@ -1049,7 +1067,25 @@ class HITLAgent(BlackBoxAgent):
             instruction = instruction,
             prefix      = added_note,
         )
-
+    def _concept_grounding(self, concept: str) -> str:
+        """Q&A grounding: description + key-questions, source refs stripped
+        (HITL suppresses sources). Change log: 2026-05-31"""
+        pillar = next(
+            (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
+            None
+        )
+        if pillar:
+            pts = [_strip_source_refs(q) for q in pillar.get("key_questions", [])]
+            parts = []
+            if pillar.get("description"):
+                parts.append(pillar["description"])
+            if pts:
+                parts.append("\n".join(f"- {p}" for p in pts))
+            return "\n\n".join(parts).strip()
+        swap = kb.get_swap_concept()
+        if swap and concept.lower() == self.concept_swap.config["wrong_concept"].lower():
+            return "\n".join(f"- {_strip_source_refs(b)}" for b in swap.get("sub_bullets", []))
+        return ""
     def _stream_swap_caught(self):
         wrong       = self.concept_swap.config["wrong_concept"]
         wrong_fw    = self.concept_swap.config["wrong_framework"]
