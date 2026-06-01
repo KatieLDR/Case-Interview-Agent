@@ -12,9 +12,9 @@
 # Shared across all three agents (BlackBox, Explainable, HITL).
 
 _ALLIANZ_PROMPT = """\
-A colleague on your team has identified a GenAI use case that could automate \
-a repetitive part of the team's workflow and has already built a rough \
-prototype. Your manager has asked you to prepare a structured plan covering \
+A colleague on your team has identified a GenAI opportunity for automating \
+a repetitive part of the team's workflow and increase efficiency.  \
+Your manager has asked you to prepare a structured plan covering \
 everything the team needs to consider before rolling it out more broadly, \
 just like you practised in the warm-up exercise.\
 """

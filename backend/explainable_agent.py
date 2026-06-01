@@ -70,13 +70,13 @@ EXACT OUTPUT FORMAT — copy this structure precisely:
 - [analytical question, 5-7 words, specific to this case]
 - [analytical question, 5-7 words, specific to this case]
 
-*Shall we move on to the next concept?*
+*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*
 
 ─── EXAMPLE (for Strategic Fit) ────────────────────────────────────────────
 - Is the workflow problem frequent enough to justify governance overhead?
 - Would a simpler rules-based solution achieve the same result?
 
-*Shall we move on to the next concept?*
+*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*
 ─────────────────────────────────────────────────────────────────────────────
 
 ─── STRICT RULE ─────────────────────────────────────────────────────────────
@@ -186,8 +186,7 @@ STRICT RULES:
 ADVANCE_CLASSIFIER_PROMPT = """
 You are a classifier for a case interview walkthrough tool.
 
-The agent just introduced one concept and asked "Shall we move on to the
-next concept?" Determine whether the user is ready to advance OR still has
+The agent just introduced one concept and asked "Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important." Determine whether the user is ready to advance OR still has
 a question or concern.
 
 Ready to advance:
@@ -493,6 +492,7 @@ class ExplainableAgent(BlackBoxAgent):
         self.original_case = get_case("explainable")
         self._pending      = False
         self.turn_count    = 0
+        self.has_main_contribution = False   # gates End Session button (app.py reads this)
 
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("explainable")
@@ -1035,6 +1035,12 @@ class ExplainableAgent(BlackBoxAgent):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
+        # Gate flag — flips True on the user's FIRST main-phase message, before any
+        # early-return branch (pending_add / pending_clarify / pending_excl / fw), so
+        # every walkthrough message counts. app.py reads this agent-agnostically.
+        # Change log: 2026-05-31
+        self.has_main_contribution = True
+
         # ── 0. Resolve pending state ───────────────────────────────────────
         if self.pending_add is not None:
             log_user_message(self.session_id, user_input)
@@ -1132,6 +1138,7 @@ class ExplainableAgent(BlackBoxAgent):
                 self.pending_fw           = None
                 self.pending_add          = None
                 self.pending_clarify = None
+                self.has_main_contribution = False
                 self.user_added_pillars   = []
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
@@ -1376,7 +1383,7 @@ class ExplainableAgent(BlackBoxAgent):
             if concept is None:
                 yield from self._stream_summary()
             else:
-                yield f"*Shall we move on to the next concept?*"
+                yield f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
             return
 
         # ── CASE B: new pillar ─────────────────────────────────────────────
@@ -1392,7 +1399,7 @@ class ExplainableAgent(BlackBoxAgent):
                 yield (
                     f"Good call. **{matched_pillar}** is an important area, "
                     f"we'll cover it later in the walkthrough.\n\n"
-                    f"*Shall we move on to the next concept?*"
+                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
                 )
             else:
                 self.walkthrough_concepts.append(item)
@@ -1404,7 +1411,7 @@ class ExplainableAgent(BlackBoxAgent):
                 yield (
                     f"Noted. We'll add **{item}** as a separate area "
                     f"toward the end of the walkthrough.\n\n"
-                    f"*Shall we move on to the next concept?*"
+                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar?*"
                 )
             return
 
@@ -1426,7 +1433,7 @@ class ExplainableAgent(BlackBoxAgent):
                 f"Good point, that's an important angle. I've added it under "
                 f"**{target}**. Here's how it looks now:\n\n"
                 f"{self._render_pillar_block(target)}\n\n"
-                f"*Shall we move on to the next concept?*"
+                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
             )
         else:
             stored = self._format_sub_bullet(item)       # Fix 1: terse, no raw input
@@ -1439,7 +1446,7 @@ class ExplainableAgent(BlackBoxAgent):
                 f"I don't have a source for this one, but it's a good addition. "
                 f"I've added it under **{target}**. Here's how it looks now:\n\n"
                 f"{self._render_pillar_block(target)}\n\n"
-                f"*Shall we move on to the next concept?*"
+                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
             )
 
     def _stream_pushback(self, pending_type: str, detail: str):
@@ -1538,7 +1545,7 @@ class ExplainableAgent(BlackBoxAgent):
                     f"{description}\n\n"
                     f"{bullet_lines}"
                     f"{sources_line}\n\n"
-                    f"*Shall we move on to the next concept?*"
+                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
                 )
         else:
             swap    = kb.get_swap_concept()
@@ -1547,7 +1554,7 @@ class ExplainableAgent(BlackBoxAgent):
             prefix = (
                 f"**{concept}**\n\n"
                 f"{bullet_lines}\n\n"
-                f"*Shall we move on to the next concept?*"
+                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
             )
 
         if is_first:
@@ -1582,7 +1589,7 @@ class ExplainableAgent(BlackBoxAgent):
             "*I can see why you'd question this — shall we include it or move on without it?*"
             if on_swap else
             "End with exactly:\n"
-            "*Shall we move on to the next concept?*"
+            "*Shall we exclude this and move on to the next concept?*"
         )
 
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
