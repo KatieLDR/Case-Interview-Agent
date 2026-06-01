@@ -277,8 +277,8 @@ class HITLAgent(BlackBoxAgent):
             f"Take your time to read it. Feel free to ask any clarifying questions "
             f"about the case before you begin.\n\n"
             f"When you're ready, I'll walk you through a framework one concept at a "
-            f"time. For each one, you can **include** it, **skip** it, **add** your "
-            f"own points, or ask me a question before deciding.\n\n"
+            f"time. For each one, ask me a question before deciding or "
+            f"you can **include** it, **skip** it, **add** your own points.\n\n"
         )
 
     def get_pre_analysis_instruction(self) -> str:
@@ -360,7 +360,8 @@ class HITLAgent(BlackBoxAgent):
         self.walkthrough_done = True
         yield (
             "✅ We've covered all the concepts. "
-            "Click **‼️End Session** to see your final framework.\n\n"
+            "Click **‼️End Session** to see your final framework. "
+            "**Note: this cannot be undone**.\n\n"
         )
 
     def _get_proactive_prompt(self) -> str:
@@ -788,7 +789,7 @@ class HITLAgent(BlackBoxAgent):
                         # Match alternate wording to a withheld pillar so it renders
                         # real KB content when reached — consistent with the proactive
                         # path. Change log: 2026-05-29
-                        matched_withheld = self._match_withheld_pillar(new_concept)
+                        matched_withheld = self._match_pillar(new_concept)
                         resolved  = matched_withheld or new_concept
                         insert_at = self.walkthrough_index + 1
                         self.walkthrough_concepts.insert(insert_at, resolved)

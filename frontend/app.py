@@ -507,6 +507,8 @@ async def _attach_buttons(agent):
     Change log: 2026-05-01 — added warmup phase button
     Change log: 2026-05-06 — updated I'm Ready label
     Change log: 2026-05-12 — removed user_framework phase (replaced by tree/button flow)
+    Change log: 2026-05-31 — End Session gated on agent.has_main_contribution
+                             (agent-agnostic; agents without the flag default to shown)
     """
     if hasattr(agent, "phase") and agent.phase == "warmup":
         return
@@ -601,17 +603,33 @@ async def _attach_buttons(agent):
         ).send()
 
     else:
-        await cl.Message(
-            content="",
-            actions=[
-                cl.Action(
-                    name="get_summary",
-                    label="‼️End Session",
-                    description="End your session",
-                    payload={}
-                ),
-            ]
-        ).send()
+            # Gate End Session until the user has made a main-phase contribution.
+            # Agent-agnostic: agents that don't set the flag default to shown, so
+            # Explainable/HITL are unaffected unless the flag is deliberately added.
+            # BlackBox sets has_main_contribution=True on its first main-phase turn.
+            # Change log: 2026-05-31
+            if not getattr(agent, "has_main_contribution", True):
+                return
+
+            # BlackBox's End Session button is gated, so its begin_analysis line can't
+            # mention it — the irreversibility warning rides on the button description
+            # instead. Explainable already carries the note in its own begin_analysis
+            # message text, so it keeps the plain description (no echo). Change log: 2026-05-31
+            end_desc = "End your session"
+            if type(agent).__name__ == "BlackBoxAgent":
+                end_desc = "End your session — this cannot be undone"
+
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(
+                        name="get_summary",
+                        label="‼️End Session",
+                        description=end_desc,
+                        payload={}
+                    ),
+                ]
+            ).send()
 
 
 # ── Get summary button ─────────────────────────────────────────────────────

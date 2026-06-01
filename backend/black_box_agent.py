@@ -238,6 +238,7 @@ class BlackBoxAgent:
         self.original_case = get_case("black_box")
         self._pending      = False
         self.turn_count    = 0
+        self.has_main_contribution = False   # gates End Session button (app.py reads this)
 
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("black_box")
@@ -473,9 +474,10 @@ class BlackBoxAgent:
 
         yield (
             "\n\n---\n\n"
-            "📖 *When you are satisfied with the analysis, click "
-            "**‼️End Session** to finish. "
-            "Note that ending the session cannot be undone.*"
+            "📖 *Now it's your turn — do you have any questions about the framework "
+            "presented? Add, remove, or update anything as you like. Once you've shared "
+            "your first thoughts, an **‼️End Session** button will appear so you can "
+            "finish whenever you're ready.*"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -677,6 +679,12 @@ class BlackBoxAgent:
                     log_swap_questioned(self.session_id, "text", detail=user_input[:200])
         self._update_kg_if_framework_mentioned(user_input)
 
+        # Gate flag — flips True on the FIRST main-phase user message, on every
+        # path (override, swap-rejection, question, comment, redo). This is the
+        # common chokepoint; begin_analysis() streams model output and never
+        # reaches here, so the End Session button stays hidden until a real turn.
+        # Change log: 2026-05-31
+        self.has_main_contribution = True
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
