@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from backend.logger import (
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
 from backend import knowledge_graph as kg
+from backend import knowledge_base as kb
 
 load_dotenv()
 
@@ -137,7 +139,9 @@ Determine whether the user's message is attempting to steer or change the
 agent's output — i.e. the content, structure, or direction of the framework.
 
 If yes, classify the type:
-- "redo"             : wants a fresh answer or complete regeneration
+- "redo"             : wants the ENTIRE framework regenerated from scratch / a fresh start
+                       ("start over", "redo this", "start again", "regenerate everything").
+                       Removing ONE concept is NEVER redo — that is concept_excluded.
 - "concept_excluded" : wants to remove a specific concept or bucket
 - "concept_added"    : wants to add a new concept or bucket
 - "framework_switch" : wants to use a specific named different framework
@@ -151,6 +155,12 @@ This does NOT include:
 - Questions asking where a concept is ("where's X", "where is X")
 - Conversational rejections ("no thanks", "not needed", "no")
 - Asking what happened to a concept ("what happened to X")
+
+A leading "no" or "not" does NOT make a message non-steering. If a negation is
+followed by an instruction to add, remove, or change a concept, classify by the
+INSTRUCTION, not the leading word. Only a standalone negation with no instruction
+("no", "no thanks", "not needed") is non-steering.
+
 
 - "parent": the existing concept named after "under" / "as part of" / "within" — null if no parent explicitly named
 
@@ -175,6 +185,11 @@ Examples:
 - "what happened to feasibility" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "add data quality under Feasibility" → {"override": true, "type": "concept_added", "detail": "Data quality", "parent": "Feasibility", "confidence": 0.97}
 - "add cost analysis as part of Financial Impact" → {"override": true, "type": "concept_added", "detail": "Cost analysis", "parent": "Financial Impact", "confidence": 0.96}
+- "no, remove feasibility" → {"override": true, "type": "concept_excluded", "detail": "Feasibility", "parent": null, "confidence": 0.96}
+- "no I think we should exclude it" → {"override": true, "type": "concept_excluded", "detail": "it", "parent": null, "confidence": 0.93}
+- "remove it" → {"override": true, "type": "concept_excluded", "detail": "it", "parent": null, "confidence": 0.94}
+- "remove this" → {"override": true, "type": "concept_excluded", "detail": "this", "parent": null, "confidence": 0.93}
+- "start over" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.98}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -230,6 +245,56 @@ ANSWER_THRESHOLD      = 0.90
 OVERRIDE_THRESHOLD    = 0.85
 MAX_TURNS_PER_SESSION = 50
 
+# ── Deterministic add-flow matchers (source-free) — Change log: 2026-06-01 ──
+_REF_RE = re.compile(r"\s*\[[a-z]\]")
+def _strip_source_refs(text: str) -> str:
+    return _REF_RE.sub("", text or "").strip()
+
+ADD_MATCH_THRESHOLD = 0.75
+
+ADD_PILLAR_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+The user wants to add a new area: "{item}".
+Check whether it matches one of the framework's other areas below.
+
+─── OTHER AREAS ─────────────────────────────────────────────────────────────
+{pillars}
+────────────────────────────────────────────────────────────────────────────
+A match means the user's new area is essentially the same area of analysis as
+one of the areas above — same topic, possibly different wording.
+
+Respond ONLY with valid JSON, no markdown:
+{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
+"""
+
+ADD_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+The user added "{item}" under the pillar "{pillar}".
+Check whether it matches one of the pillar's existing key questions below.
+
+─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
+{key_questions}
+────────────────────────────────────────────────────────────────────────────
+A match means the addition is essentially the same point as one of the key
+questions above — same topic, possibly different wording.
+
+Respond ONLY with valid JSON, no markdown:
+{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
+"""
+
+SUB_BULLET_FORMAT_PROMPT = """
+You reformat a user's note into the terse style of a case-framework sub-bullet.
+Rules:
+- Keep the user's MEANING exactly — add no new content, examples, or sources.
+- Output ONE short phrase (roughly 4–12 words), no leading dash, no trailing period.
+- Drop filler ("I think", "we should also", "maybe", "consider").
+- Match this style:
+    "Payback period until cumulative benefits exceed total costs"
+    "Single-developer dependency and key-person risk"
+    "GDPR compliance for personal or confidential data"
+User note: "{item}"
+Output ONLY the reformatted phrase, nothing else.
+"""
 
 class BlackBoxAgent:
     def __init__(self, user_id: str = "anonymous"):
@@ -239,7 +304,12 @@ class BlackBoxAgent:
         self._pending      = False
         self.turn_count    = 0
         self.has_main_contribution = False   # gates End Session button (app.py reads this)
-
+        # ── Deterministic framework state — Change log: 2026-06-01 ─────────
+        self.user_sub_points    = {}    # pillar name -> [sub-bullet, ...]
+        self.user_added_pillars = []    # user-added pillar names (order preserved)
+        self.excluded_concepts  = []    # confirmed-removed pillar names
+        self.pending_excl       = None  # pillar awaiting "Are you sure?" confirmation
+        self._ack_index         = 0     # rotates the no-reprint acknowledgements
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("black_box")
 
@@ -538,53 +608,15 @@ class BlackBoxAgent:
     # ══════════════════════════════════════════════════════════════════════
 
     def _stream_framework_presentation(self):
-        """
-        Static framework presentation — no LLM call.
-        Builds text from knowledge_base.py and appends to history.
-        Swap concept injected at midpoint, sub-bullets from JSON.
-        Change log: 2026-05-28 — replaced LLM call with static text
-        """
-        from backend import knowledge_base as kb
-
-        shown      = kb.get_shown_pillars()
-        swap       = kb.get_swap_concept()
-        wrong      = self.concept_swap.config["wrong_concept"]
-        position   = len(shown) // 2
-        swap_bullets = swap.get("sub_bullets", []) if swap else []
-
-        lines = ["Here is how I would structure the analysis:\n"]
-        for i, pillar in enumerate(shown):
-            if i == position:
-                lines.append(f"**{wrong}**")
-                for bullet in swap_bullets:
-                    lines.append(f"- {bullet}")
-                lines.append("")
-            lines.append(f"**{pillar['name']}**")
-            for bullet in pillar.get("sub_bullets", []):
-                clean = bullet.split(" [")[0].strip()
-                lines.append(f"- {clean}")
-            lines.append("")
-
-        lines.append("*Feel free to add, remove, or question any part of this — let's build this together.*")
-
-        reply = "\n".join(lines)
-
-        self.history.append(
-            types.Content(
-                role="user",
-                parts=[types.Part(text="Please present the full structured framework for this case.")]
-            )
-        )
-        self.history.append(
-            types.Content(role="model", parts=[types.Part(text=reply)])
-        )
-
+        """Static first render of the full framework — no LLM. Change log: 2026-06-01"""
+        reply = self._render_full_framework(is_first=True)
+        self.history.append(types.Content(role="user",
+            parts=[types.Part(text="Please present the full structured framework for this case.")]))
+        self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         self.concept_swap.maybe_inject(reply)
         self.concept_swap.log_presented()
-
         update_answer(self.session_id, reply)
         log_agent_response(self.session_id, reply)
-
         yield reply
 
     # ══════════════════════════════════════════════════════════════════════
@@ -597,135 +629,347 @@ class BlackBoxAgent:
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # ── 1. Override detection first ────────────────────────────────────
+        # End-Session gate flips True on the first main-phase message (every path).
+        self.has_main_contribution = True
+        log_user_message(self.session_id, user_input)
+        self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+
+        # ── 0. Pending removal confirmation ────────────────────────────────
+        if self.pending_excl is not None:
+            yield from self._resolve_pending_excl(user_input)
+            return
+
+        # ── 1. Override detection ──────────────────────────────────────────
         override = self._detect_override(user_input)
 
-        # ── 2. Check if user explicitly removed the wrong concept ──────────
-        if (override and
-                override["type"] == "concept_excluded" and
-                override.get("detail") and
-                not self.concept_swap.is_detected and
-                self.concept_swap.is_injected):
-            wrong        = self.concept_swap.config["wrong_concept"]
-            detail_lower = override["detail"].lower()
-            wrong_lower  = wrong.lower()
-            if wrong_lower in detail_lower or detail_lower in wrong_lower:
-                self.concept_swap.force_detected()
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"included: {wrong}",
-                    new_context=f"user removed wrong concept explicitly: {wrong}",
-                )
-                print(f"[CONCEPT SWAP] detected via explicit removal")
-
-        # ── 3. Swap detection — only if injected AND no override ───────────
+        # ── 1a. Swap detection — only if presented AND no override ─────────
         cs_detected = False
         if self.concept_swap.is_injected and not override:
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"included: {self.concept_swap.config['wrong_concept']}",
-                    new_context=f"user rejected: {self.concept_swap.config['wrong_concept']}",
-                )
-                print(f"[CONCEPT SWAP] detected — exclusion active from next response")
+                wrong = self.concept_swap.config["wrong_concept"]
+                log_memory_override(self.session_id,
+                    old_context=f"included: {wrong}",
+                    new_context=f"user rejected: {wrong}")   # stays detection (#3), no log_delete
 
-        # ── 4. Override handling ───────────────────────────────────────────
+        # ── 2. Override handling — deterministic, no LLM framework regen ───
         if override:
-            if override["type"] != "concept_added":
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"override_type: {override['type']}",
-                    new_context=f"detail: {override['detail'] or 'n/a'}",
-                )
-            print(f"[OVERRIDE] type={override['type']}, "
-                  f"detail={override['detail']}, "
-                  f"confidence={override['confidence']}")
-            
-            if override["type"] == "concept_excluded":
-                _d = (override.get("detail") or "").lower()
-                _w = self.concept_swap.config["wrong_concept"].lower()
-                if not (_d and (_w in _d or _d in _w)):   # swap removal stays detection (#3)
-                    log_delete(self.session_id, override.get("detail") or "current concept", "text")
-
             if override["type"] == "redo":
-                if self.concept_swap.is_detected:
-                    self.history = self._strip_concept_swap_from_history()
-                yield "Noted! Let me generate a fresh answer...\n\n"
-                user_input = (
-                    f"Please generate a completely fresh structured "
-                    f"answer for this case:\n\n{self.original_case}"
-                )
-                log_user_message(self.session_id, "[REDO TRIGGERED]")
+                yield from self._handle_redo(); return
+            if override["type"] == "concept_excluded" and override.get("detail"):
+                yield from self._begin_removal(override["detail"], user_input); return
+            if override["type"] == "concept_added" and override.get("detail"):
+                yield from self._handle_add(override["detail"], override.get("parent")); return
+            # framework_switch / other → no-op ack (framework is fixed for the study)
+            yield from self._ack_no_reprint(); return
 
-            elif override["type"] == "concept_added" and override.get("detail"):
-                new_concept = override["detail"]
-                log_concept_added(self.session_id, new_concept)
-                if override.get("parent"):
-                    log_add_sub_bullet(self.session_id, new_concept, "text")
-                else:
-                    log_add_pillar(self.session_id, new_concept, "text")
-                print(f"[CONCEPT ADDED] '{new_concept}' — LLM will incorporate via history")
-                
-        # ── Question / swap-question logging — non-steering turns only ──────
-        if override is None and not cs_detected:
-            swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
-            q = self._classify_question(
-                user_input, self.concept_swap.config["wrong_concept"], swap_active
-            )
-            if q["is_question"]:
-                log_question(self.session_id, "text", detail=user_input[:200])
-                if swap_active and q["is_about_swap"]:
-                    log_swap_questioned(self.session_id, "text", detail=user_input[:200])
-        self._update_kg_if_framework_mentioned(user_input)
+        # ── 3. Swap just caught — neutral ack + re-render without it ────────
+        if cs_detected:
+            yield from self._yield_rerender("Understood — I've taken that out.\n\n")
+            return
 
-        # Gate flag — flips True on the FIRST main-phase user message, on every
-        # path (override, swap-rejection, question, comment, redo). This is the
-        # common chokepoint; begin_analysis() streams model output and never
-        # reaches here, so the End Session button stays hidden until a real turn.
-        # Change log: 2026-05-31
-        self.has_main_contribution = True
-        log_user_message(self.session_id, user_input)
-        self.history.append(
-            types.Content(role="user", parts=[types.Part(text=user_input)])
-        )
+        # ── 4. Question vs contextless reply ───────────────────────────────
+        swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
+        q = self._classify_question(user_input,
+                                    self.concept_swap.config["wrong_concept"], swap_active)
+        if q["is_question"]:
+            log_question(self.session_id, "text", detail=user_input[:200])
+            if swap_active and q["is_about_swap"]:
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
+            yield from self._stream_qa(user_input)
+        else:
+            yield from self._ack_no_reprint()
 
-        self._pending = True
-        full_reply = []
+    # ── Deterministic render ───────────────────────────────────────────────
+    def _render_full_framework(self, is_first: bool = False, closing: bool = True) -> str:
+        from backend import knowledge_base as kb
+        excluded  = [e.lower() for e in self.excluded_concepts]
+        shown     = [p for p in kb.get_shown_pillars() if p["name"].lower() not in excluded]
+        swap      = kb.get_swap_concept()
+        wrong     = self.concept_swap.config["wrong_concept"]
+        swap_bul  = swap.get("sub_bullets", []) if swap else []
+        show_swap = not self.concept_swap.is_detected
+        position  = len(shown) // 2
+
+        lines = ["💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is how I would structure the analysis:\n"] if is_first else []
+
+        def emit(name, kb_bullets):
+            lines.append(f"**{name}**")
+            for b in kb_bullets:
+                lines.append(f"- {_strip_source_refs(b)}")
+            for sp in self.user_sub_points.get(name, []):
+                lines.append(f"- {sp}")
+            lines.append("")
+
+        for i, p in enumerate(shown):
+            if show_swap and i == position:
+                lines.append(f"**{wrong}**")
+                for b in swap_bul:
+                    lines.append(f"- {_strip_source_refs(b)}")
+                lines.append("")
+            emit(p["name"], p.get("sub_bullets", []))
+        if show_swap and position >= len(shown):
+            lines.append(f"**{wrong}**")
+            for b in swap_bul:
+                lines.append(f"- {_strip_source_refs(b)}")
+            lines.append("")
+        for name in self.user_added_pillars:
+            if name.lower() in excluded:
+                continue
+            kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == name.lower()), None)
+            emit(name, kbp.get("sub_bullets", []) if kbp else [])
+
+        if closing:
+            lines.append("*Feel free to add, remove, or question any part of this — let's build this together.*")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _yield_rerender(self, preamble: str = ""):
+        reply = preamble + self._render_full_framework(is_first=False)
+        self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
+        update_answer(self.session_id, reply)
+        log_agent_response(self.session_id, reply)
+        yield reply
+
+    # ── Removal (with confirmation) ────────────────────────────────────────
+    def _begin_removal(self, detail: str, user_input: str = ""):
+        wrong   = self.concept_swap.config["wrong_concept"]
+        is_swap = self.concept_swap.matches(user_input) or self.concept_swap.matches(detail)
+        if is_swap and self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            self.pending_excl = wrong                      # detection logged on confirm
+        else:
+            target = self._normalize_pillar(detail)
+            if not self._is_known_pillar(target):
+                # Unresolved referent (pronoun / unknown) — ask, don't guess or redo.
+                msg = ("Which part would you like to remove? "
+                       "You can name the pillar or the point.")
+                self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+                log_agent_response(self.session_id, msg)
+                yield msg
+                return
+            self.pending_excl = target
+            log_delete(self.session_id, target, "text")    # removal intent (#1)
+        msg = (f"Are you sure you want to remove **{self.pending_excl}**?\n\n"
+               f"*Reply **yes** to confirm, or **no** to keep it.*")
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def _is_known_pillar(self, name: str) -> bool:
+        from backend import knowledge_base as kb
+        n = (name or "").lower().strip()
+        if not n:
+            return False
+        if n in [p["name"].lower() for p in kb.get_shown_pillars()]:
+            return True
+        return n in [p.lower() for p in self.user_added_pillars]
+
+    def _resolve_pending_excl(self, user_input: str):
+        concept = self.pending_excl
+        self.pending_excl = None
+        if self._is_affirmative(user_input):
+            wrong = self.concept_swap.config["wrong_concept"]
+            if concept.lower() == wrong.lower():
+                self.concept_swap.force_detected()         # swap removal = detection (#3)
+            elif concept.lower() not in [e.lower() for e in self.excluded_concepts]:
+                self.excluded_concepts.append(concept)
+            log_memory_override(self.session_id,
+                old_context=f"concept in framework: {concept}",
+                new_context=f"user confirmed removal: {concept}")
+            yield from self._yield_rerender(f"Done — I've removed **{concept}**.\n\n")
+        else:
+            msg = f"No problem — I'll keep **{concept}**."
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+
+    def _is_affirmative(self, user_input: str) -> bool:
+        prompt = ('Classify whether the user is CONFIRMING an action they were asked to '
+                  'confirm (yes/go ahead) versus DECLINING (no/keep it). Respond ONLY with '
+                  'JSON: {"confirm": true or false}\n\nUser: "%s"' % user_input)
         try:
-            for chunk in client.models.generate_content_stream(
-                model=MAIN_MODEL,
-                contents=self.history,
-                config=types.GenerateContentConfig(
-                    system_instruction=self._build_system_prompt(),
-                ),
-            ):
-                token = chunk.text or ""
-                full_reply.append(token)
-                yield token
-
-            reply = "".join(full_reply)
-
-            was_injected   = self.concept_swap.is_injected
-            injected_reply = self.concept_swap.maybe_inject(reply)
-            if injected_reply != reply:
-                yield injected_reply[len(reply):]
-            reply = injected_reply
-
-            if self.concept_swap.is_injected and not was_injected:
-                self.concept_swap.log_presented()
-
-            self.history.append(
-                types.Content(role="model", parts=[types.Part(text=reply)])
-            )
-            if self._is_answer(reply):
-                update_answer(self.session_id, reply)
-            log_agent_response(self.session_id, reply)
-
+            r = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
+            return bool(json.loads(self._strip_fences(r.text)).get("confirm", False))
         except Exception as e:
-            yield f"Sorry, I encountered an error: {str(e)}"
-        finally:
-            self._pending = False
+            print(f"[CONFIRM] error: {e}")
+            return False   # safe default — never delete on uncertainty
+
+    # ── Add (silent placement + matching) ──────────────────────────────────
+    def _handle_add(self, detail: str, parent: str | None):
+        from backend import knowledge_base as kb
+        if parent:
+            target = self._normalize_pillar(parent)
+            if not self._is_known_pillar(target):
+                matched = self._match_pillar(parent)      # semantic resolve (e.g. "use case")
+                if matched:
+                    target = self._normalize_pillar(matched)
+            self._ensure_pillar_visible(target)
+            _, is_new = self._store_sub_point(target, detail, "text")
+            pre = (f"Added under **{target}**.\n\n" if is_new else
+                   f"That's already under **{target}**.\n\n")
+            yield from self._yield_rerender(pre); return
+        matched = self._match_pillar(detail)
+        if matched and matched.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
+            _, is_new = self._store_sub_point(matched, detail, "text")
+            pre = (f"Added under **{matched}**.\n\n" if is_new else
+                   f"That's already under **{matched}**.\n\n")
+            yield from self._yield_rerender(pre); return
+        new_name = matched or detail.strip()
+        if new_name.lower() not in [p.lower() for p in self.user_added_pillars]:
+            self.user_added_pillars.append(new_name)
+            log_concept_added(self.session_id, new_name)
+            log_add_pillar(self.session_id, new_name, "text")
+            pre = f"Added **{new_name}** as a new area.\n\n"
+        else:
+            pre = f"**{new_name}** is already in the framework.\n\n"
+        yield from self._yield_rerender(pre)
+
+    def _ensure_pillar_visible(self, name: str):
+        from backend import knowledge_base as kb
+        if name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
+            return
+        if name.lower() in [p.lower() for p in self.user_added_pillars]:
+            return
+        self.user_added_pillars.append(name)
+        log_add_pillar(self.session_id, name, "text")
+
+    def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
+        pillar  = self._normalize_pillar(pillar)
+        matched = self._match_key_question(item, pillar)
+        stored  = matched if matched else self._format_sub_bullet(item)
+        # Already a shown static bullet on this pillar (incl. KB-backed user pillars)
+        # → already in the framework, don't duplicate. Change log: 2026-06-02
+        kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == pillar.lower()), None)
+        if any(stored.lower() == _strip_source_refs(b).lower()
+               for b in (kbp.get("sub_bullets", []) if kbp else [])):
+            return stored, False
+        # Re-placement: if this exact point already sits under another pillar, move it.
+        for other, pts in self.user_sub_points.items():
+            if other.lower() != pillar.lower():
+                for s in list(pts):
+                    if s.lower() == stored.lower():
+                        pts.remove(s)
+                        print(f"[MOVE] '{stored}' {other} -> {pillar}")
+        existing = self.user_sub_points.setdefault(pillar, [])
+        if any(s.lower() == stored.lower() for s in existing):
+            return stored, False
+        existing.append(stored)
+        log_concept_added(self.session_id, item)
+        log_add_sub_bullet(self.session_id, stored, modality)
+        return stored, True
+
+    def _normalize_pillar(self, name: str) -> str:
+        from backend import knowledge_base as kb
+        for p in kb.get_all_pillars():
+            if p["name"].lower() == name.lower():
+                return p["name"]
+        for p in self.user_added_pillars:
+            if p.lower() == name.lower():
+                return p
+        return name
+
+    def _match_pillar(self, item: str):
+        from backend import knowledge_base as kb
+        pillars = kb.get_all_pillars()
+        if not pillars:
+            return None
+        block = "\n".join(f"- {p['name']}" for p in pillars)
+        try:
+            r = client.models.generate_content(model=CLASSIFIER_MODEL,
+                contents=ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block))
+            parsed = json.loads(self._strip_fences(r.text))
+            if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
+                return parsed.get("matched_pillar")
+        except Exception as e:
+            print(f"[PILLAR MATCH] error: {e}")
+        return None
+
+    def _match_key_question(self, item: str, pillar_name: str):
+        from backend import knowledge_base as kb
+        pillar = next((p for p in kb.get_all_pillars()
+                       if p["name"].lower() == pillar_name.lower()), None)
+        if pillar is None:
+            return None
+        kqs = pillar.get("key_questions", [])
+        if not kqs:
+            return None
+        kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(kqs))
+        try:
+            r = client.models.generate_content(model=CLASSIFIER_MODEL,
+                contents=ADD_MATCH_PROMPT.format(item=item, pillar=pillar_name, key_questions=kq_block))
+            parsed = json.loads(self._strip_fences(r.text))
+            if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
+                idx = parsed.get("matched_index")
+                if idx is not None and 0 <= idx < len(kqs):
+                    return _strip_source_refs(kqs[idx])
+        except Exception as e:
+            print(f"[ADD MATCH] error: {e}")
+        return None
+
+    def _format_sub_bullet(self, item: str) -> str:
+        try:
+            r = client.models.generate_content(model=CLASSIFIER_MODEL,
+                contents=SUB_BULLET_FORMAT_PROMPT.format(item=item))
+            out = _strip_source_refs(self._strip_fences(r.text)).strip().strip("-• ").rstrip(".")
+            if out:
+                return out
+        except Exception as e:
+            print(f"[SUB-POINT FORMAT] error: {e}")
+        return item.strip()
+
+    # ── Redo / Q&A / ack / summary ─────────────────────────────────────────
+    def _handle_redo(self):
+        self.user_sub_points    = {}
+        self.user_added_pillars = []
+        self.excluded_concepts  = []
+        self.pending_excl       = None
+        self.has_main_contribution = False
+        log_user_message(self.session_id, "[REDO TRIGGERED]")
+        reply = "Noted — here's a fresh framework.\n\n" + self._render_full_framework(is_first=True)
+        self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
+        update_answer(self.session_id, reply)
+        log_agent_response(self.session_id, reply)
+        yield reply
+
+    def _stream_qa(self, user_input: str):
+        framework    = self.kg_context["framework"]
+        concepts_str = ", ".join(self.kg_context["concepts"]) or \
+                       "Strategic Fit, Use Case and Solution, Feasibility"
+        instruction = (
+            "You are a strategic consultant answering a question about a framework "
+            "you have already presented.\n\n"
+            f"─── FRAMEWORK CONTEXT ────────────────────────────────────────────────\n"
+            f"Framework : {framework}\nPillars   : {concepts_str}\n"
+            f"──────────────────────────────────────────────────────────────────────\n\n"
+            f"{self.concept_swap.get_system_prompt_block()}"
+            "─── ANSWER RULES ─────────────────────────────────────────────────────\n"
+            "Answer the question in 2–3 sentences, plain language, grounded in the case.\n"
+            "Do NOT reprint, restate, or regenerate the framework or any pillar block.\n"
+            "Do NOT claim to add, remove, or change anything — answer only.\n"
+            "Ask at most one short follow-up question.\n"
+            "──────────────────────────────────────────────────────────────────────\n"
+        )
+        yield from self._stream_with_instruction(instruction=instruction)
+
+    def _ack_no_reprint(self):
+        acks = ["Sure — I'm here if you'd like to revisit anything.",
+                "Understood — let me know if anything comes to mind.",
+                "Noted — happy to adjust if you think of something."]
+        ack = acks[self._ack_index % len(acks)]
+        self._ack_index += 1
+        self.history.append(types.Content(role="model", parts=[types.Part(text=ack)]))
+        log_agent_response(self.session_id, ack)
+        yield ack
+
+    def _stream_summary(self):
+        summary = "**Final Framework Summary**\n\n" + \
+                  self._render_full_framework(is_first=False, closing=False)
+        self.history.append(types.Content(role="model", parts=[types.Part(text=summary)]))
+        update_answer(self.session_id, summary)
+        log_agent_response(self.session_id, summary)
+        yield summary
+
+    def get_summary(self):
+        yield from self._stream_summary()
 
     # ══════════════════════════════════════════════════════════════════════
     # Non-streaming fallback (summary)

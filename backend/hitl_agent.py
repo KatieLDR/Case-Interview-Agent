@@ -249,6 +249,8 @@ class HITLAgent(BlackBoxAgent):
         self.prompt_index              = 0
         self.ack_index                 = 0
         self.user_contributed_concepts = set()
+        self.navigated_pillars         = set()   # dedupe add_pillar on navigate-to-planned (task 1)
+
 
         # ── Conversation history ───────────────────────────────────────────
         self.history = [
@@ -556,6 +558,15 @@ class HITLAgent(BlackBoxAgent):
         # Matched → canonical key-question wording (source-free). No match →
         # reformat the user's words into framework-bullet style (no new content).
         stored  = matched if matched else self._format_sub_bullet(item)
+        # Already a presented bullet for this concept (KB, swap, OR LLM-generated)
+        # → already shown, don't duplicate. Source = concept_blocks, not KB, so this
+        # also catches duplicates of generated bullets for user-added concepts.
+        # Change log: 2026-06-02
+        block = self.concept_blocks.get(pillar, "")
+        shown_lines = [l.strip().lstrip("-• ").strip().lower()
+                       for l in block.splitlines() if l.strip()]
+        if stored.lower() in shown_lines:
+            return stored, False
         existing = self.user_sub_points.setdefault(pillar, [])
         if any(s.lower() == stored.lower() for s in existing):
             logging.info(f"[SUB-POINT] duplicate skipped: '{stored}' under '{pillar}'")
@@ -654,6 +665,12 @@ class HITLAgent(BlackBoxAgent):
                     if idx != self.walkthrough_index:
                         self.walkthrough_concepts.pop(idx)
                         self.walkthrough_concepts.insert(self.walkthrough_index, target)
+                    # Navigate-to-planned = agency: participant can't see what was
+                    # planned, so proactively naming it is an add_pillar act.
+                    # Log once per concept. Change log: 2026-06-02
+                    if target.lower() not in self.navigated_pillars:
+                        self.navigated_pillars.add(target.lower())
+                        log_add_pillar(self.session_id, target, "text")
                     logging.info(f"[PROACTIVE] navigate to '{target}' (was idx={idx})")
                     yield f"Sure — let's look at **{target}** now.\n\n"
                     yield from self._stream_concept(is_first=False)
@@ -688,10 +705,9 @@ class HITLAgent(BlackBoxAgent):
                 override.get("detail") and
                 not self.concept_swap.is_detected and
                 self.swap_presented):
-            wrong        = self.concept_swap.config["wrong_concept"]
-            detail_lower = override["detail"].lower()
-            wrong_lower  = wrong.lower()
-            if wrong_lower in detail_lower or detail_lower in wrong_lower:
+            wrong = self.concept_swap.config["wrong_concept"]
+            if (self.concept_swap.matches(override["detail"]) or
+                    self.concept_swap.matches(user_input)):
                 self.concept_swap.force_detected()
                 if wrong not in self.excluded_concepts:
                     self.excluded_concepts.append(wrong)
@@ -756,6 +772,7 @@ class HITLAgent(BlackBoxAgent):
                 self.prompt_index              = 0
                 self.ack_index                 = 0
                 self.user_contributed_concepts = set()
+                self.navigated_pillars         = set()
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted — let me start the walkthrough fresh.\n\n"
@@ -836,9 +853,14 @@ class HITLAgent(BlackBoxAgent):
 
         else:
             if override is None:   # pure question/comment, not a steering action
-                _on_swap = (self.walkthrough_index == self.swap_position
-                            and self.swap_presented
-                            and not self.concept_swap.is_detected)
+                current  = self._current_concept()
+                _on_swap = (self.swap_presented
+                            and not self.concept_swap.is_detected
+                            and current is not None
+                            and self._is_wrong_concept(current))
+                # Parity with BlackBox/Explainable: a typed turn landing in Q&A IS a
+                # question — log it unconditionally. swap_questioned is a subset
+                # logged on top (Finding A). Change log: 2026-06-02
                 log_question(self.session_id, "text", detail=user_input[:200])
                 if _on_swap:
                     log_swap_questioned(self.session_id, "text", detail=user_input[:200])
@@ -957,7 +979,7 @@ class HITLAgent(BlackBoxAgent):
 
             prefix = f"**{concept}**\n{display}"
             if is_first:
-                prefix = "Here is how I would structure this analysis:\n\n" + prefix
+                prefix = "💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is how I would structure this analysis:\n\n" + prefix
 
             self.history.append(
                 types.Content(role="user",
@@ -1016,11 +1038,13 @@ class HITLAgent(BlackBoxAgent):
         logging.info(f"[CONCEPT BLOCK] LLM-generated stored for '{concept}'")
 
     def _stream_concept_qa(self, just_added: str | None = None):
-        concept = self._current_concept() or "the current concept"
+        current = self._current_concept()
+        concept = current or "the current concept"
         on_swap = (
-            self.walkthrough_index == self.swap_position
-            and self.swap_presented
+            self.swap_presented
             and not self.concept_swap.is_detected
+            and current is not None
+            and self._is_wrong_concept(current)
         )
 
         added_note = ""

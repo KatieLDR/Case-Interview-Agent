@@ -427,6 +427,11 @@ This does NOT include:
 - Questions asking if something belongs to a concept ("is X part of Y?")
 - Single word responses ("no", "yes", "ok")
 
+A leading "no" or "not" does NOT make a message non-steering. If a negation is
+followed by an instruction to add, remove, or change a concept, classify by the
+INSTRUCTION, not the leading word ("no, remove X" is concept_excluded). Only a
+standalone negation with no instruction ("no", "no thanks") is non-steering.
+
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
@@ -451,6 +456,8 @@ Examples (assuming concepts include: Strategic Fit, Use Case and Solution, Feasi
 - "why are we considering this?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "why is this here?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "is it part of Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "no, remove this" → {{"override": true, "type": "concept_excluded", "detail": "this", "confidence": 0.94}}
+- "no I think we should exclude it" → {{"override": true, "type": "concept_excluded", "detail": "it", "confidence": 0.93}}
 """
 
 
@@ -1276,9 +1283,11 @@ class ExplainableAgent(BlackBoxAgent):
                 yield from self._stream_concept(is_first=False)
 
         else:
-            _on_swap = (self.walkthrough_index == self.swap_position
-                        and self.swap_presented
-                        and not self.concept_swap.is_detected)
+            current  = self._current_concept()
+            _on_swap = (self.swap_presented
+                        and not self.concept_swap.is_detected
+                        and current is not None
+                        and self._is_wrong_concept(current))
             log_question(self.session_id, "text", detail=user_input[:200])
             if _on_swap:
                 log_swap_questioned(self.session_id, "text", detail=user_input[:200])
@@ -1424,7 +1433,14 @@ class ExplainableAgent(BlackBoxAgent):
 
         if match:
             stored = match["question"]                  # keeps its inline refs
-            self.user_sub_points[target].append(stored)
+            kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == target.lower()), None)
+            already_shown = any(
+                _INLINE_REF_RE.sub("", stored).strip().lower()
+                == _INLINE_REF_RE.sub("", b).strip().lower()
+                for b in (kbp.get("sub_bullets", []) if kbp else [])
+            )
+            if not already_shown and stored not in self.user_sub_points[target]:
+                self.user_sub_points[target].append(stored)
             log_concept_added(self.session_id, item)
             log_add_sub_bullet(self.session_id, stored, "text")
             self.pending_add = None
@@ -1579,10 +1595,12 @@ class ExplainableAgent(BlackBoxAgent):
         yield prefix
 
     def _stream_concept_qa(self, just_added: str | None = None):
-        concept = self._current_concept() or "the current concept"
-        on_swap = (self.walkthrough_index == self.swap_position
-                   and self.swap_presented
-                   and not self.concept_swap.is_detected)
+        current = self._current_concept()
+        concept = current or "the current concept"
+        on_swap = (self.swap_presented
+                   and not self.concept_swap.is_detected
+                   and current is not None
+                   and self._is_wrong_concept(current))
 
         closing = (
             "End with exactly:\n"

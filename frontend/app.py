@@ -659,7 +659,7 @@ async def _send_summary():
         return
 
     # ── HITL — stream summary directly from walkthrough state ─────────
-    if agent_type in ("hitl", "explainable"):
+    if agent_type in ("hitl", "explainable", "black_box"):
         cl.user_session.set("ended", True)
         agent.end_session()
 
