@@ -1092,6 +1092,15 @@ class HITLAgent(BlackBoxAgent):
             instruction = instruction,
             prefix      = added_note,
         )
+        # After a question, channel the decision back to the buttons — stops users
+        # from typing "skip this" (which only logs a phantom override and doesn't
+        # act). Gated on should_show_buttons so it never points at hidden buttons.
+        # Change log: 2026-06-02
+        if self.should_show_buttons():
+            yield (
+                "\n\n*Would you like to **include** or **skip** this, "
+                "or **➕ add** a point? Just use the buttons below.*"
+            )
     def _concept_grounding(self, concept: str) -> str:
         """Q&A grounding: description + key-questions, source refs stripped
         (HITL suppresses sources). Change log: 2026-05-31"""
