@@ -1626,6 +1626,14 @@ class ExplainableAgent(BlackBoxAgent):
                 "──────────────────────────────────────────────────────────────────────\n"
             )
 
+
+        added_note = ""
+        if just_added:
+            added_note = (
+                "Good idea — I'll add **" + just_added
+                + "** after we finish **" + concept + "**.\n\n"
+            )
+
         instruction = (
             qa_prompt + "\n\n"
             "─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
@@ -1641,29 +1649,8 @@ class ExplainableAgent(BlackBoxAgent):
             ) + "\n"
             "──────────────────────────────────────────────────────────────────────\n"
         )
-
-        added_note = ""
-        if just_added:
-            added_note = (
-                "Good idea — I'll add **" + just_added
-                + "** after we finish **" + concept + "**.\n\n"
-            )
-
-        instruction = (
-            qa_prompt + "\n\n"
-            "─── CLOSING INSTRUCTION ──────────────────────────────────────────────\n"
-            + closing + "\n"
-            "─── CONTEXT ──────────────────────────────────────────────────────────\n"
-            "Current concept: **" + concept + "**\n"
-            "On swap concept: " + str(on_swap) + "\n"
-            "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
-            "Framework concepts (in order): " + ", ".join(
-                c for c in self.walkthrough_concepts
-                if just_added is None or c.lower() != just_added.lower()
-            ) + "\n"
-            "──────────────────────────────────────────────────────────────────────\n"
-        )
-
+        # logging.info("[QA GROUNDING] present=%s concept=%s",
+        #      "KNOWN POINTS FOR THIS CONCEPT" in instruction, concept)
         yield from self._stream_with_instruction(instruction=instruction, prefix=added_note)
 
     def _stream_swap_caught(self):

@@ -1088,6 +1088,8 @@ class HITLAgent(BlackBoxAgent):
             f"─────────────────────────────────────────────────────────────\n"
         )
 
+        # logging.info("[QA GROUNDING] present=%s concept=%s",
+        #              "KNOWN POINTS FOR THIS CONCEPT" in instruction, concept)
         yield from self._stream_with_instruction(
             instruction = instruction,
             prefix      = added_note,
