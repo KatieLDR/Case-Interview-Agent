@@ -549,7 +549,7 @@ class ExplainableAgent(BlackBoxAgent):
         # ── User-added pillars — tracked separately so summary always
         #    includes them regardless of walkthrough position.
         # Change log: 2026-05-28
-        self.user_added_pillars = []
+        # self.user_added_pillars = []
 
         self.history = [
             types.Content(

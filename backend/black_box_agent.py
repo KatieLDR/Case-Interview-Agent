@@ -245,6 +245,13 @@ ANSWER_THRESHOLD      = 0.90
 OVERRIDE_THRESHOLD    = 0.85
 MAX_TURNS_PER_SESSION = 50
 
+# Light cancel-escape phrases for the "which part to remove?" prompt (no LLM).
+_CANCEL_PHRASES = {
+    "never mind", "nevermind", "cancel", "stop", "forget it", "forget about it",
+    "no", "nope", "no thanks", "nothing", "none", "leave it", "leave it alone",
+    "keep it", "keep everything", "actually no", "skip", "skip it", "dont", "don't",
+}
+
 # ── Deterministic add-flow matchers (source-free) — Change log: 2026-06-01 ──
 _REF_RE = re.compile(r"\s*\[[a-z]\]")
 def _strip_source_refs(text: str) -> str:
@@ -252,16 +259,25 @@ def _strip_source_refs(text: str) -> str:
 
 ADD_MATCH_THRESHOLD = 0.75
 
+# Whole-KB concept search runs over ~34 non-swap concepts (much broader than the
+# 5-item pillar-name search), and a false hit REVEALS a withheld pillar — i.e.
+# stimulus contamination. So this path uses a deliberately higher bar than the
+# pillar matcher. Change log: 2026-06-02
+CONCEPT_MATCH_THRESHOLD = 0.85
+
 ADD_PILLAR_MATCH_PROMPT = """
 You are a classifier for a case interview framework tool.
 The user wants to add a new area: "{item}".
-Check whether it matches one of the framework's other areas below.
+Each area below is given as "Name: description". Check whether the user's new
+area is essentially the SAME AREA of analysis as one of them — same topic or
+clearly the same scope, possibly different wording.
 
-─── OTHER AREAS ─────────────────────────────────────────────────────────────
+─── AREAS ───────────────────────────────────────────────────────────────────
 {pillars}
 ────────────────────────────────────────────────────────────────────────────
-A match means the user's new area is essentially the same area of analysis as
-one of the areas above — same topic, possibly different wording.
+Match only at the level of the whole AREA. If the user's text is just one
+specific point that would sit *inside* an area (rather than naming the area
+itself), set matched=false.
 
 Respond ONLY with valid JSON, no markdown:
 {{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
@@ -277,6 +293,29 @@ Check whether it matches one of the pillar's existing key questions below.
 ────────────────────────────────────────────────────────────────────────────
 A match means the addition is essentially the same point as one of the key
 questions above — same topic, possibly different wording.
+
+Respond ONLY with valid JSON, no markdown:
+{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
+"""
+
+# Whole-KB concept matcher — searches every analytical concept (name + explanation)
+# across ALL pillars, shown or withheld, so a user naming a sub-concept of a withheld
+# pillar ("breakeven point") can be resolved to its parent ("Financial Impact").
+# The swap concept is excluded by the caller (swap:true). Change log: 2026-06-02
+ADD_CONCEPT_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+The user wrote: "{item}".
+
+Below is a numbered list of analytical concepts, each as "Name: explanation".
+Decide whether the user's text clearly refers to ONE of these concepts — i.e.
+it is essentially that concept, or a specific instance of it, possibly worded
+differently.
+
+─── CONCEPTS ────────────────────────────────────────────────────────────────
+{concepts}
+────────────────────────────────────────────────────────────────────────────
+Match ONLY if you are confident it is essentially that concept. If the user's
+text is only loosely or topically related, set matched=false.
 
 Respond ONLY with valid JSON, no markdown:
 {{"matched": true or false, "matched_index": integer or null, "confidence": float}}
@@ -309,6 +348,7 @@ class BlackBoxAgent:
         self.user_added_pillars = []    # user-added pillar names (order preserved)
         self.excluded_concepts  = []    # confirmed-removed pillar names
         self.pending_excl       = None  # pillar awaiting "Are you sure?" confirmation
+        self.awaiting_removal_target = False  # True after an unresolved "remove X" — next reply names the target
         self._ack_index         = 0     # rotates the no-reprint acknowledgements
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("black_box")
@@ -638,7 +678,14 @@ class BlackBoxAgent:
         if self.pending_excl is not None:
             yield from self._resolve_pending_excl(user_input)
             return
-
+        # ── 0b. Awaiting removal target (unresolved referent) ──────────────
+        if self.awaiting_removal_target:
+            self.awaiting_removal_target = False
+            if self._is_cancel(user_input):
+                yield from self._cancel_removal()
+                return
+            yield from self._begin_removal(user_input, user_input)
+            return
         # ── 1. Override detection ──────────────────────────────────────────
         override = self._detect_override(user_input)
 
@@ -739,9 +786,18 @@ class BlackBoxAgent:
         else:
             target = self._normalize_pillar(detail)
             if not self._is_known_pillar(target):
-                # Unresolved referent (pronoun / unknown) — ask, don't guess or redo.
+                # Unresolved referent — confirm what they mean, don't guess/redo.
+                # Stay in removal; the next reply re-enters here via step 0b.
+                self.awaiting_removal_target = True
+                options = self._removable_pillar_names()
+                options_line = (
+                    "\n\nCurrently in the framework: "
+                    + ", ".join(f"**{o}**" for o in options) + "."
+                ) if options else ""
                 msg = ("Which part would you like to remove? "
-                       "You can name the pillar or the point.")
+                       "You can name the pillar or the point."
+                       + options_line
+                       + "\n\n*(Or say **never mind** to keep everything as is.)*")
                 self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
                 log_agent_response(self.session_id, msg)
                 yield msg
@@ -762,7 +818,43 @@ class BlackBoxAgent:
         if n in [p["name"].lower() for p in kb.get_shown_pillars()]:
             return True
         return n in [p.lower() for p in self.user_added_pillars]
+    
+    def _removable_pillar_names(self) -> list[str]:
+        """Pillars currently visible to the user (mirrors the rendered framework)."""
+        from backend import knowledge_base as kb
+        excluded = [e.lower() for e in self.excluded_concepts]
+        names = [p["name"] for p in kb.get_shown_pillars()
+                 if p["name"].lower() not in excluded]
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            names.append(self.concept_swap.config["wrong_concept"])
+        for name in self.user_added_pillars:
+            if name.lower() not in excluded and name not in names:
+                names.append(name)
+        return names
 
+    def _is_cancel(self, user_input: str) -> bool:
+        """LLM intent check: is the user backing out of the removal prompt
+        (keep everything / never mind) rather than naming a part to remove?"""
+        prompt = (
+            "A user was asked which part of a framework they want to REMOVE.\n"
+            "Decide whether their reply is BACKING OUT / cancelling the removal "
+            "(wants to keep everything, never mind, stop) — as opposed to naming "
+            "a part to remove or saying anything else.\n"
+            'Respond ONLY with JSON, no markdown: {"cancel": true or false}\n\n'
+            f'Reply: "{user_input}"'
+        )
+        try:
+            r = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
+            return bool(json.loads(self._strip_fences(r.text)).get("cancel", False))
+        except Exception as e:
+            print(f"[CANCEL] error: {e}")
+            return False   # safe default — re-ask rather than abandon the removal
+
+    def _cancel_removal(self):
+        msg = "No problem — I'll keep everything as is. Let me know if there's anything else."
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
     def _resolve_pending_excl(self, user_input: str):
         concept = self.pending_excl
         self.pending_excl = None
@@ -794,6 +886,13 @@ class BlackBoxAgent:
             return False   # safe default — never delete on uncertainty
 
     # ── Add (silent placement + matching) ──────────────────────────────────
+    # Two-stage match — Change log: 2026-06-02
+    #   Stage 1: pillar-level match (user named the AREA). Reveal pillar, log add_pillar.
+    #   Stage 2: whole-KB concept search (user named a POINT inside an area). Reveal the
+    #            parent pillar silently and log add_sub_bullet ONLY — naming a sub-concept
+    #            is a sub-bullet act, not a pillar act, so the add_pillar count must not
+    #            rise. (Reveal is presentation, not a second contribution.)
+    #   Stage 3: genuinely new free-text area → new pillar, log add_pillar.
     def _handle_add(self, detail: str, parent: str | None):
         from backend import knowledge_base as kb
         if parent:
@@ -807,13 +906,40 @@ class BlackBoxAgent:
             pre = (f"Added under **{target}**.\n\n" if is_new else
                    f"That's already under **{target}**.\n\n")
             yield from self._yield_rerender(pre); return
+
+        # ── Stage 1: pillar-level match (naming the area) ──────────────────
         matched = self._match_pillar(detail)
-        if matched and matched.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
-            _, is_new = self._store_sub_point(matched, detail, "text")
-            pre = (f"Added under **{matched}**.\n\n" if is_new else
-                   f"That's already under **{matched}**.\n\n")
+        if matched:
+            shown_names = [p["name"].lower() for p in kb.get_shown_pillars()]
+            if matched.lower() in shown_names:
+                # Named an already-shown area → fold the note in as a sub-point.
+                _, is_new = self._store_sub_point(matched, detail, "text")
+                pre = (f"Added under **{matched}**.\n\n" if is_new else
+                       f"That's already under **{matched}**.\n\n")
+                yield from self._yield_rerender(pre); return
+            # Named a WITHHELD area → reveal it as a pillar (add_pillar).
+            if matched.lower() not in [p.lower() for p in self.user_added_pillars]:
+                self.user_added_pillars.append(matched)
+                log_concept_added(self.session_id, matched)
+                log_add_pillar(self.session_id, matched, "text")
+                pre = f"Added **{matched}** as a new area.\n\n"
+            else:
+                pre = f"**{matched}** is already in the framework.\n\n"
             yield from self._yield_rerender(pre); return
-        new_name = matched or detail.strip()
+
+        # ── Stage 2: whole-KB concept search (naming a point inside an area) ─
+        concept_parent = self._match_concept(detail)
+        if concept_parent:
+            # Reveal the parent pillar WITHOUT logging add_pillar (granularity rule);
+            # _store_sub_point logs the user's contribution as add_sub_bullet.
+            self._reveal_pillar_silent(concept_parent)
+            _, is_new = self._store_sub_point(concept_parent, detail, "text")
+            pre = (f"Added under **{concept_parent}**.\n\n" if is_new else
+                   f"That's already under **{concept_parent}**.\n\n")
+            yield from self._yield_rerender(pre); return
+
+        # ── Stage 3: genuinely new area → free-text pillar (add_pillar) ────
+        new_name = detail.strip()
         if new_name.lower() not in [p.lower() for p in self.user_added_pillars]:
             self.user_added_pillars.append(new_name)
             log_concept_added(self.session_id, new_name)
@@ -831,6 +957,19 @@ class BlackBoxAgent:
             return
         self.user_added_pillars.append(name)
         log_add_pillar(self.session_id, name, "text")
+
+    def _reveal_pillar_silent(self, name: str):
+        """Reveal a matched (typically withheld) pillar so its KB sub-bullets render,
+        WITHOUT logging add_pillar. Used when the user named a sub-concept rather than
+        the area itself — the contribution is a sub-bullet act, logged separately by
+        _store_sub_point as add_sub_bullet. No-op if already shown or already revealed.
+        Change log: 2026-06-02"""
+        from backend import knowledge_base as kb
+        if name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
+            return                                  # already on screen — no reveal needed
+        if name.lower() in [p.lower() for p in self.user_added_pillars]:
+            return                                  # already revealed
+        self.user_added_pillars.append(name)        # deliberately NO log_add_pillar
 
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
         pillar  = self._normalize_pillar(pillar)
@@ -868,11 +1007,16 @@ class BlackBoxAgent:
         return name
 
     def _match_pillar(self, item: str):
+        """Stage-1 matcher: does the user's text name one of the framework's AREAS?
+        Candidate block now includes each pillar's description so semantically-adjacent
+        terms ("IT Budget" → "Financial Impact") resolve. Change log: 2026-06-02"""
         from backend import knowledge_base as kb
         pillars = kb.get_all_pillars()
         if not pillars:
             return None
-        block = "\n".join(f"- {p['name']}" for p in pillars)
+        block = "\n".join(
+            f"- {p['name']}: {(p.get('description') or '').strip()}" for p in pillars
+        )
         try:
             r = client.models.generate_content(model=CLASSIFIER_MODEL,
                 contents=ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block))
@@ -881,6 +1025,34 @@ class BlackBoxAgent:
                 return parsed.get("matched_pillar")
         except Exception as e:
             print(f"[PILLAR MATCH] error: {e}")
+        return None
+
+    def _match_concept(self, item: str):
+        """Stage-2 matcher: search EVERY analytical concept (name + explanation) across
+        all pillars (swap excluded). On a confident hit, return the parent pillar's name
+        via pillar_id. Lets a sub-concept of a withheld pillar ("breakeven point") resolve
+        to its parent ("Financial Impact"). Change log: 2026-06-02"""
+        from backend import knowledge_base as kb
+        concepts = [c for c in kb.get_all_concepts()
+                    if not c.get("swap", False) and c.get("pillar_id")]
+        if not concepts:
+            return None
+        block = "\n".join(
+            f"{i}. {c['name']}: {(c.get('explanation') or '').strip()}"
+            for i, c in enumerate(concepts)
+        )
+        try:
+            r = client.models.generate_content(model=CLASSIFIER_MODEL,
+                contents=ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block))
+            parsed = json.loads(self._strip_fences(r.text))
+            if parsed.get("matched") and parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD:
+                idx = parsed.get("matched_index")
+                if idx is not None and 0 <= idx < len(concepts):
+                    pillar = kb.get_pillar_by_id(concepts[idx]["pillar_id"])
+                    if pillar:
+                        return pillar["name"]
+        except Exception as e:
+            print(f"[CONCEPT MATCH] error: {e}")
         return None
 
     def _match_key_question(self, item: str, pillar_name: str):
@@ -923,6 +1095,7 @@ class BlackBoxAgent:
         self.excluded_concepts  = []
         self.pending_excl       = None
         self.has_main_contribution = False
+        self.awaiting_removal_target = False
         log_user_message(self.session_id, "[REDO TRIGGERED]")
         reply = "Noted — here's a fresh framework.\n\n" + self._render_full_framework(is_first=True)
         self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
