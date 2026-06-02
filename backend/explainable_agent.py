@@ -1693,9 +1693,12 @@ class ExplainableAgent(BlackBoxAgent):
 
         added_lower = [p.lower() for p in self.user_added_pillars]
 
-        # ── Group 1: completed original pillars (advanced PAST) ────────────
+        # ── Group 1: original pillars SHOWN to the user (incl. the one on
+        #    screen at End Session). [:index+1] includes the current concept,
+        #    fixing blank summaries when ending mid-walkthrough. No-op on the
+        #    natural-end path (index already == len). Change log: 2026-06-02
         completed_originals = [
-            c for c in self.walkthrough_concepts[:self.walkthrough_index]
+            c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
             if c.lower() not in excluded_lower
             and c.lower() not in added_lower
         ]
