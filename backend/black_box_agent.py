@@ -857,33 +857,73 @@ class BlackBoxAgent:
         yield msg
     def _resolve_pending_excl(self, user_input: str):
         concept = self.pending_excl
-        self.pending_excl = None
-        if self._is_affirmative(user_input):
+        cls = self._classify_confirmation(user_input)
+
+        # ── Confirm → remove ───────────────────────────────────────────────
+        if cls["decision"] == "confirm":
+            self.pending_excl = None
             wrong = self.concept_swap.config["wrong_concept"]
             if concept.lower() == wrong.lower():
-                self.concept_swap.force_detected()         # swap removal = detection (#3)
+                self.concept_swap.force_detected()             # swap removal = detection (#3)
             elif concept.lower() not in [e.lower() for e in self.excluded_concepts]:
                 self.excluded_concepts.append(concept)
             log_memory_override(self.session_id,
                 old_context=f"concept in framework: {concept}",
                 new_context=f"user confirmed removal: {concept}")
             yield from self._yield_rerender(f"Done — I've removed **{concept}**.\n\n")
-        else:
+            return
+
+        # ── Decline → keep ─────────────────────────────────────────────────
+        if cls["decision"] == "decline":
+            self.pending_excl = None
             msg = f"No problem — I'll keep **{concept}**."
             self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
             log_agent_response(self.session_id, msg)
             yield msg
+            return
 
-    def _is_affirmative(self, user_input: str) -> bool:
-        prompt = ('Classify whether the user is CONFIRMING an action they were asked to '
-                  'confirm (yes/go ahead) versus DECLINING (no/keep it). Respond ONLY with '
-                  'JSON: {"confirm": true or false}\n\nUser: "%s"' % user_input)
+        # ── Other → answer if it's a question, then re-offer; KEEP pending ──
+        if cls["is_question"]:
+            log_question(self.session_id, "text", detail=user_input[:200])
+            wrong = self.concept_swap.config["wrong_concept"]
+            swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
+            # At the gate the question is about the PENDING concept → state check, not LLM.
+            if swap_active and concept.lower() == wrong.lower():
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
+            yield from self._stream_confirm_qa(user_input, concept)
+        else:
+            msg = f"No rush — reply **yes** to remove **{concept}**, or **no** to keep it."
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+
+    def _classify_confirmation(self, user_input: str) -> dict:
+        """confirm = clear yes; decline = clear no; other = question / hedge / not-a-clear-yes-no.
+        Whether an 'other' question is about the swap is decided by the CALLER from state
+        (the pending concept) — the LLM can't resolve "that"/"this" here. Change log: 2026-06-03"""
+        prompt = (
+            "A user was asked to confirm removing a concept from a framework "
+            "(e.g. 'Are you sure you want to remove it?').\n"
+            "Classify their reply:\n"
+            '- "confirm": a clear yes — go ahead and remove it\n'
+            '- "decline": a clear no — keep it / leave it as is\n'
+            '- "other": a question, an uncertain/hedging reply, or anything that is NOT a clear yes or no\n\n'
+            "Vague 'proceed'-type words on their own ('move on', 'next', 'whatever', 'sure I guess') "
+            'are "other", NOT confirm, unless the user clearly says to remove it.\n\n'
+            'Respond ONLY with valid JSON, no markdown:\n'
+            '{"decision": "confirm" | "decline" | "other", "is_question": true or false}\n\n'
+            f'Reply: "{user_input}"'
+        )
         try:
             r = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
-            return bool(json.loads(self._strip_fences(r.text)).get("confirm", False))
+            p = json.loads(self._strip_fences(r.text))
+            decision = p.get("decision", "other")
+            if decision not in ("confirm", "decline", "other"):
+                decision = "other"
+            return {"decision": decision, "is_question": bool(p.get("is_question", False))}
         except Exception as e:
             print(f"[CONFIRM] error: {e}")
-            return False   # safe default — never delete on uncertainty
+            return {"decision": "other", "is_question": False}
 
     # ── Add (silent placement + matching) ──────────────────────────────────
     # Two-stage match — Change log: 2026-06-02
@@ -1123,6 +1163,31 @@ class BlackBoxAgent:
         )
         yield from self._stream_with_instruction(instruction=instruction)
 
+    def _stream_confirm_qa(self, user_input: str, concept: str):
+        """Answer a question raised AT the removal-confirmation prompt, then re-offer the
+        pending decision in ONE streamed message. Caller leaves pending_excl set, so the
+        user's next yes/no still resolves the removal. Change log: 2026-06-02"""
+        framework    = self.kg_context["framework"]
+        concepts_str = ", ".join(self.kg_context["concepts"]) or \
+                    "Strategic Fit, Use Case and Solution, Feasibility"
+        instruction = (
+            "You are a strategic consultant. The user was asked to confirm removing "
+            f"**{concept}** from the framework, and instead of answering yes or no they "
+            "asked a question or made a comment.\n\n"
+            f"─── FRAMEWORK CONTEXT ────────────────────────────────────────────────\n"
+            f"Framework : {framework}\nPillars   : {concepts_str}\n"
+            f"──────────────────────────────────────────────────────────────────────\n\n"
+            f"{self.concept_swap.get_system_prompt_block()}"
+            "─── ANSWER RULES ─────────────────────────────────────────────────────\n"
+            "Answer their question in 2–3 sentences, plain language, grounded in the case.\n"
+            "Do NOT reprint, restate, or regenerate the framework or any pillar block.\n"
+            "Do NOT claim to add, remove, or change anything — nothing has changed yet.\n"
+            "Do NOT ask any other follow-up question.\n"
+            "End your reply with EXACTLY this sentence on a new line:\n"
+            f"Still want to remove **{concept}**? Reply **yes** to remove it, or **no** to keep it.\n"
+            "──────────────────────────────────────────────────────────────────────\n"
+        )
+        yield from self._stream_with_instruction(instruction=instruction)
     def _ack_no_reprint(self):
         acks = ["Sure — I'm here if you'd like to revisit anything.",
                 "Understood — let me know if anything comes to mind.",
