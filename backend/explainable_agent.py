@@ -269,6 +269,107 @@ Classify:
 Respond ONLY with valid JSON, no markdown:
 {{"decision": "remove" | "explain" | "advance", "confidence": float}}
 """
+
+# Removal granularity — Change log: 2026-06-04
+# Decides whether a removal request targets a WHOLE pillar or ONE sub-bullet, and
+# which. Sees the current pillar's points, all pillar names, and the agent's last
+# message so a vague "remove it" binds to the just-discussed point.
+REMOVAL_TARGET_PROMPT = """
+You classify WHAT a user wants to remove during a framework walkthrough.
+
+Decide whether they mean:
+- "pillar"     : a whole top-level area/pillar
+- "sub_bullet" : ONE specific point/bullet inside a pillar
+
+─── CURRENT PILLAR ───────────────────────────────────────────────────────────
+{current_pillar}
+Its points:
+{current_bullets}
+────────────────────────────────────────────────────────────────────────────
+─── ALL PILLAR NAMES ─────────────────────────────────────────────────────────
+{all_pillars}
+────────────────────────────────────────────────────────────────────────────
+─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
+{last_agent}
+────────────────────────────────────────────────────────────────────────────
+─── USER MESSAGE ─────────────────────────────────────────────────────────────
+{user_msg}
+────────────────────────────────────────────────────────────────────────────
+
+Rules:
+- Names/refers to a whole pillar or area → level="pillar", pillar=that name.
+- Refers to one specific point ("the responsible AI part", "the second point",
+  "that bullet about transparency") → level="sub_bullet", pillar=its pillar,
+  bullet = the EXACT matching point text copied verbatim from the points list.
+- Vague "remove it / this / that": if the agent's last message was about ONE
+  specific point, treat as that sub_bullet; otherwise treat as the whole current pillar.
+- "bullet" MUST be copied verbatim from the points list above, or null for a pillar.
+
+Respond ONLY with valid JSON, no markdown:
+{{"level": "pillar" | "sub_bullet", "pillar": "name or null", "bullet": "exact point text or null", "confidence": float}}
+"""
+
+# Single intent router — Change log: 2026-06-04
+# Replaces the old cascade (_detect_override + _is_ready_to_advance + _is_removal_doubt)
+# for the walkthrough phase. Returns ONE primary intent so an add can never be
+# mis-caught as a remove/doubt/question.
+INTENT_ROUTER_PROMPT = """
+You route a user's message during a one-concept-at-a-time framework walkthrough.
+Return the SINGLE best intent.
+
+Intents:
+- "advance"  : ready to move to the next pillar ("yes", "ok", "next", "move on",
+               "makes sense", "got it", "sounds good") with no other request.
+- "add"      : wants to ADD a new point or area — including proposals phrased as
+               "we should consider X", "we need to think about X", "what about X",
+               "how about X", "can we also look at X", "add X", "include X".
+               detail = the thing to add. A leading "no" does NOT cancel an add
+               ("no, add X" is still add).
+- "remove"   : wants to remove a whole pillar OR one specific point
+               ("remove X", "drop this", "take out the part about Y", "delete that bullet").
+               detail = what to remove.
+- "question" : asking to understand the current concept ("what is X?", "why is this
+               here?", "how does this apply?", "can you explain?").
+- "doubt"    : vaguely doubts the current concept belongs, WITHOUT a clear remove
+               command ("I'm not sure this fits", "this seems off", "is this necessary?").
+- "redo"     : restart the whole walkthrough from scratch.
+- "switch"   : switch to a different named FRAMEWORK. detail = the framework mention.
+- "none"     : none of the above / unclear.
+
+KEY DISAMBIGUATION:
+- Proposing a NEW consideration to include is "add", even when phrased as
+  "consider if X ...", "we need to understand X", "we need to account for X",
+  "we should capture X". ("We need to consider if the team strategy aligns" → add,
+  detail "team strategy alignment".)
+- "add" vs "question": proposing something to include → add; asking to understand
+  what is already shown → question.
+- Naming an existing pillar AS THE PLACE for a new point is still "add" — the pillar
+  is just the location, the new point is the thing being added. detail = the new
+  point. ("Let's revisit Strategic Fit, we need to understand the frequency of the
+  opportunity" → add, detail "frequency of the opportunity".)
+- Only treat naming an existing pillar as "question" when the user asks to UNDERSTAND
+  its existing content (e.g. "remind me what Strategic Fit covers"), with no new point.
+- "doubt" vs "remove": doubt is hesitation with no command; remove is a clear instruction.
+
+─── CURRENT PILLAR ───────────────────────────────────────────────────────────
+{current_pillar}
+Its points:
+{current_bullets}
+────────────────────────────────────────────────────────────────────────────
+─── WALKTHROUGH PILLARS ──────────────────────────────────────────────────────
+{concepts}
+────────────────────────────────────────────────────────────────────────────
+─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
+{last_agent}
+────────────────────────────────────────────────────────────────────────────
+─── USER MESSAGE ─────────────────────────────────────────────────────────────
+{user_msg}
+────────────────────────────────────────────────────────────────────────────
+
+Respond ONLY with valid JSON, no markdown:
+{{"intent": "advance|add|remove|question|doubt|redo|switch|none", "detail": "string or null", "confidence": float}}
+"""
+
 # ══════════════════════════════════════════════════════════════════════════
 # Addition flow prompts — Change log: 2026-05-28
 # ══════════════════════════════════════════════════════════════════════════
@@ -298,24 +399,34 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 ADD_RESOLVE_PROMPT = """
 You are a classifier for a case interview framework tool.
 
-The agent asked the user where they want to add "{item}".
-Options were: add it under an existing pillar, or add it as a new separate area.
+The user asked to add "{item}". The agent suggested it belongs under the pillar
+**{target}** and asked: add it THERE (under {target}), or as its OWN SEPARATE AREA?
 
-─── EXISTING PILLARS ─────────────────────────────────────────────────────
+─── ALL PILLAR NAMES ─────────────────────────────────────────────────────────
 {pillars}
 ────────────────────────────────────────────────────────────────────────────
-
 ─── USER REPLY ──────────────────────────────────────────────────────────────
 {reply}
 ────────────────────────────────────────────────────────────────────────────
 
-Interpret the user's reply:
-- If they confirm adding under a specific pillar, return that pillar name as target
-- If they want it as a new separate area/pillar, set as_new_pillar=true
-- If they cancel or change their mind (no, never mind, forget it), set confirmed=false
+Classify the reply into ONE choice:
+- "under_target" : add it under {target}
+                   ("add it there", "there", "under it", "yes", "ok", "sure",
+                    "the first one", "yes please", "add to {target}")
+- "separate"     : add it as its own separate area / new pillar
+                   ("separate area", "its own area", "as a new pillar", "the second one",
+                    "no, separate", "make it separate")
+- "cancel"       : changed their mind, do not add it
+                   ("no", "never mind", "forget it", "cancel", "actually no", "drop it")
+
+Rules:
+- A bare "yes" / "ok" / "sure" / "yeah" → under_target (the agent's primary suggestion).
+- A bare "no" with no alternative → cancel. But "no, as its own area" → separate.
+- If the user names a DIFFERENT pillar than {target}, set choice="under_target" and put
+  that pillar name in "target_override".
 
 Respond ONLY with valid JSON, no explanation, no markdown:
-{{"confirmed": true or false, "target": "pillar name or null", "as_new_pillar": true or false}}
+{{"choice": "under_target" | "separate" | "cancel", "target_override": "pillar name or null"}}
 """
 
 ADD_MATCH_PROMPT = """
@@ -335,24 +446,53 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {{"matched": true or false, "matched_index": integer or null, "confidence": float}}
 """
 
+# Enriched: candidate areas now carry their description so semantically-adjacent
+# terms ("IT Budget" → "Financial Impact") resolve. Mirrors BlackBox. Change log: 2026-06-02
 ADD_PILLAR_MATCH_PROMPT = """
 You are a classifier for a case interview framework tool.
 
-The user wants to add a new pillar: "{item}".
-Check whether it matches one of the framework's other (currently hidden) pillars below.
+The user wants to add a new area: "{item}".
+Each area below is given as "Name: description". Check whether the user's new
+area is essentially the SAME AREA of analysis as one of them — same topic or
+clearly the same scope, possibly different wording.
 
-─── OTHER PILLARS ───────────────────────────────────────────────────────────
+─── AREAS ───────────────────────────────────────────────────────────────────
 {pillars}
 ────────────────────────────────────────────────────────────────────────────
-
-A match means the user's new pillar is essentially the same area of analysis
-as one of the pillars above — same topic, possibly different wording.
+Match only at the level of the whole AREA. If the user's text is just one
+specific point that would sit *inside* an area (rather than naming the area
+itself), set matched=false.
 
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
 """
 
 ADD_MATCH_THRESHOLD = 0.75
+
+# Whole-KB concept search — searches every analytical concept (name + explanation)
+# across all pillars (swap excluded). On a confident hit, the caller resolves the
+# parent pillar via pillar_id. Higher bar than the pillar matcher because a false hit
+# REVEALS a withheld pillar = stimulus contamination. Mirrors BlackBox. Change log: 2026-06-02
+CONCEPT_MATCH_THRESHOLD = 0.85
+
+ADD_CONCEPT_MATCH_PROMPT = """
+You are a classifier for a case interview framework tool.
+The user wrote: "{item}".
+
+Below is a numbered list of analytical concepts, each as "Name: explanation".
+Decide whether the user's text clearly refers to ONE of these concepts — i.e.
+it is essentially that concept, or a specific instance of it, possibly worded
+differently.
+
+─── CONCEPTS ────────────────────────────────────────────────────────────────
+{concepts}
+────────────────────────────────────────────────────────────────────────────
+Match ONLY if you are confident it is essentially that concept. If the user's
+text is only loosely or topically related, set matched=false.
+
+Respond ONLY with valid JSON, no markdown:
+{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
+"""
 
 SUB_BULLET_FORMAT_PROMPT = """
 You reformat a user's note into the style of a sub-bullet in this case framework.
@@ -491,6 +631,45 @@ class ExplainableAgent(BlackBoxAgent):
     Change log: 2026-05-25 — citation block updated for JSON knowledge base;
                              CASE_TYPE updated to AI Implementation;
                              WALKTHROUGH_OVERRIDE_PROMPT examples updated for Allianz case
+    Change log: 2026-06-02 — add-flow matcher broadened to parity with BlackBox:
+                             enriched pillar match (descriptions), whole-KB concept
+                             search (_match_concept), and the add_sub_bullet
+                             granularity rule. Placement-confirmation UX retained.
+    Change log: 2026-06-03 — CONCEPT-FIRST precedence (most-specific wins): the concept
+                             search runs before the area match, so a leaf point
+                             ('payback period') resolves to a sub-bullet, not a whole
+                             pillar. Empty-summary fix: added KB pillars now render
+                             their KB sub-bullets in the End-Session summary.
+    Change log: 2026-06-04 — a withheld pillar surfaced via a sub-concept is now INSERTED
+                             right after the current concept and walked normally (no inline
+                             block dump, shown once). Acknowledge-only on add.
+    Change log: 2026-06-04b — sub-bullet removal (Bug 1): _classify_removal_target decides
+                             pillar-vs-bullet; sub-bullet removal gets a reasoned pushback +
+                             3-way confirm, logs delete at sub-bullet level, and render +
+                             summary omit excluded bullets (excluded_sub_bullets state).
+    Change log: 2026-06-04c — routing consolidated into a SINGLE intent router
+                             (_classify_intent): advance|add|remove|question|doubt|
+                             redo|switch|none. Replaces _detect_override (walkthrough
+                             phase) + _is_ready_to_advance + _is_removal_doubt, so an add
+                             ("we should consider X") can't be mis-caught as remove/doubt.
+                             Swap detection kept identical (2a explicit remove + 2b semantic
+                             backstop). question → KB-grounded QA (_concept_grounding).
+    Change log: 2026-06-04d — adding to a not-yet-reached pillar now lifts it to the
+                             next slot and discusses it immediately (_move_pillar_to_next;
+                             swap shifts back one, still shown). Current/passed pillars
+                             still update in place. Placement question glosses a
+                             not-yet-presented target pillar with one sentence and drops
+                             the 'bring in / existing pillar' wording.
+    Change log: 2026-06-04e — placement resolution (_resolve_addition) is now TARGET-AWARE:
+                             a 3-way choice (under_target | separate | cancel) that receives
+                             the suggested pillar, so 'add it there' / 'yes' / 'the first one'
+                             bind to it instead of cancelling or misfiring as a new pillar
+                             (which had double-logged add_pillar + add_sub_bullet and created
+                             a junk pillar). Errors default to add-under-target, not cancel.
+    Change log: 2026-06-04f — live walkthrough and summary now share one body renderer
+                             (_render_bullets_and_sources), so a user-added bullet's source
+                             refs are re-lettered and merged into the Sources line on screen
+                             too — no more dangling [e][d] markers mid-walkthrough.
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -536,20 +715,21 @@ class ExplainableAgent(BlackBoxAgent):
         self.pending_fw   = None
         self.pending_add  = None   # {"item": str, "kind": str, "target": str}
         self.pending_clarify = None
+        self.pending_sub_excl = None  # {"pillar": str, "bullet": str} — Change log: 2026-06-04
 
         # ── User sub-points — populated by duplicate guard path ───────────
         # Change log: 2026-05-12
         self.user_sub_points = {}
 
+        # ── Removed sub-bullets — pillar name → list of removed bullet texts.
+        # Render + summary omit any bullet whose normalised text is in here.
+        # Change log: 2026-06-04
+        self.excluded_sub_bullets = {}
+
         # ── User-added pillars — explicit tracking for summary ─────────────
         # Change log: 2026-05-28 — separate from walkthrough_concepts so summary
         # can distinguish "user added" from "not yet reached"
         self.user_added_pillars = []
-
-        # ── User-added pillars — tracked separately so summary always
-        #    includes them regardless of walkthrough position.
-        # Change log: 2026-05-28
-        # self.user_added_pillars = []
 
         self.history = [
             types.Content(
@@ -766,25 +946,52 @@ class ExplainableAgent(BlackBoxAgent):
             logging.warning(f"[ADD CLASSIFY] error: {e}")
             return {"kind": "sub_bullet", "target": self._current_concept()}
 
+    def _resolve_add_target(self, item: str) -> dict:
+        """Pick the BEST target to offer in the placement question. CONCEPT-FIRST
+        (most-specific wins) — mirrors BlackBox. Change log: 2026-06-03
+          Stage 1: whole-KB concept search → kind='sub_bullet', target=parent pillar.
+                   (A specific leaf like 'payback period' resolves here, NOT as a pillar.)
+          Stage 2: area-level pillar match (enriched) → kind='pillar'.
+                   (A broad area name like 'IT Budget' that matches no single concept.)
+          Stage 3: shown-only LLM fallback for genuinely-new items.
+        The user still confirms placement — this only supplies better options."""
+        concept_parent = self._match_concept(item)
+        if concept_parent:
+            return {"kind": "sub_bullet", "target": concept_parent}
+        matched_pillar = self._match_pillar(item)
+        if matched_pillar:
+            return {"kind": "pillar", "target": matched_pillar}
+        return self._classify_addition(item)
+
     def _resolve_addition(self, reply: str) -> dict:
-        """LLM: interpret user's confirmation reply for placement."""
+        """Interpret the placement reply. Target-aware 3-way choice so deictic replies
+        ('add it there', 'yes', 'the first one') bind to the suggested pillar instead of
+        cancelling. Change log: 2026-06-04"""
         from backend import knowledge_base as kb
         pillars = ", ".join(p["name"] for p in kb.get_all_pillars())
-        item    = self.pending_add["item"] if self.pending_add else ""
-        prompt  = ADD_RESOLVE_PROMPT.format(pillars=pillars, item=item, reply=reply)
+        item    = self.pending_add["item"]   if self.pending_add else ""
+        target  = self.pending_add["target"] if self.pending_add else None
+        prompt  = ADD_RESOLVE_PROMPT.format(
+            pillars=pillars, item=item, target=target or "(unspecified)", reply=reply,
+        )
         try:
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL, contents=prompt,
             )
-            parsed = json.loads(self._strip_fences(response.text))
-            return {
-                "confirmed":     parsed.get("confirmed", False),
-                "target":        parsed.get("target"),
-                "as_new_pillar": parsed.get("as_new_pillar", False),
-            }
+            parsed   = json.loads(self._strip_fences(response.text))
+            choice   = parsed.get("choice", "under_target")
+            override = parsed.get("target_override")
+            if choice == "cancel":
+                return {"confirmed": False, "target": None, "as_new_pillar": False}
+            if choice == "separate":
+                return {"confirmed": True, "target": None, "as_new_pillar": True}
+            # under_target (default) — honour a named different pillar if given
+            return {"confirmed": True, "target": override or target, "as_new_pillar": False}
         except Exception as e:
-            logging.warning(f"[ADD RESOLVE] error: {e}")
-            return {"confirmed": False, "target": None, "as_new_pillar": False}
+            # The user is mid-add — default to adding under the suggested target rather
+            # than silently dropping it. Change log: 2026-06-04
+            logging.warning(f"[ADD RESOLVE] error: {e} — defaulting to under_target")
+            return {"confirmed": True, "target": target, "as_new_pillar": False}
 
     def _match_key_question(self, item: str, pillar_name: str) -> dict | None:
         """LLM: does item match a key_question in this pillar? Return matched text+sources."""
@@ -820,15 +1027,74 @@ class ExplainableAgent(BlackBoxAgent):
             logging.warning(f"[ADD MATCH] error: {e}")
         return None
 
+    def _match_pillar(self, item: str) -> str | None:
+        """LLM: does the user's text name one of the framework's AREAS (any pillar,
+        shown or withheld)? Candidate block carries each pillar's description so
+        semantically-adjacent terms resolve. Mirrors BlackBox. Change log: 2026-06-02"""
+        from backend import knowledge_base as kb
+        pillars = kb.get_all_pillars()
+        if not pillars:
+            return None
+        block = "\n".join(
+            f"- {p['name']}: {(p.get('description') or '').strip()}" for p in pillars
+        )
+        prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            if (parsed.get("matched") and
+                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
+                return parsed.get("matched_pillar")
+        except Exception as e:
+            logging.warning(f"[PILLAR MATCH] error: {e}")
+        return None
+
+    def _match_concept(self, item: str) -> str | None:
+        """LLM: search EVERY analytical concept (name + explanation) across all pillars
+        (swap excluded). On a confident hit, return the parent pillar's name via
+        pillar_id. Lets a sub-concept of a withheld pillar ("breakeven point") resolve
+        to its parent ("Financial Impact"). Mirrors BlackBox. Change log: 2026-06-02"""
+        from backend import knowledge_base as kb
+        concepts = [c for c in kb.get_all_concepts()
+                    if not c.get("swap", False) and c.get("pillar_id")]
+        if not concepts:
+            return None
+        block = "\n".join(
+            f"{i}. {c['name']}: {(c.get('explanation') or '').strip()}"
+            for i, c in enumerate(concepts)
+        )
+        prompt = ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block)
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            if (parsed.get("matched") and
+                    parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD):
+                idx = parsed.get("matched_index")
+                if idx is not None and 0 <= idx < len(concepts):
+                    pillar = kb.get_pillar_by_id(concepts[idx]["pillar_id"])
+                    if pillar:
+                        return pillar["name"]
+        except Exception as e:
+            logging.warning(f"[CONCEPT MATCH] error: {e}")
+        return None
+
     def _match_withheld_pillar(self, item: str) -> str | None:
-        """LLM: does new pillar match a withheld pillar (Financial Impact / Risks)?"""
+        """LLM: does new pillar match a withheld pillar (Financial Impact / Risks)?
+        Used by the explicit 'separate area' branch. Now description-enriched.
+        Change log: 2026-06-02"""
         from backend import knowledge_base as kb
         shown_ids = {p["id"] for p in kb.get_shown_pillars()}
         withheld  = [p for p in kb.get_all_pillars() if p["id"] not in shown_ids]
         if not withheld:
             return None
 
-        pillars_block = "\n".join(f"- {p['name']}" for p in withheld)
+        pillars_block = "\n".join(
+            f"- {p['name']}: {(p.get('description') or '').strip()}" for p in withheld
+        )
         prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
         try:
             response = client.models.generate_content(
@@ -841,7 +1107,150 @@ class ExplainableAgent(BlackBoxAgent):
         except Exception as e:
             logging.warning(f"[ADD PILLAR MATCH] error: {e}")
         return None
-    
+
+    def _reveal_withheld_pillar(self, name: str) -> bool:
+        """If `name` is a withheld KB pillar not yet revealed, INSERT it into the
+        walkthrough right after the current concept so it is presented next as a normal
+        walk-through step (it is NOT rendered as a block on add). Returns True if it was
+        newly revealed, False otherwise. No add_pillar — granularity rule.
+        Change log: 2026-06-04 — insert-after-current (was append); returns bool."""
+        from backend import knowledge_base as kb
+        pillar = next(
+            (p for p in kb.get_all_pillars() if p["name"].lower() == name.lower()),
+            None
+        )
+        if pillar is None:
+            return False                             # not a KB pillar — nothing to reveal
+        shown_ids = {p["id"] for p in kb.get_shown_pillars()}
+        if pillar["id"] in shown_ids:
+            return False                             # already shown in the walkthrough
+        if pillar["name"].lower() in [c.lower() for c in self.walkthrough_concepts]:
+            return False                             # already revealed earlier
+        insert_pos = self.walkthrough_index + 1
+        self.walkthrough_concepts.insert(insert_pos, pillar["name"])
+        # Keep swap_position accurate for logging if we inserted before the swap.
+        if self.swap_position is not None and insert_pos <= self.swap_position:
+            self.swap_position += 1
+        if pillar["name"] not in self.user_added_pillars:
+            self.user_added_pillars.append(pillar["name"])
+        logging.info(f"[ADD] withheld pillar '{pillar['name']}' inserted at "
+                     f"index {insert_pos} (next walk-through step)")
+        return True
+        # deliberately NO log_add_pillar — granularity rule (logged as add_sub_bullet)
+
+    def _move_pillar_to_next(self, target: str) -> None:
+        """Lift an already-scheduled but NOT-yet-reached pillar to the next slot so it
+        is discussed immediately. Keeps swap_position accurate. The swap is never
+        removed — it just shifts one slot later. Change log: 2026-06-04"""
+        if target not in self.walkthrough_concepts:
+            return
+        old_idx = self.walkthrough_concepts.index(target)
+        new_idx = self.walkthrough_index + 1
+        if old_idx <= new_idx:
+            return                                  # already next (or earlier) — nothing to move
+        self.walkthrough_concepts.pop(old_idx)
+        self.walkthrough_concepts.insert(new_idx, target)
+        # Elements in [new_idx, old_idx-1] shift one later; bump the swap if it's among them.
+        if new_idx <= self.swap_position < old_idx:
+            self.swap_position += 1
+        logging.info(f"[REORDER] '{target}' → index {new_idx} (discuss now); "
+                     f"swap_position={self.swap_position}")
+
+    # ── Sub-bullet removal helpers — Change log: 2026-06-04 ─────────────────
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        """Normalise a bullet for comparison: strip inline [a] refs, collapse space, lower."""
+        return re.sub(r"\s+", " ", _INLINE_REF_RE.sub("", text or "")).strip().lower()
+
+    def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
+        removed = {self._norm(b) for b in self.excluded_sub_bullets.get(pillar_name, [])}
+        return self._norm(bullet) in removed
+
+    def _last_agent_message(self) -> str:
+        for c in reversed(self.history):
+            if c.role == "model" and c.parts and c.parts[0].text:
+                return c.parts[0].text[:600]
+        return ""
+
+    def _classify_removal_target(self, user_input: str) -> dict:
+        """Decide whether a removal targets a whole pillar or one sub-bullet, and which.
+        Falls back to pillar-level (the safe, pre-existing behaviour) on any error."""
+        from backend import knowledge_base as kb
+        current = self._current_concept() or ""
+
+        # Visible points of the current pillar (KB sub_bullets + user points, minus removed)
+        pillar = next((p for p in kb.get_all_pillars()
+                       if p["name"].lower() == current.lower()), None)
+        bullets = []
+        if pillar:
+            bullets += list(pillar.get("sub_bullets", []))
+        bullets += self.user_sub_points.get(current, [])
+        bullets = [b for b in bullets if not self._is_excluded_bullet(current, b)]
+        bullets_block = "\n".join(f"- {b}" for b in bullets) or "(none)"
+
+        all_pillars = ", ".join(
+            sorted({p["name"] for p in kb.get_all_pillars()}
+                   | set(self.walkthrough_concepts))
+        )
+        prompt = REMOVAL_TARGET_PROMPT.format(
+            current_pillar=current or "(none)",
+            current_bullets=bullets_block,
+            all_pillars=all_pillars,
+            last_agent=self._last_agent_message() or "(nothing yet)",
+            user_msg=user_input,
+        )
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            level = parsed.get("level", "pillar")
+            return {
+                "level":  level if level in ("pillar", "sub_bullet") else "pillar",
+                "pillar": parsed.get("pillar") or current,
+                "bullet": parsed.get("bullet"),
+            }
+        except Exception as e:
+            logging.warning(f"[REMOVAL TARGET] error: {e} — defaulting to pillar")
+            return {"level": "pillar", "pillar": current, "bullet": None}
+
+    def _classify_intent(self, user_input: str) -> dict:
+        """Single primary-intent classifier for a walkthrough turn. Replaces the old
+        cascade. Defaults to 'question' (safe — never silently advances or removes).
+        Change log: 2026-06-04"""
+        from backend import knowledge_base as kb
+        current = self._current_concept() or "(none)"
+        pillar = next((p for p in kb.get_all_pillars()
+                       if p["name"].lower() == current.lower()), None)
+        bullets = []
+        if pillar:
+            bullets += list(pillar.get("sub_bullets", []))
+        bullets += self.user_sub_points.get(current, [])
+        bullets = [b for b in bullets if not self._is_excluded_bullet(current, b)]
+        bullets_block = "\n".join(f"- {b}" for b in bullets) or "(none)"
+        concepts = ", ".join(self.walkthrough_concepts) or "(none)"
+        prompt = INTENT_ROUTER_PROMPT.format(
+            current_pillar=current,
+            current_bullets=bullets_block,
+            concepts=concepts,
+            last_agent=self._last_agent_message() or "(nothing yet)",
+            user_msg=user_input,
+        )
+        try:
+            response = client.models.generate_content(
+                model=CLASSIFIER_MODEL, contents=prompt,
+            )
+            parsed = json.loads(self._strip_fences(response.text))
+            intent = parsed.get("intent", "question")
+            valid = {"advance", "add", "remove", "question", "doubt", "redo", "switch", "none"}
+            if intent not in valid:
+                intent = "question"
+            return {"intent": intent, "detail": parsed.get("detail")}
+        except Exception as e:
+            logging.warning(f"[INTENT] error: {e} — defaulting to question")
+            return {"intent": "question", "detail": None}
+
     def _format_sub_bullet(self, item: str) -> str:
         """Reformat an unmatched user sub-point into terse bullet style. Style only —
         no new content, no source. Falls back to raw input on error. Change log: 2026-05-30"""
@@ -858,30 +1267,35 @@ class ExplainableAgent(BlackBoxAgent):
             logging.warning(f"[SUB-POINT FORMAT] error: {e} — keeping raw")
         return item.strip()
 
-    def _render_pillar_block(self, concept: str) -> str:
-        """Read-only. Heading + static sub-bullets (unchanged) + user sub-points
-        (matched refs re-lettered to continue after the static ones, deduped by URL)
-        + one merged, named Sources line. No side-effects. Change log: 2026-05-30"""
+    def _render_bullets_and_sources(self, concept: str) -> tuple[str, str]:
+        """Shared body renderer used by BOTH the live walkthrough (_stream_concept) and
+        the summary (_render_pillar_block) so their citations agree. Static sub-bullets
+        keep their refs; user sub-points have their matched refs re-lettered to continue
+        after the static ones (deduped by URL) and merged into one named Sources line.
+        Returns (bullets_text, sources_line). Read-only. Change log: 2026-06-04"""
         from backend import knowledge_base as kb
         pillar = next(
             (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
             None
         )
-        lines = [f"**{concept}**"]
+        bullet_lines = []
 
+        # Non-KB concept — just the user's own points, no sources.
         if pillar is None:
             for sp in self.user_sub_points.get(concept, []):
-                lines.append(f"- {sp}")
-            return "\n".join(lines)
+                if not self._is_excluded_bullet(concept, sp):
+                    bullet_lines.append(f"- {sp}")
+            return "\n".join(bullet_lines), ""
 
-        # Static sources keep their original letters/order (only cited == all, for shown pillars)
+        # Static sources keep their original letters/order
         merged        = _parse_source_line(pillar.get("sub_bullets_sources", ""))
         url_to_letter = {url: letter for letter, url in merged}
         next_ord      = (max(ord(l) for l, _ in merged) + 1) if merged else ord("a")
 
-        # Static bullets — refs untouched
+        # Static bullets — refs untouched; omit any the user removed
         for b in pillar.get("sub_bullets", []):
-            lines.append(f"- {b}")
+            if not self._is_excluded_bullet(concept, b):
+                bullet_lines.append(f"- {b}")
 
         # User sub-points — matched refs resolve via key_questions_sources, continue letters
         kq_map = dict(_parse_source_line(pillar.get("key_questions_sources", "")))
@@ -899,12 +1313,23 @@ class ExplainableAgent(BlackBoxAgent):
             return f"[{letter}]"
 
         for sp in self.user_sub_points.get(concept, []):
-            lines.append(f"- {_INLINE_REF_RE.sub(_repl, sp)}")
+            if self._is_excluded_bullet(concept, sp):
+                continue
+            bullet_lines.append(f"- {_INLINE_REF_RE.sub(_repl, sp)}")
 
-        src_line = _format_named_sources(merged)
-        if src_line:
+        return "\n".join(bullet_lines), _format_named_sources(merged)
+
+    def _render_pillar_block(self, concept: str) -> str:
+        """Read-only. Heading + body via the shared renderer (bullets + one merged,
+        named Sources line). No side-effects. Change log: 2026-06-04 — delegates body
+        to _render_bullets_and_sources so summary and live walkthrough agree."""
+        bullets, src = self._render_bullets_and_sources(concept)
+        lines = [f"**{concept}**"]
+        if bullets:
+            lines.append(bullets)
+        if src:
             lines.append("")
-            lines.append(src_line)
+            lines.append(src)
         return "\n".join(lines)
     
     def _concept_grounding(self, concept: str) -> str:
@@ -1063,6 +1488,12 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._resolve_pending_clarify(user_input)
             return
         
+        if self.pending_sub_excl is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._resolve_pending_sub_excl(user_input)
+            return
+
         if self.pending_excl is not None or self.pending_fw is not None:
             log_user_message(self.session_id, user_input)
             self.history.append(
@@ -1071,18 +1502,27 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._resolve_pending(user_input)
             return
 
-        # ── 1. Override detection first ────────────────────────────────────
+        # ── 1. Single intent router (replaces _detect_override + advance + doubt).
+        #    Change log: 2026-06-04 ─────────────────────────────────────────────
         just_added_concept = None
-        override = self._detect_override(user_input)
+        intent_obj = self._classify_intent(user_input)
+        intent = intent_obj["intent"]
+        detail = intent_obj.get("detail")
+        logging.info(f"[INTENT] {intent} — detail={detail!r}")
 
-        # ── 1b. Check if user explicitly removed the wrong concept ─────────
+        override = None   # reused to drive the existing step-6 routing branches
+        wrong = self.concept_swap.config["wrong_concept"]
+
+        # ── 2. Swap detection — UNCHANGED behaviour, now fed by the intent.
+        #    (Katie 2026-06-04: keep swap detection identical; router only changes
+        #    non-swap routing.) Explicit 'remove' on the swap = 2a (old 1b); the
+        #    semantic detector is the backstop for non-steering intents = 2b (old step 2).
         cs_detected = False
-        if (override and
-                override["type"] == "concept_excluded" and
-                not self.concept_swap.is_detected and
-                self.swap_presented):
-            wrong        = self.concept_swap.config["wrong_concept"]
-            detail_lower = (override.get("detail") or "").lower().strip()
+
+        # 2a. Explicit rejection of the swap.
+        if (intent == "remove" and self.swap_presented
+                and not self.concept_swap.is_detected):
+            detail_lower = (detail or "").lower().strip()
             wrong_lower  = wrong.lower().strip()
             current      = self._current_concept()
             names_swap = (
@@ -1103,13 +1543,14 @@ class ExplainableAgent(BlackBoxAgent):
                 )
                 logging.info(f"[CONCEPT SWAP] detected via explicit removal")
                 cs_detected = True
-                override = None
 
-        # ── 2. Swap detection — only if presented AND no override ──────────
-        if not cs_detected and self.swap_presented and not override:
+        # 2b. Semantic backstop — runs for non-steering intents while the swap is live
+        #    (mirrors the old 'swap_presented and not override').
+        if (not cs_detected and self.swap_presented
+                and not self.concept_swap.is_detected
+                and intent in ("question", "doubt", "advance", "none")):
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
-                wrong = self.concept_swap.config["wrong_concept"]
                 log_memory_override(
                     self.session_id,
                     old_context=f"included: {wrong}",
@@ -1119,21 +1560,10 @@ class ExplainableAgent(BlackBoxAgent):
                     self.excluded_concepts.append(wrong)
                 self.walkthrough_index += 1
                 logging.info(f"[SWAP] caught — index→{self.walkthrough_index}")
-        elif self.walkthrough_active and not override and not cs_detected:
-            logging.debug(f"[SWAP] detection skipped — swap not yet presented")
 
-        # ── 3. Override logging and handling ──────────────────────────────
-        if override:
-            if override["type"] != "concept_added":
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"override_type: {override['type']}",
-                    new_context=f"detail: {override['detail'] or 'n/a'}",
-                )
-            logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}, "
-                         f"index={self.walkthrough_index}, swap_presented={self.swap_presented}")
-
-            if override["type"] == "redo":
+        # ── 3. Translate intent → routing setup (skipped if the swap was caught) ──
+        if not cs_detected:
+            if intent == "redo":
                 self.walkthrough_active   = False
                 self.walkthrough_done     = False
                 self.walkthrough_index    = 0
@@ -1145,6 +1575,8 @@ class ExplainableAgent(BlackBoxAgent):
                 self.pending_fw           = None
                 self.pending_add          = None
                 self.pending_clarify = None
+                self.pending_sub_excl     = None
+                self.excluded_sub_bullets = {}
                 self.has_main_contribution = False
                 self.user_added_pillars   = []
                 if self.concept_swap.is_detected:
@@ -1152,44 +1584,50 @@ class ExplainableAgent(BlackBoxAgent):
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
 
-            elif override["type"] == "framework_switch":
-                if not override.get("detail"):
+            elif intent == "switch":
+                if not detail:
                     override = {"type": "framework_unspecified"}
                 else:
-                    matches = self._resolve_framework(override["detail"])
+                    matches = self._resolve_framework(detail)
                     if len(matches) == 1:
                         self.pending_fw = matches[0]
                         override = {"type": "pending_fw_set"}
                     elif len(matches) >= 2:
                         override = {"type": "framework_clarification", "matches": matches,
-                                    "detail": override["detail"]}
+                                    "detail": detail}
                     else:
-                        override = {"type": "framework_not_found", "detail": override["detail"]}
+                        override = {"type": "framework_not_found", "detail": detail}
 
-            elif override["type"] == "concept_excluded":
-                detail = (override.get("detail") or "").strip().lower()
-                # Vague references ("it", "this", "that") → current concept
-                vague = {"it", "this", "that", "this one", "that one", "this concept", "that concept"}
-                if detail in vague or not detail:
-                    excl = self._current_concept()
+            elif intent == "remove":
+                # Disambiguate: whole pillar, or one sub-bullet? Change log: 2026-06-04
+                rt = self._classify_removal_target(user_input)
+                if rt["level"] == "sub_bullet" and rt.get("bullet"):
+                    self.pending_sub_excl = {
+                        "pillar": rt.get("pillar") or self._current_concept(),
+                        "bullet": rt["bullet"],
+                    }
+                    override = {"type": "pending_sub_excl_set"}
+                    logging.info(f"[OVERRIDE] sub-bullet removal pending: "
+                                 f"'{rt['bullet']}' under '{self.pending_sub_excl['pillar']}'")
+                    log_delete(self.session_id, rt["bullet"], "text")   # intent
                 else:
-                    excl = override.get("detail")
-                if excl:
-                    self.pending_excl = excl
-                    override = {"type": "pending_excl_set"}
-                    logging.info("[OVERRIDE] concept exclusion pending: " + excl)
-                    log_delete(self.session_id, excl, "text")   # intent (#1)
+                    excl = rt.get("pillar") or detail or self._current_concept()
+                    if excl:
+                        self.pending_excl = excl
+                        override = {"type": "pending_excl_set"}
+                        logging.info("[OVERRIDE] concept exclusion pending: " + excl)
+                        log_delete(self.session_id, excl, "text")   # intent (#1)
 
-            elif override["type"] == "concept_added" and override.get("detail"):
-                new_concept = override["detail"]
-                classification = self._classify_addition(new_concept)
+            elif intent == "add" and detail:
+                # Concept-first resolver picks the best placement target; user confirms.
+                classification = self._resolve_add_target(detail)
                 self.pending_add = {
-                    "item":   new_concept,
+                    "item":   detail,
                     "kind":   classification["kind"],
                     "target": classification["target"],
                 }
                 override = {"type": "pending_add_set"}
-                logging.info(f"[ADD] pending: '{new_concept}' "
+                logging.info(f"[ADD] pending: '{detail}' "
                              f"kind={self.pending_add['kind']} "
                              f"target={self.pending_add['target']}")
 
@@ -1220,6 +1658,11 @@ class ExplainableAgent(BlackBoxAgent):
 
         elif override and override["type"] == "pending_excl_set":
             yield from self._stream_pushback("concept", self.pending_excl)
+
+        elif override and override["type"] == "pending_sub_excl_set":
+            yield from self._stream_sub_bullet_pushback(
+                self.pending_sub_excl["pillar"], self.pending_sub_excl["bullet"]
+            )
 
         elif override and override["type"] == "pending_fw_set":
             yield from self._stream_pushback("framework", self.pending_fw)
@@ -1274,7 +1717,7 @@ class ExplainableAgent(BlackBoxAgent):
             else:
                 yield from self._stream_concept(is_first=False)
 
-        elif self._is_ready_to_advance(user_input):
+        elif intent == "advance":
             self.walkthrough_index += 1
             concept = self._current_concept()
             if concept is None:
@@ -1282,7 +1725,7 @@ class ExplainableAgent(BlackBoxAgent):
             else:
                 yield from self._stream_concept(is_first=False)
 
-        else:
+        elif intent == "doubt":
             current  = self._current_concept()
             _on_swap = (self.swap_presented
                         and not self.concept_swap.is_detected
@@ -1291,12 +1734,23 @@ class ExplainableAgent(BlackBoxAgent):
             log_question(self.session_id, "text", detail=user_input[:200])
             if _on_swap:
                 log_swap_questioned(self.session_id, "text", detail=user_input[:200])
-            if self._is_removal_doubt(user_input):
-                self.pending_clarify = self._current_concept()
-                logging.info(f"[CLARIFY] doubt on '{self.pending_clarify}' — asking")
-                yield from self._ask_clarify()
-            else:
-                yield from self._stream_concept_qa(just_added=just_added_concept)
+            self.pending_clarify = current
+            logging.info(f"[CLARIFY] doubt on '{self.pending_clarify}' — asking")
+            yield from self._ask_clarify()
+
+        else:
+            # question / none / add-without-detail → KB-grounded Q&A.
+            # _stream_concept_qa grounds on the concept's real description +
+            # key questions from knowledge_base.json (via _concept_grounding).
+            current  = self._current_concept()
+            _on_swap = (self.swap_presented
+                        and not self.concept_swap.is_detected
+                        and current is not None
+                        and self._is_wrong_concept(current))
+            log_question(self.session_id, "text", detail=user_input[:200])
+            if _on_swap:
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
+            yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
     # Pending resolution + pushback
@@ -1312,11 +1766,18 @@ class ExplainableAgent(BlackBoxAgent):
         return fallback
 
     def _resolve_pending(self, user_input: str):
-        confirmed = self._is_ready_to_advance(user_input)
+        # 3-way gate (parity with BlackBox _resolve_pending_excl): confirm | decline |
+        # other. Fixes the bug where an advance-like reply ("next"/"move on") after a
+        # DECLINED removal silently confirmed it. Change log: 2026-06-04
+        cls      = self._classify_confirmation(user_input)   # confirm | decline | other
+        decision = cls["decision"]
 
+        # ── Pending concept removal ────────────────────────────────────────
         if self.pending_excl is not None:
             excl = self.pending_excl
-            if confirmed:
+
+            # confirm → remove
+            if decision == "confirm":
                 excl = self._resolve_to_concept_name(excl)
                 if excl not in self.excluded_concepts:
                     self.excluded_concepts.append(excl)
@@ -1329,13 +1790,35 @@ class ExplainableAgent(BlackBoxAgent):
                     yield from self._stream_summary()
                 else:
                     yield from self._stream_concept(is_first=False)
+
+            # decline → KEEP (clear pending, stay on concept)
+            elif decision == "decline":
+                self.pending_excl = None
+                logging.info("[PENDING] exclusion declined — keeping: " + excl)
+                msg = (
+                    "No problem — I'll keep **" + excl + "** in the framework.\n\n"
+                    "*Would you like to add, change, or question anything here? "
+                    "Or shall we move on to the next pillar? Feel free to raise any "
+                    "pillar you think is important.*"
+                )
+                self.history.append(
+                    types.Content(role="model", parts=[types.Part(text=msg)])
+                )
+                log_agent_response(self.session_id, msg)
+                yield msg
+
+            # other → re-offer with reasoned counterfactual, KEEP pending
             else:
-                logging.info("[PENDING] exclusion not confirmed — continuing: " + excl)
+                if cls.get("is_question"):
+                    log_question(self.session_id, "text", detail=user_input[:200])
+                logging.info("[PENDING] exclusion unresolved (other) — re-offering: " + excl)
                 yield from self._stream_pushback("concept", excl)
 
+        # ── Pending framework switch (same 3-way) ──────────────────────────
         elif self.pending_fw is not None:
             fw = self.pending_fw
-            if confirmed:
+
+            if decision == "confirm":
                 new_context = self._fetch_kg_context_by_framework(fw)
                 if new_context:
                     from_fw = self.kg_context["framework"]
@@ -1345,8 +1828,27 @@ class ExplainableAgent(BlackBoxAgent):
                 logging.info("[PENDING] framework switch confirmed: " + fw)
                 yield "Switching to **" + fw + "**. Let's start from the beginning.\n\n"
                 yield from self._stream_concept(is_first=True)
+
+            elif decision == "decline":
+                self.pending_fw = None
+                logging.info("[PENDING] framework switch declined — keeping: "
+                             + self.kg_context["framework"])
+                msg = (
+                    "No problem — we'll stay with **" + self.kg_context["framework"] + "**.\n\n"
+                    "*Would you like to add, change, or question anything here? "
+                    "Or shall we move on to the next pillar? Feel free to raise any "
+                    "pillar you think is important.*"
+                )
+                self.history.append(
+                    types.Content(role="model", parts=[types.Part(text=msg)])
+                )
+                log_agent_response(self.session_id, msg)
+                yield msg
+
             else:
-                logging.info("[PENDING] framework switch not confirmed — continuing: " + fw)
+                if cls.get("is_question"):
+                    log_question(self.session_id, "text", detail=user_input[:200])
+                logging.info("[PENDING] framework switch unresolved (other) — re-offering: " + fw)
                 yield from self._stream_pushback("framework", fw)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1354,15 +1856,31 @@ class ExplainableAgent(BlackBoxAgent):
     # ══════════════════════════════════════════════════════════════════════
 
     def _ask_add_placement(self):
-        """Ask user to confirm where to add their item (static, no LLM)."""
+        """Ask user to confirm where to add their item (static, no LLM).
+        Change log: 2026-06-04 — when the target pillar hasn't been presented yet,
+        gloss it with one sentence so the placement choice isn't opaque, and drop the
+        'bring in / existing pillar' wording (the target often already IS a pillar)."""
+        from backend import knowledge_base as kb
         item   = self.pending_add["item"]
-        kind   = self.pending_add["kind"]
         target = self.pending_add["target"]
 
-        if kind == "sub_bullet" and target:
+        # If the target is a real pillar the user hasn't been shown yet, add one
+        # sentence describing it so the choice isn't about an opaque name.
+        gloss = ""
+        if target:
+            tp = next((p for p in kb.get_all_pillars()
+                       if p["name"].lower() == target.lower()), None)
+            presented = (target in self.walkthrough_concepts
+                         and self.walkthrough_concepts.index(target) <= self.walkthrough_index)
+            if tp and tp.get("description") and not presented:
+                first = tp["description"].split(". ")[0].strip().rstrip(".")
+                if first:
+                    gloss = f" {first}."
+
+        if target:
             msg = (
-                f"Good idea. Would you like to add **{item}** as a point under "
-                f"**{target}**, or as a separate area of the framework?"
+                f"Good idea. **{item}** sounds like it belongs under **{target}**.{gloss} "
+                f"Would you like to add it under **{target}**, or as its own separate area?"
             )
         else:
             msg = (
@@ -1395,7 +1913,8 @@ class ExplainableAgent(BlackBoxAgent):
                 yield f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
             return
 
-        # ── CASE B: new pillar ─────────────────────────────────────────────
+        # ── CASE B: new pillar (user chose 'separate area') ────────────────
+        # Naming the AREA → add_pillar (consistent with BlackBox Stage 1).
         if resolved["as_new_pillar"]:
             matched_pillar = self._match_withheld_pillar(item)
             if matched_pillar:
@@ -1424,9 +1943,14 @@ class ExplainableAgent(BlackBoxAgent):
                 )
             return
 
-        # ── CASE A: sub-bullet into a pillar ───────────────────────────────
-        target = resolved["target"] or self.pending_add["target"] or self._current_concept()
-        match  = self._match_key_question(item, target)
+        # ── CASE A: sub-bullet into a pillar → add_sub_bullet ──────────────
+        # Naming a POINT inside an area. If the resolved target is a withheld pillar,
+        # INSERT it right after the current concept so it is walked next as a normal
+        # step (NO block dumped here, NO add_pillar). If it's an already-shown pillar,
+        # we show the updated block inline as before. Change log: 2026-06-04
+        target   = resolved["target"] or self.pending_add["target"] or self._current_concept()
+        revealed = self._reveal_withheld_pillar(target)
+        match    = self._match_key_question(item, target)
 
         if target not in self.user_sub_points:
             self.user_sub_points[target] = []
@@ -1441,29 +1965,43 @@ class ExplainableAgent(BlackBoxAgent):
             )
             if not already_shown and stored not in self.user_sub_points[target]:
                 self.user_sub_points[target].append(stored)
-            log_concept_added(self.session_id, item)
-            log_add_sub_bullet(self.session_id, stored, "text")
-            self.pending_add = None
-            logging.info(f"[ADD] sub-bullet matched key_question under '{target}'")
-            yield (
-                f"Good point, that's an important angle. I've added it under "
-                f"**{target}**. Here's how it looks now:\n\n"
-                f"{self._render_pillar_block(target)}\n\n"
-                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
-            )
         else:
-            stored = self._format_sub_bullet(item)       # Fix 1: terse, no raw input
+            stored = self._format_sub_bullet(item)      # terse, no raw input
             self.user_sub_points[target].append(stored)
-            log_concept_added(self.session_id, item)
-            log_add_sub_bullet(self.session_id, stored, "text")
-            self.pending_add = None
-            logging.info(f"[ADD] sub-bullet (no match, formatted) under '{target}'")
-            yield (
-                f"I don't have a source for this one, but it's a good addition. "
-                f"I've added it under **{target}**. Here's how it looks now:\n\n"
-                f"{self._render_pillar_block(target)}\n\n"
-                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
-            )
+
+        log_concept_added(self.session_id, item)
+        log_add_sub_bullet(self.session_id, stored, "text")
+        self.pending_add = None
+        logging.info(f"[ADD] sub-bullet under '{target}' "
+                     f"(matched={bool(match)}, revealed={revealed})")
+
+        if revealed:
+            # Withheld pillar just surfaced — discuss it NOW. It was inserted right
+            # after the current concept (swap stays ahead), so advance to it and present
+            # it as a normal walk-through step. Change log: 2026-06-04
+            self.walkthrough_index += 1
+            yield f"Good point — let's bring in **{target}** now.\n\n"
+            yield from self._stream_concept(is_first=False)
+        else:
+            target_idx = (self.walkthrough_concepts.index(target)
+                          if target in self.walkthrough_concepts
+                          else self.walkthrough_index)
+            if target_idx > self.walkthrough_index:
+                # Not yet reached → lift it to the next slot and discuss it now
+                # (Katie 2026-06-04). Swap just shifts back one — it still shows.
+                self._move_pillar_to_next(target)
+                self.walkthrough_index += 1
+                yield f"Good point — that fits **{target}**; let's bring it forward now.\n\n"
+                yield from self._stream_concept(is_first=False)
+            else:
+                # current or passed pillar → update in place, stay here
+                intro = ("Good point, that's an important angle. " if match else
+                         "I don't have a source for this one, but it's a good addition. ")
+                yield (
+                    f"{intro}I've added it under **{target}**. Here's how it looks now:\n\n"
+                    f"{self._render_pillar_block(target)}\n\n"
+                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+                )
 
     def _stream_pushback(self, pending_type: str, detail: str):
         concept = self._current_concept() or "the current concept"
@@ -1511,6 +2049,70 @@ class ExplainableAgent(BlackBoxAgent):
 
         yield from self._stream_with_instruction(instruction=instruction)
 
+    # ── Sub-bullet removal: reasoned pushback + 3-way confirm ──────────────
+    # Change log: 2026-06-04 — mirrors the pillar-removal flow at sub-bullet level.
+
+    def _stream_sub_bullet_pushback(self, pillar: str, bullet: str):
+        """Reasoned counterfactual for dropping ONE point (not the whole pillar)."""
+        concept = self._current_concept() or pillar
+        instruction = (
+            "You are a strategic consultant. The user wants to remove ONE specific "
+            "point from the **" + pillar + "** pillar (not the whole pillar). "
+            "Push back briefly using counterfactual reasoning.\n\n"
+            "─── RESPONSE FORMAT ──────────────────────────────────────────────────────\n"
+            "1. One sentence: If we drop this point, then [specific consequence].\n"
+            "2. End with exactly: Would you still like to remove it?\n\n"
+            "─── RULES ──────────────────────────────────────────────────────────────────\n"
+            "- Consulting reasoning only; soft tone — consequence as information.\n"
+            "- This is about ONE point, NOT the whole pillar — do not threaten to remove the pillar.\n"
+            "- Do NOT present any other concept.\n"
+            "─── CONTEXT ──────────────────────────────────────────────────────────────────\n"
+            "Point to remove: \"" + bullet + "\"\n"
+            "Pillar: **" + pillar + "** | Current concept: **" + concept + "**\n"
+            "Framework: " + self.kg_context["framework"] + " | Case: " + self.kg_context["case_type"] + "\n"
+            "─────────────────────────────────────────────────────────────────────\n"
+        )
+        yield from self._stream_with_instruction(instruction=instruction)
+
+    def _resolve_pending_sub_excl(self, user_input: str):
+        """3-way gate for a pending sub-bullet removal: confirm | decline | other."""
+        pillar = self.pending_sub_excl["pillar"]
+        bullet = self.pending_sub_excl["bullet"]
+        cls      = self._classify_confirmation(user_input)   # confirm | decline | other
+        decision = cls["decision"]
+
+        # confirm → record the exclusion (render + summary will omit it)
+        if decision == "confirm":
+            self.excluded_sub_bullets.setdefault(pillar, [])
+            if not self._is_excluded_bullet(pillar, bullet):
+                self.excluded_sub_bullets[pillar].append(bullet)
+            self.pending_sub_excl = None
+            logging.info(f"[PENDING] sub-bullet removal confirmed under '{pillar}'")
+            yield (
+                f"Done — I've removed that point from **{pillar}**. Here's how it looks now:\n\n"
+                f"{self._render_pillar_block(pillar)}\n\n"
+                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+            )
+
+        # decline → keep the point
+        elif decision == "decline":
+            self.pending_sub_excl = None
+            logging.info(f"[PENDING] sub-bullet removal declined — keeping point under '{pillar}'")
+            msg = (
+                f"No problem — I'll keep that point in **{pillar}**.\n\n"
+                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+            )
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+
+        # other → re-offer the reasoned pushback, KEEP pending
+        else:
+            if cls.get("is_question"):
+                log_question(self.session_id, "text", detail=user_input[:200])
+            logging.info(f"[PENDING] sub-bullet removal unresolved (other) — re-offering")
+            yield from self._stream_sub_bullet_pushback(pillar, bullet)
+
     def _stream_concept(self, is_first: bool):
         concept = self._current_concept()
         if concept is None:
@@ -1541,19 +2143,10 @@ class ExplainableAgent(BlackBoxAgent):
                 prefix = "**" + concept + "**\n" + note
             else:
                 description = pillar.get("description", "")
-                sub_bullets = pillar.get("sub_bullets", [])
-                sources     = pillar.get("sub_bullets_sources", "")
-
-                bullet_lines = "\n".join(f"- {b}" for b in sub_bullets)
-
-                # Append any user-added sub-points for this pillar inline
-                # (added earlier while on a different concept). Change log: 2026-05-29
-                added_points = self.user_sub_points.get(concept, [])
-                if added_points:
-                    added_lines = "\n".join(f"- {p}" for p in added_points)
-                    bullet_lines = bullet_lines + "\n" + added_lines
-
-                named_sources = _format_named_sources(_parse_source_line(sources))
+                # Shared body renderer — user-added bullets get their refs merged into
+                # the Sources line, identical to the summary (no dangling [e][d] markers
+                # mid-walkthrough). Change log: 2026-06-04
+                bullet_lines, named_sources = self._render_bullets_and_sources(concept)
                 sources_line  = f"\n\n{named_sources}" if named_sources else ""
 
                 prefix = (
@@ -1721,17 +2314,29 @@ class ExplainableAgent(BlackBoxAgent):
                 if c.lower() == wrong:
                     swap = kb.get_swap_concept()
                     for b in (swap.get("sub_bullets", []) if swap else []):
-                        lines.append(f"- {b}")
+                        if not self._is_excluded_bullet(c, b):
+                            lines.append(f"- {b}")
                 for sp in self.user_sub_points.get(c, []):
-                    lines.append(f"- {sp}")
+                    if not self._is_excluded_bullet(c, sp):
+                        lines.append(f"- {sp}")
                 lines.append("")
 
-        # User-added areas — heading only, no sub-bullets
+        # User-added areas — render KB sub-bullets if it's a KB pillar (empty-summary
+        # fix), else heading + the user's own points. Change log: 2026-06-03
         for p in added_pillars:
-            lines.append(f"**{p}**")
-            for sp in self.user_sub_points.get(p, []):
-                lines.append(f"- {sp}")
-            lines.append("")
+            pillar = next(
+                (x for x in kb.get_all_pillars() if x["name"].lower() == p.lower()),
+                None
+            )
+            if pillar:
+                lines.append(self._render_pillar_block(p))
+                lines.append("")
+            else:
+                lines.append(f"**{p}**")
+                for sp in self.user_sub_points.get(p, []):
+                    if not self._is_excluded_bullet(p, sp):
+                        lines.append(f"- {sp}")
+                lines.append("")
 
         summary_text = "\n".join(lines).rstrip()
 
