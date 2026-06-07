@@ -16,26 +16,74 @@ from backend.logger import (
 )
 from backend import knowledge_graph as kg
 from backend.rag_explainer import build_citation_header, check_and_append_warning
-
+from backend import knowledge_base as kb
 # ── Source display: letter scheme kept, entries shown as named links ────────
 # Change log: 2026-05-30
 SOURCE_NAMES = {
+    # GDPR
     "https://gdpr-info.eu/art-4-gdpr/": "GDPR Article 4",
     "https://gdpr-info.eu/art-5-gdpr/": "GDPR Article 5",
+    "https://gdpr-info.eu/art-9-gdpr/": "GDPR Article 9",
     "https://gdpr-info.eu/art-25-gdpr/": "GDPR Article 25",
+    "https://gdpr-info.eu/art-28-gdpr/": "GDPR Article 28",
     "https://gdpr-info.eu/art-35-gdpr/": "GDPR Article 35",
+    "https://gdpr-info.eu/art-44-gdpr/": "GDPR Article 44",
+    # EU AI Act
     "https://artificialintelligenceact.eu/article/3/": "EU AI Act Article 3",
+    "https://artificialintelligenceact.eu/article/4/": "EU AI Act Article 4",
     "https://artificialintelligenceact.eu/article/6/": "EU AI Act Article 6",
-    "https://artificialintelligenceact.eu/": "EU AI Act Recital 12",
+    "https://artificialintelligenceact.eu/article/10/": "EU AI Act Article 10",
+    "https://artificialintelligenceact.eu/article/11/": "EU AI Act Article 11",
+    "https://artificialintelligenceact.eu/article/14/": "EU AI Act Article 14",
+    "https://artificialintelligenceact.eu/article/50/": "EU AI Act Article 50",
+    "https://artificialintelligenceact.eu/": "EU AI Act",
+    # NIST
     "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10": "NIST AI RMF 1.0",
+    "https://airc.nist.gov/airmf-resources/airmf/5-sec-core/": "NIST AI RMF MANAGE 2.4",
+    "https://airc.nist.gov/airmf-resources/playbook/govern/": "NIST AI RMF GOVERN",
+    "https://airc.nist.gov/airmf-resources/playbook/manage/": "NIST AI RMF MANAGE",
+    # McKinsey
     "https://www.mckinsey.com/capabilities/quantumblack/our-insights/one-year-of-agentic-ai-six-lessons-from-the-people-doing-the-work": "McKinsey: One Year of Agentic AI",
-    "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai": "McKinsey QuantumBlack",
-    "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries": "ZenML Panel",
-    "https://www.bcg.com/publications/2026/ai-risk-management-needs-a-better-model": "BCG Smart Governance",
+    "https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai": "McKinsey QuantumBlack: From Promise to Impact",
+    "https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/overcoming-two-issues-that-are-sinking-gen-ai-programs": "McKinsey: Overcoming Two Issues Sinking Gen AI",
+    "https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/moving-past-gen-ais-honeymoon-phase-seven-hard-truths-for-cios-to-get-from-pilot-to-scale": "McKinsey: Seven Hard Truths for CIOs",
+    "https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/mlops-so-ai-can-scale": "McKinsey: MLOps So AI Can Scale",
+    "https://www.mckinsey.com/capabilities/mckinsey-technology/our-insights/recalibrating-technology-budgets-for-the-ai-era": "McKinsey: Recalibrating Tech Budgets",
+    "https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/the-new-economics-of-enterprise-technology-in-an-ai-world": "McKinsey: New Economics of Enterprise Tech",
+    "https://www.mckinsey.com/capabilities/risk-and-resilience/our-insights/trust-in-the-age-of-agents": "McKinsey: Trust in the Age of Agents",
+    "https://www.mckinsey.com/au/our-insights/australia-and-new-zealand-perspectives/accelerating-impact-from-ai": "McKinsey: Accelerating Impact from AI",
+    # BCG
+    "https://www.bcg.com/publications/2026/ai-risk-management-needs-a-better-model": "BCG: AI Risk Management",
+    "https://www.bcg.com/publications/2025/strategies-tackle-ai-skills-gap": "BCG: Strategies to Tackle AI Skills Gap",
+    "https://www.bcg.com/publications/2025/wont-get-gen-ai-right-if-human-oversight-wrong": "BCG: Human Oversight",
     "https://media-publications.bcg.com/global-scaling-strategic-workforce-planning-bcg-allianz.pdf": "BCG Strategic Workforce Planning",
+    # Gartner
+    "https://www.gartner.com/en/articles/when-not-to-use-generative-ai": "Gartner: When Not to Use GenAI",
+    "https://www.gartner.com/en/articles/deploying-ai": "Gartner: Build, Buy or Blend",
+    "https://www.gartner.com/en/newsroom/press-releases/2026-04-07-gartner-says-artificial-intelligence-projects-in-infrastructure-and-operations-stall-ahead-of-meaningful-roi-returns": "Gartner: AI Projects in I&O Stall",
+    "https://www.gartner.com/en/newsroom/press-releases/2026-05-13-gartner-predicts-by-2027-50-percent-of-enterprises-without-a-people-centric-ai-strategy-will-lose-their-top-ai-talent": "Gartner: People-Centric AI Strategy",
+    # Deloitte
     "https://www.deloitte.com/us/en/about/press-room/state-of-ai-report-2026.html": "Deloitte State of AI 2026",
+    "https://www.deloitte.com/content/dam/assets-shared/docs/about/2025/state-of-ai-2026-global.pdf": "Deloitte State of AI in the Enterprise 2026",
+    "https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/blogs/pulse-check-series-latest-ai-developments/ai-adoption-challenges-ai-trends.html": "Deloitte: AI Adoption Challenges",
+    # Other standards & frameworks
+    "https://www.zenml.io/llmops-database/enterprise-genai-implementation-strategies-across-industries": "ZenML Panel",
     "https://www.hackingthecaseinterview.com/pages/ai-implementation-case-interview": "Hacking the Case Interview",
     "https://www.allianz.com/en/mediacenter/news/articles/260318-responsible-use-of-ai-at-allianz.html": "Allianz Responsible AI",
+    "https://www.allianz.com/en/about-us/strategy-values/responsible-use-of-artificial-intelligence.html": "Allianz Responsible AI Principles",
+    "https://www.isms.online/iso-27002/control-5-12-classification-of-information/": "ISO/IEC 27002 Control 5.12",
+    "https://iso25000.com/index.php/en/iso-25000-standards/iso-25010": "ISO/IEC 25010 SQuaRE",
+    "https://kpmg.com/ch/en/insights/artificial-intelligence/iso-iec-42001.html": "ISO/IEC 42001:2023",
+    "https://www.digital-operational-resilience-act.com/Article_28.html": "DORA Article 28",
+    "https://www.wolterskluwer.com/en/news/indicator-survey-finds-lower-concern-levels-following-significant-drop-in-regulatory-penalties": "Wolters Kluwer Regulatory Indicator 2025",
+    "https://www.ibm.com/think/insights/building-evaluating-ai-agents-real-world": "IBM: Building AI Agents",
+    "https://www.slideshare.net/slideshow/state-of-ai-in-business-2025-mit-nanda/282804851": "MIT NANDA: State of AI in Business 2025",
+    "https://arxiv.org/pdf/2004.05785": "Lu et al.: Learning under Concept Drift",
+    "https://arxiv.org/abs/2202.01523": "Jabrayilzade et al.: Bus Factor In Practice",
+    "https://doi.org/10.1145/3449287": "Buçinca et al.: Overreliance on AI",
+    "https://genai.owasp.org/llmrisk/llm01-prompt-injection/": "OWASP LLM01: Prompt Injection",
+    "https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/": "OWASP LLM02: Sensitive Information Disclosure",
+    "https://genai.owasp.org/llmrisk/llm092025-misinformation/": "OWASP LLM09: Misinformation",
 }
 
 _SRC_ENTRY_RE  = re.compile(r"\[([a-z])\]\(([^)]+)\)")   # [a](url) entries
@@ -575,7 +623,7 @@ standalone negation with no instruction ("no", "no thanks") is non-steering.
 Respond ONLY with valid JSON, no explanation, no markdown:
 {{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
 
-Examples (assuming concepts include: Strategic Fit, Use Case and Solution, Feasibility):
+Examples (assuming concepts include: Strategic Fit, Solution Design & Scope, Feasibility):
 - "start over" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.99}}
 - "restart from scratch" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.98}}
 - "move on" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
@@ -592,7 +640,7 @@ Examples (assuming concepts include: Strategic Fit, Use Case and Solution, Feasi
 - "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "let's discuss Strategic Fit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "can we talk about Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "what about Use Case and Solution?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
+- "what about Solution Design & Scope?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "why are we considering this?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "why is this here?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
 - "is it part of Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
@@ -930,7 +978,7 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _classify_addition(self, item: str) -> dict:
         """LLM: is this a sub-bullet or a new pillar? Best-guess target pillar."""
-        from backend import knowledge_base as kb
+        
         pillars = ", ".join(p["name"] for p in kb.get_shown_pillars())
         prompt = ADD_CLASSIFY_PROMPT.format(pillars=pillars, item=item)
         try:
@@ -1320,9 +1368,7 @@ class ExplainableAgent(BlackBoxAgent):
         return "\n".join(bullet_lines), _format_named_sources(merged)
 
     def _render_pillar_block(self, concept: str) -> str:
-        """Read-only. Heading + body via the shared renderer (bullets + one merged,
-        named Sources line). No side-effects. Change log: 2026-06-04 — delegates body
-        to _render_bullets_and_sources so summary and live walkthrough agree."""
+        """Heading + bullets + Sources line. Used by live walkthrough."""
         bullets, src = self._render_bullets_and_sources(concept)
         lines = [f"**{concept}**"]
         if bullets:
@@ -1330,6 +1376,16 @@ class ExplainableAgent(BlackBoxAgent):
         if src:
             lines.append("")
             lines.append(src)
+        return "\n".join(lines)
+
+    def _render_pillar_block_no_sources(self, concept: str) -> str:
+        """Heading + bullets only — no Sources line. Used by summary."""
+        bullets, _ = self._render_bullets_and_sources(concept)
+        # Also strip any inline [a] [b] refs that survive inside bullet text
+        bullets = _INLINE_REF_RE.sub("", bullets).strip()
+        lines = [f"**{concept}**"]
+        if bullets:
+            lines.append(bullets)
         return "\n".join(lines)
     
     def _concept_grounding(self, concept: str) -> str:
@@ -1579,6 +1635,7 @@ class ExplainableAgent(BlackBoxAgent):
                 self.excluded_sub_bullets = {}
                 self.has_main_contribution = False
                 self.user_added_pillars   = []
+                self.user_sub_points      = {}
                 if self.concept_swap.is_detected:
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
@@ -1654,7 +1711,16 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._stream_concept(is_first=True)
 
         elif self.walkthrough_done:
-            yield from self._stream_freeform(cs_detected)
+            # Check if user wants to revisit a past pillar before falling through to freeform.
+            revisit = self._match_pillar(user_input)
+            past = [c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
+                    if c.lower() not in [e.lower() for e in self.excluded_concepts]]
+            if revisit and revisit in past:
+                self.walkthrough_index = self.walkthrough_concepts.index(revisit)
+                yield f"Going back to **{revisit}** — here's where we left off.\n\n"
+                yield from self._stream_concept(is_first=False)
+            else:
+                yield from self._stream_freeform(cs_detected)
 
         elif override and override["type"] == "pending_excl_set":
             yield from self._stream_pushback("concept", self.pending_excl)
@@ -1939,7 +2005,7 @@ class ExplainableAgent(BlackBoxAgent):
                 yield (
                     f"Noted. We'll add **{item}** as a separate area "
                     f"toward the end of the walkthrough.\n\n"
-                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar?*"
+                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
                 )
             return
 
@@ -1967,7 +2033,8 @@ class ExplainableAgent(BlackBoxAgent):
                 self.user_sub_points[target].append(stored)
         else:
             stored = self._format_sub_bullet(item)      # terse, no raw input
-            self.user_sub_points[target].append(stored)
+            if stored not in self.user_sub_points[target]:
+                self.user_sub_points[target].append(stored)
 
         log_concept_added(self.session_id, item)
         log_add_sub_bullet(self.session_id, stored, "text")
@@ -2087,6 +2154,9 @@ class ExplainableAgent(BlackBoxAgent):
             if not self._is_excluded_bullet(pillar, bullet):
                 self.excluded_sub_bullets[pillar].append(bullet)
             self.pending_sub_excl = None
+            log_memory_override(self.session_id,
+                old_context=f"sub-bullet in {pillar}: {bullet}",
+                new_context="user confirmed removal")
             logging.info(f"[PENDING] sub-bullet removal confirmed under '{pillar}'")
             yield (
                 f"Done — I've removed that point from **{pillar}**. Here's how it looks now:\n\n"
@@ -2159,7 +2229,7 @@ class ExplainableAgent(BlackBoxAgent):
         else:
             swap    = kb.get_swap_concept()
             bullets = swap.get("sub_bullets", []) if swap else []
-            bullet_lines = "\n".join(f"- {b}" for b in bullets)
+            bullet_lines = "\n".join(f"- {_INLINE_REF_RE.sub('', b).strip()}" for b in bullets)
             prefix = (
                 f"**{concept}**\n\n"
                 f"{bullet_lines}\n\n"
@@ -2200,7 +2270,7 @@ class ExplainableAgent(BlackBoxAgent):
             "*I can see why you'd question this — shall we include it or move on without it?*"
             if on_swap else
             "End with exactly:\n"
-            "*Shall we exclude this and move on to the next concept?*"
+            "*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
         )
 
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
@@ -2307,7 +2377,7 @@ class ExplainableAgent(BlackBoxAgent):
                 None
             )
             if pillar:
-                lines.append(self._render_pillar_block(c))   # named + merged sources
+                lines.append(self._render_pillar_block_no_sources(c))
                 lines.append("")
             else:
                 lines.append(f"**{c}**")
@@ -2315,10 +2385,10 @@ class ExplainableAgent(BlackBoxAgent):
                     swap = kb.get_swap_concept()
                     for b in (swap.get("sub_bullets", []) if swap else []):
                         if not self._is_excluded_bullet(c, b):
-                            lines.append(f"- {b}")
+                            lines.append(f"- {_INLINE_REF_RE.sub('', b).strip()}")
                 for sp in self.user_sub_points.get(c, []):
                     if not self._is_excluded_bullet(c, sp):
-                        lines.append(f"- {sp}")
+                        lines.append(f"- {_INLINE_REF_RE.sub('', sp).strip()}")
                 lines.append("")
 
         # User-added areas — render KB sub-bullets if it's a KB pillar (empty-summary
@@ -2329,13 +2399,13 @@ class ExplainableAgent(BlackBoxAgent):
                 None
             )
             if pillar:
-                lines.append(self._render_pillar_block(p))
+                lines.append(self._render_pillar_block_no_sources(p))
                 lines.append("")
             else:
                 lines.append(f"**{p}**")
                 for sp in self.user_sub_points.get(p, []):
                     if not self._is_excluded_bullet(p, sp):
-                        lines.append(f"- {sp}")
+                        lines.append(f"- {_INLINE_REF_RE.sub('', sp).strip()}")
                 lines.append("")
 
         summary_text = "\n".join(lines).rstrip()
@@ -2348,6 +2418,18 @@ class ExplainableAgent(BlackBoxAgent):
         log_agent_response(self.session_id, summary_text)
 
         yield summary_text
+
+        closing = (
+            "\n\n---\n\n"
+            "Is there anything you'd like to revisit, add to, or discuss further? "
+            "You can name any pillar and I'll take you back to it — "
+            "or click **‼️End Session** whenever you're ready to finish."
+        )
+        self.history.append(
+            types.Content(role="model", parts=[types.Part(text=closing)])
+        )
+        log_agent_response(self.session_id, closing)
+        yield closing
 
     def _stream_freeform(self, cs_detected: bool):
         concepts_str = " → ".join(self.kg_context["concepts"])

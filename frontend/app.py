@@ -461,6 +461,127 @@ async def on_done_adding(action: cl.Action):
     await msg.update()
     await _attach_buttons(agent)
 
+
+# ── HITL — ➖ Remove a point: open picker ─────────────────────────────────
+@cl.action_callback("remove_point_open")
+async def on_remove_point_open(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    bullets = agent.removable_bullets()
+    if not bullets:
+        await cl.Message(content="There are no points to remove right now.").send()
+        await _attach_buttons(agent)
+        return
+    bullet_actions = [
+        cl.Action(
+            name="remove_point_item",
+            label=b[:80],
+            description=b,
+            payload={"bullet": b},
+        )
+        for b in bullets
+    ]
+    await cl.Message(
+        content="Which point would you like to remove?",
+        actions=bullet_actions,
+    ).send()
+
+
+# ── HITL — ➖ Remove a point: item selected ───────────────────────────────
+@cl.action_callback("remove_point_item")
+async def on_remove_point_item(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    bullet = action.payload.get("bullet", "")
+    if not bullet:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_remove_point(bullet):
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
+# ── HITL — ➖ Remove a point: confirm ─────────────────────────────────────
+@cl.action_callback("confirm_remove_point")
+async def on_confirm_remove_point(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_confirm_remove_point():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
+# ── HITL — ➖ Remove a point: cancel ─────────────────────────────────────
+@cl.action_callback("cancel_remove_point")
+async def on_cancel_remove_point(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_cancel_remove_point():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
+# ── HITL — ↩️ Revisit past pillar: open picker ───────────────────────────
+@cl.action_callback("revisit_pillar_open")
+async def on_revisit_pillar_open(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    past = agent.past_pillars()
+    if not past:
+        await cl.Message(content="No past pillars to revisit yet.").send()
+        await _attach_buttons(agent)
+        return
+    pillar_actions = [
+        cl.Action(
+            name="revisit_pillar_item",
+            label=p,
+            description=p,
+            payload={"pillar": p},
+        )
+        for p in past
+    ]
+    await cl.Message(
+        content="Which past pillar would you like to add a point to?",
+        actions=pillar_actions,
+    ).send()
+
+
+# ── HITL — ↩️ Revisit past pillar: pillar selected ──────────────────────
+@cl.action_callback("revisit_pillar_item")
+async def on_revisit_pillar_item(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    pillar = action.payload.get("pillar", "")
+    if not pillar:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_revisit_pillar(pillar):
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
 # ── HITL — Confirm reject (commit exclusion) ───────────────────────────────
 @cl.action_callback("confirm_reject")
 async def on_confirm_reject(action: cl.Action):
@@ -531,6 +652,25 @@ async def _attach_buttons(agent):
                 ]
             ).send()
 
+        elif agent.should_show_remove_point_confirmation():
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(
+                        name="cancel_remove_point",
+                        label="↩️ Keep it",
+                        description="Keep this point",
+                        payload={}
+                    ),
+                    cl.Action(
+                        name="confirm_remove_point",
+                        label="✅ Yes, remove it",
+                        description="Confirm removal of this point",
+                        payload={}
+                    ),
+                ]
+            ).send()
+
         elif agent.should_show_confirmation_buttons():
             await cl.Message(
                 content="",
@@ -550,7 +690,7 @@ async def _attach_buttons(agent):
                 ]
             ).send()
 
-        elif agent.awaiting_sub_point:
+        elif agent.awaiting_sub_point or agent.awaiting_revisit_add:
             await cl.Message(
                 content="",
                 actions=[
@@ -560,17 +700,23 @@ async def _attach_buttons(agent):
             ).send()
 
         elif agent.should_show_buttons():
-            await cl.Message(
-                content="",
-                actions=[
-                    cl.Action(name="approve_concept", label="✅ Include",
-                              description="Include this concept in the framework", payload={}),
-                    cl.Action(name="reject_concept", label="❌ Skip",
-                              description="Skip this concept", payload={}),
-                    cl.Action(name="add_to_concept", label="➕ Add point to consider in this area",
-                              description="Add your own point under this concept", payload={}),
-                ]
-            ).send()
+            actions = [
+                cl.Action(name="approve_concept", label="✅ Include",
+                          description="Include this concept in the framework", payload={}),
+                cl.Action(name="reject_concept", label="❌ Skip",
+                          description="Skip this concept", payload={}),
+                cl.Action(name="add_to_concept", label="➕ Add point to consider in this pillar",
+                          description="Add your own point under this concept", payload={}),
+                cl.Action(name="remove_point_open", label="➖ Remove a point in this pillar",
+                          description="Remove one of the existing points", payload={}),
+            ]
+            if agent.past_pillars():
+                actions.append(
+                    cl.Action(name="revisit_pillar_open", label="↩️ Add point to a past pillar",
+                              description="Go back and add a point to a concept you already decided on",
+                              payload={})
+                )
+            await cl.Message(content="", actions=actions).send()
 
         else:
             if agent.walkthrough_active or agent.walkthrough_done:
