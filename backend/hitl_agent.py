@@ -4,7 +4,7 @@ import random
 import re
 from google.genai import types
 from backend.black_box_agent import (
-    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
+    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json,
     ANSWER_THRESHOLD, OVERRIDE_THRESHOLD,
 )
 from backend.cases import get_case, get_clarification_facts
@@ -12,9 +12,8 @@ from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
-    log_framework_switched, log_concept_added, stamp_started_at,log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned,
+    log_concept_added, stamp_started_at,log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned,
 )
-from backend import knowledge_graph as kg          # inherited framework-switch paths only
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
 
 # Strip inline source refs like " [a]" / "[b]" — HITL suppresses sources, so these
@@ -178,6 +177,9 @@ class HITLAgent(BlackBoxAgent):
                              withheld-pillar matching for new areas, deterministic
                              summary, deterministic 2-of-3 justification + min-substance
                              gate, ➕ Add sub-point flow (match key question, no source).
+    Change log: 2026-06-07 — restored ➖ remove-point + ↩️ revisit-pillar handlers
+                             (app.py expects them); pending_sub_excl / awaiting_revisit_add
+                             state added. Remove-point logs delete at CONFIRM.
     """
 
     def __init__(self, user_id: str = "anonymous"):
@@ -205,14 +207,6 @@ class HITLAgent(BlackBoxAgent):
             f"concepts={self.kg_context['concepts']}"
         )
 
-        self._kg_framework_keywords = {
-            "Economic Feasibility":    ["economic feasibility", "market entry", "market potential"],
-            "Expanded Profit Formula": ["profit formula", "profitability", "revenue", "cost tree"],
-            "Four-Pronged Strategy":   ["four-pronged", "pricing strategy", "price elasticity"],
-            "Formulaic Breakdown":     ["formulaic breakdown", "guesstimate", "market sizing"],
-            "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
-        }
-
         # ── Walkthrough state ──────────────────────────────────────────────
         self.walkthrough_concepts = []
         self.walkthrough_index    = 0
@@ -239,13 +233,16 @@ class HITLAgent(BlackBoxAgent):
         self.justification_pillars = set()
 
         # ── Pending confirmation state ─────────────────────────────────────
-        self.pending_excl = None
+        self.pending_excl     = None
+        self.pending_sub_excl = None             # (concept, bullet) staged for removal
 
         # ── Interaction-mode flags ─────────────────────────────────────────
         self.awaiting_user_suggestion  = False
         self.awaiting_justification    = False
         self.justification_for         = None
         self.awaiting_sub_point        = False   # ➕ Add mode. Change log: 2026-05-29
+        self.awaiting_revisit_add      = False   # ↩️ revisit add-mode
+        self.revisit_target            = None    # pillar being revisited
         self.prompt_index              = 0
         self.ack_index                 = 0
         self.user_contributed_concepts = set()
@@ -400,9 +397,7 @@ class HITLAgent(BlackBoxAgent):
     def _classify_intent(self, user_input: str) -> dict:
         """suggestion | guidance | sub_point (with parent)."""
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=(
+            result = classify_json(
                     f"You are classifying a user response in a case interview session.\n\n"
                     f"The user was asked: 'What's your suggestion for the next area to "
                     f"explore, or would you like me to guide you?'\n\n"
@@ -425,14 +420,7 @@ class HITLAgent(BlackBoxAgent):
                     f"- Affirmations: 'ok', 'sure', 'yes', 'fine'\n"
                     f"- Verb phrases without a clear business noun\n\n"
                     f"WHEN IN DOUBT: use guidance."
-                ),
             )
-            raw = response.text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            result = json.loads(raw.strip())
             logging.info(f"[INTENT] classified: {result}")
             return result
         except Exception as e:
@@ -443,9 +431,7 @@ class HITLAgent(BlackBoxAgent):
         """Check if a user-suggested concept matches one already in the walkthrough."""
         all_concepts = list(self.walkthrough_concepts)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=(
+            result = classify_json(
                     f"You are checking if a user-suggested concept matches any concept "
                     f"in an existing list.\n\n"
                     f"User suggested: \"{concept}\"\n\n"
@@ -457,14 +443,7 @@ class HITLAgent(BlackBoxAgent):
                     f"concept as one in the list — same topic, possibly different wording.\n"
                     f"matched_concept must be the exact string from the list.\n"
                     f"WHEN IN DOUBT: is_duplicate=false."
-                ),
             )
-            raw = response.text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            result = json.loads(raw.strip())
             logging.info(f"[DUPLICATE] check result: {result}")
             return result
         except Exception as e:
@@ -482,10 +461,7 @@ class HITLAgent(BlackBoxAgent):
         pillars_block = "\n".join(f"- {p['name']}" for p in pillars)
         prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 return parsed.get("matched_pillar")
@@ -513,10 +489,7 @@ class HITLAgent(BlackBoxAgent):
             item=item, pillar=pillar_name, key_questions=kq_block
         )
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 idx = parsed.get("matched_index")
@@ -537,6 +510,7 @@ class HITLAgent(BlackBoxAgent):
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
                 contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
+                config=types.GenerateContentConfig(temperature=0.0),
             )
             out = _strip_source_refs(self._strip_fences(response.text)).strip().strip("-• ").rstrip(".")
             if out:
@@ -608,6 +582,20 @@ class HITLAgent(BlackBoxAgent):
                 f"{lead}\n\n"
                 f"{rerender}\n\n"
                 f"Anything else to add under **{concept}**? "
+                f"Click **✅ Done adding** when you're finished."
+            )
+            return
+
+        # ── 0b. ↩️ Revisit-add mode — add a point to a PAST pillar, stay open ─
+        if self.awaiting_revisit_add:
+            target = self.revisit_target or self._current_concept() or "this concept"
+            log_user_message(self.session_id, f"[REVISIT ADD] {user_input}")
+            stored, is_new = self._store_sub_point(target, user_input, modality="button")
+            lead = (f"Added to **{target}**." if is_new
+                    else f"You've already got that one under **{target}**.")
+            yield (
+                f"{lead}\n\n"
+                f"Anything else to add to **{target}**? "
                 f"Click **✅ Done adding** when you're finished."
             )
             return
@@ -765,10 +753,13 @@ class HITLAgent(BlackBoxAgent):
                 self.swap_presented            = False
                 self.swap_position             = 0
                 self.pending_excl              = None
+                self.pending_sub_excl          = None
                 self.awaiting_user_suggestion  = False
                 self.awaiting_justification    = False
                 self.justification_for         = None
                 self.awaiting_sub_point        = False
+                self.awaiting_revisit_add      = False
+                self.revisit_target            = None
                 self.prompt_index              = 0
                 self.ack_index                 = 0
                 self.user_contributed_concepts = set()
@@ -777,17 +768,6 @@ class HITLAgent(BlackBoxAgent):
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted — let me start the walkthrough fresh.\n\n"
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
-
-            elif override["type"] == "framework_switch":
-                if override.get("detail"):
-                    self._update_kg_if_framework_mentioned(override["detail"])
-                    log_memory_override(
-                        self.session_id,
-                        old_context=f"framework: {self.kg_context['framework']}",
-                        new_context=f"switch requested: {override['detail']}",
-                    )
-                yield "Switching framework — let me restart the walkthrough.\n\n"
-                log_user_message(self.session_id, "[FRAMEWORK SWITCH TRIGGERED]")
 
             elif override["type"] == "concept_added" and override.get("detail"):
                 new_concept = override["detail"]
@@ -1088,8 +1068,6 @@ class HITLAgent(BlackBoxAgent):
             f"─────────────────────────────────────────────────────────────\n"
         )
 
-        # logging.info("[QA GROUNDING] present=%s concept=%s",
-        #              "KNOWN POINTS FOR THIS CONCEPT" in instruction, concept)
         yield from self._stream_with_instruction(
             instruction = instruction,
             prefix      = added_note,
@@ -1277,7 +1255,7 @@ class HITLAgent(BlackBoxAgent):
             return
 
         self.pending_excl = concept
-        
+
         logging.info(f"[REJECT] pending set for concept='{concept}'")
         if not self._is_wrong_concept(concept):
             log_delete(self.session_id, concept, "button")   # intent (#1); swap stays detection (#3)
@@ -1353,11 +1331,64 @@ class HITLAgent(BlackBoxAgent):
         )
 
     def on_done_adding(self):
-        """✅ Done adding — close add-mode, return to the Include/Skip decision."""
+        """✅ Done adding — close add-mode (sub-point OR revisit)."""
+        self.awaiting_sub_point   = False
+        self.awaiting_revisit_add = False
+        self.revisit_target       = None
         concept = self._current_concept() or "this concept"
-        self.awaiting_sub_point = False
         logging.info(f"[ADD] add-mode closed for concept='{concept}'")
         yield f"Got it. Back to **{concept}** — include it, skip it, or add more.\n\n"
+
+    # ── ➖ Remove a point: picker → confirm → commit ───────────────────────
+    def on_remove_point(self, bullet: str):
+        concept = self._current_concept()
+        if concept is None or not bullet:
+            return
+        self.pending_sub_excl = (concept, bullet)
+        logging.info(f"[REMOVE POINT] pending: '{bullet}' under '{concept}'")
+        yield (
+            f"Remove this point from **{concept}**?\n\n- {bullet}\n\n"
+            f"*Use the buttons below to confirm.*"
+        )
+
+    def on_confirm_remove_point(self):
+        if not self.pending_sub_excl:
+            return
+        concept, bullet = self.pending_sub_excl
+        self.pending_sub_excl = None
+        target = bullet.strip().lstrip("-• ").strip().lower()
+
+        block = self.concept_blocks.get(concept, "")
+        if block:
+            self.concept_blocks[concept] = "\n".join(
+                l for l in block.splitlines()
+                if l.strip().lstrip("-• ").strip().lower() != target
+            )
+        pts = self.user_sub_points.get(concept, [])
+        self.user_sub_points[concept] = [p for p in pts
+                                         if p.strip().lower() != target]
+
+        log_delete(self.session_id, bullet, "button")   # logged at CONFIRM
+        logging.info(f"[REMOVE POINT CONFIRMED] '{bullet}' from '{concept}'")
+        yield f"Done — removed that point from **{concept}**.\n\n"
+
+    def on_cancel_remove_point(self):
+        concept = self.pending_sub_excl[0] if self.pending_sub_excl else "this concept"
+        self.pending_sub_excl = None
+        logging.info(f"[REMOVE POINT CANCELLED] keeping point under '{concept}'")
+        yield f"No problem — keeping that point in **{concept}**.\n\n"
+
+    # ── ↩️ Revisit a past pillar ───────────────────────────────────────────
+    def on_revisit_pillar(self, pillar: str):
+        if not pillar:
+            return
+        self.revisit_target       = self._normalize_pillar(pillar)
+        self.awaiting_revisit_add = True
+        logging.info(f"[REVISIT] add-mode opened for past pillar='{self.revisit_target}'")
+        yield (
+            f"Sure — what point would you like to add to **{self.revisit_target}**? "
+            f"Type it, and click **✅ Done adding** when you're finished."
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # UI state queries
@@ -1370,14 +1401,46 @@ class HITLAgent(BlackBoxAgent):
             and not self.walkthrough_done
             and self._current_concept() is not None
             and self.pending_excl is None
+            and self.pending_sub_excl is None
             and not self.awaiting_user_suggestion
             and not self.awaiting_justification
             and not self.awaiting_sub_point
+            and not self.awaiting_revisit_add
             and (self._current_concept() not in self.user_contributed_concepts)
         )
 
     def should_show_confirmation_buttons(self) -> bool:
         return self.pending_excl is not None
+
+    def should_show_remove_point_confirmation(self) -> bool:
+        return self.pending_sub_excl is not None
+
+    def removable_bullets(self) -> list[str]:
+        concept = self._current_concept()
+        if concept is None:
+            return []
+        out, seen = [], set()
+        for src in (self.concept_blocks.get(concept, "").splitlines(),
+                    [f"- {p}" for p in self.user_sub_points.get(concept, [])]):
+            for l in src:
+                t = l.strip().lstrip("-• ").strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    out.append(t)
+        return out
+
+    def past_pillars(self) -> list[str]:
+        wrong = self.concept_swap.config["wrong_concept"].lower()
+        excluded = [e.lower() for e in self.excluded_concepts]
+        current = (self._current_concept() or "").lower()
+        out, seen = [], set()
+        for c in self.walkthrough_concepts[:self.walkthrough_index]:
+            cl = c.lower()
+            if cl in excluded or cl == wrong or cl == current or cl in seen:
+                continue
+            seen.add(cl)
+            out.append(c)
+        return out
 
     # ══════════════════════════════════════════════════════════════════════
     # Summary + session

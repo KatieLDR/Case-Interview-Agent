@@ -7,12 +7,11 @@ from backend import knowledge_base as kb
 
 load_dotenv()
 
-# ── Gemini client ──────────────────────────────────────────────────────────
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
-CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
+# ── LLM (centralised in backend.llm) ───────────────────────────────────────
+from backend.llm import client, CLASSIFIER_MODEL, classify_json, FAITHFULNESS_THRESHOLD, PILLAR_MATCH_THRESHOLD
 
 # ── Faithfulness threshold ─────────────────────────────────────────────────
-FAITHFULNESS_THRESHOLD = 0.85
+# FAITHFULNESS_THRESHOLD now imported from backend.llm
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -75,7 +74,7 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {{"faithful": true or false, "confidence": float between 0.0 and 1.0}}
 """
 
-PILLAR_MATCH_THRESHOLD = 0.80
+# PILLAR_MATCH_THRESHOLD now imported from backend.llm
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -107,12 +106,7 @@ def _match_pillar(concept_name: str) -> dict | None:
     )
 
     try:
-        response = client.models.generate_content(
-            model=CLASSIFIER_MODEL,
-            contents=prompt,
-        )
-        raw    = _strip_fences(response.text)
-        parsed = json.loads(raw)
+        parsed = classify_json(prompt)
 
         pillar_id  = parsed.get("matched_pillar_id")
         confidence = parsed.get("confidence", 0.0)
@@ -225,12 +219,7 @@ def check_and_append_warning(concept_name: str, concept_block: str, kb_data: dic
     )
 
     try:
-        response = client.models.generate_content(
-            model=CLASSIFIER_MODEL,
-            contents=prompt,
-        )
-        raw    = _strip_fences(response.text)
-        parsed = json.loads(raw)
+        parsed = classify_json(prompt)
 
         faithful   = parsed.get("faithful", True)
         confidence = parsed.get("confidence", 0.0)
@@ -262,17 +251,3 @@ def build_and_check_citation(concept_name: str, framework: str, concept_block: s
     if warning:
         result += warning
     return result
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Utility
-# ══════════════════════════════════════════════════════════════════════════
-
-def _strip_fences(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    return text

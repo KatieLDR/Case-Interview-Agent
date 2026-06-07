@@ -3,7 +3,7 @@ import logging
 import re
 from google.genai import types
 from backend.black_box_agent import (
-    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client,
+    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json,
     ANSWER_THRESHOLD, OVERRIDE_THRESHOLD,
 )
 from backend.cases import get_case, get_clarification_facts
@@ -11,12 +11,11 @@ from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, log_memory_override, update_answer,
-    log_framework_switched, log_concept_added,
+    log_concept_added,
     log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned
 )
-from backend import knowledge_graph as kg
 from backend.rag_explainer import build_citation_header, check_and_append_warning
-from backend import knowledge_base as kb
+
 # ── Source display: letter scheme kept, entries shown as named links ────────
 # Change log: 2026-05-30
 SOURCE_NAMES = {
@@ -253,34 +252,6 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 
 ADVANCE_THRESHOLD = 0.75
 
-FRAMEWORK_RESOLVER_PROMPT = """
-You are a classifier for a case interview tool.
-
-The user mentioned they want to use a specific framework. Your job is to match
-their mention to the available frameworks listed below.
-
-Return a JSON list of framework names that match. Rules:
-- Include a framework if the user's mention clearly refers to it
-- Include a framework if the user's mention is a reasonable synonym or abbreviation
-- If two frameworks are plausibly intended, include both
-- If nothing matches, return an empty list []
-- Do NOT invent framework names — only return names from the list below
-
-Respond ONLY with a valid JSON array of strings, no explanation, no markdown:
-["Framework Name"] or ["Name 1", "Name 2"] or []
-
-Examples (given frameworks: Economic Feasibility, Expanded Profit Formula,
-Four-Pronged Strategy, Formulaic Breakdown, Customized Issue Trees):
-- "pricing" → ["Four-Pronged Strategy"]
-- "profitability" → ["Expanded Profit Formula"]
-- "market entry" → ["Economic Feasibility"]
-- "cost framework" → ["Expanded Profit Formula"]
-- "guesstimate" → ["Formulaic Breakdown"]
-- "issue tree" → ["Customized Issue Trees"]
-- "profit and pricing" → ["Expanded Profit Formula", "Four-Pronged Strategy"]
-- "blockchain framework" → []
-- "supply chain" → []
-"""
 CLARIFY_DOUBT_PROMPT = """
 You classify a user's message during a framework walkthrough.
 
@@ -381,7 +352,6 @@ Intents:
 - "doubt"    : vaguely doubts the current concept belongs, WITHOUT a clear remove
                command ("I'm not sure this fits", "this seems off", "is this necessary?").
 - "redo"     : restart the whole walkthrough from scratch.
-- "switch"   : switch to a different named FRAMEWORK. detail = the framework mention.
 - "none"     : none of the above / unclear.
 
 KEY DISAMBIGUATION:
@@ -415,7 +385,7 @@ Its points:
 ────────────────────────────────────────────────────────────────────────────
 
 Respond ONLY with valid JSON, no markdown:
-{{"intent": "advance|add|remove|question|doubt|redo|switch|none", "detail": "string or null", "confidence": float}}
+{{"intent": "advance|add|remove|question|doubt|redo|none", "detail": "string or null", "confidence": float}}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -562,93 +532,6 @@ User note: "{item}"
 Output ONLY the reformatted sub-bullet, nothing else.
 """
 
-WALKTHROUGH_OVERRIDE_PROMPT = """
-You are a classifier for a case interview walkthrough tool.
-
-The agent is currently walking the user through a framework one concept at a time.
-Determine whether the user's message is attempting to steer or change the agent's output.
-
-If yes, classify the type:
-- "redo"               : user wants to RESTART the entire walkthrough from scratch
-                         ("start over", "restart", "begin again", "let's start fresh",
-                          "redo this", "try again from the beginning")
-- "concept_excluded"   : user wants to remove a specific concept
-                         ("remove X", "exclude X", "don't include X", "skip X",
-                          "I don't want X", "drop X")
-- "concept_added"      : user wants to ADD a new concept to the framework
-                         ("what about X", "can we also consider X", "add X",
-                          "include X", "how about X", "what if we add X")
-- "framework_switch"   : user wants to use a specific different FRAMEWORK
-                         ("use Market Entry framework", "switch to profitability")
-- "none"               : not steering the output
-
-─── ACTIVE WALKTHROUGH CONCEPTS ──────────────────────────────────────────────
-{concepts}
-──────────────────────────────────────────────────────────────────────────────
-CRITICAL — if the user mentions any name from the ACTIVE WALKTHROUGH CONCEPTS
-list above in a discussion context ("let's discuss X", "can we talk about X",
-"what about X", "tell me more about X") → classify as "none".
-Only classify as "framework_switch" if the user explicitly names a FRAMEWORK,
-not a concept from the list above.
-
-CRITICAL — these are NOT redo during an active walkthrough:
-- "move on" → none (means advance to next concept)
-- "next" → none
-- "continue" → none
-- "yes" / "ok" / "sure" → none
-- "let's move on" → none
-- "proceed" / "got it" → none
-
-CRITICAL — for "concept_added": the "detail" field must contain
-the NEW thing the user wants to add, NOT any existing concept
-they are referencing.
-
-Example: "I think we should add financial impact as a pillar"
-→ detail: "Financial impact" (the NEW thing)
-
-Example: "what about regulatory risks under Feasibility"
-→ detail: "Regulatory risks" (the NEW thing)
-→ NOT detail: "Feasibility" (an existing concept)
-
-This does NOT include:
-- Questions asking why a concept is included ("why is X here?", "why are we considering X?")
-- Questions asking if something belongs to a concept ("is X part of Y?")
-- Single word responses ("no", "yes", "ok")
-
-A leading "no" or "not" does NOT make a message non-steering. If a negation is
-followed by an instruction to add, remove, or change a concept, classify by the
-INSTRUCTION, not the leading word ("no, remove X" is concept_excluded). Only a
-standalone negation with no instruction ("no", "no thanks") is non-steering.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "confidence": float}}
-
-Examples (assuming concepts include: Strategic Fit, Solution Design & Scope, Feasibility):
-- "start over" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.99}}
-- "restart from scratch" → {{"override": true, "type": "redo", "detail": null, "confidence": 0.98}}
-- "move on" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "let's move on to the next one" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "next concept please" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "remove Feasibility" → {{"override": true, "type": "concept_excluded", "detail": "Feasibility", "confidence": 0.97}}
-- "what about Financial Impact?" → {{"override": true, "type": "concept_added", "detail": "Financial Impact", "confidence": 0.96}}
-- "can we also consider Risks?" → {{"override": true, "type": "concept_added", "detail": "Risks", "confidence": 0.95}}
-- "how about adding regulatory compliance?" → {{"override": true, "type": "concept_added", "detail": "Regulatory compliance", "confidence": 0.96}}
-- "use a different framework" → {{"override": true, "type": "framework_switch", "detail": null, "confidence": 0.96}}
-- "yes" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "no" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "no thanks" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "makes sense, continue" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "let's discuss Strategic Fit" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "can we talk about Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "what about Solution Design & Scope?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "why are we considering this?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "why is this here?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "is it part of Feasibility?" → {{"override": false, "type": "none", "detail": null, "confidence": 0.99}}
-- "no, remove this" → {{"override": true, "type": "concept_excluded", "detail": "this", "confidence": 0.94}}
-- "no I think we should exclude it" → {{"override": true, "type": "concept_excluded", "detail": "it", "confidence": 0.93}}
-"""
-
-
 class ExplainableAgent(BlackBoxAgent):
     """
     Explainable agent — stateful concept-by-concept walkthrough.
@@ -741,14 +624,6 @@ class ExplainableAgent(BlackBoxAgent):
               f"framework={self.kg_context['framework']}, "
               f"concepts={self.kg_context['concepts']}")
 
-        self._kg_framework_keywords = {
-            "Economic Feasibility":    ["economic feasibility", "market entry", "market potential"],
-            "Expanded Profit Formula": ["profit formula", "profitability", "revenue", "cost tree"],
-            "Four-Pronged Strategy":   ["four-pronged", "pricing strategy", "price elasticity"],
-            "Formulaic Breakdown":     ["formulaic breakdown", "guesstimate", "market sizing"],
-            "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
-        }
-
         # ── Walkthrough state ──────────────────────────────────────────────
         self.walkthrough_concepts = []
         self.walkthrough_index    = 0
@@ -760,7 +635,6 @@ class ExplainableAgent(BlackBoxAgent):
 
         # ── Pending confirmation states ────────────────────────────────────
         self.pending_excl = None
-        self.pending_fw   = None
         self.pending_add  = None   # {"item": str, "kind": str, "target": str}
         self.pending_clarify = None
         self.pending_sub_excl = None  # {"pillar": str, "bullet": str} — Change log: 2026-06-04
@@ -856,27 +730,6 @@ class ExplainableAgent(BlackBoxAgent):
                      f"framework={self.kg_context['framework']}")
         return base
 
-    def _rebuild_walkthrough_on_framework_switch(self, from_framework: str = "") -> None:
-        to_framework = self.kg_context["framework"]
-
-        self.walkthrough_concepts = self._build_walkthrough_concepts()
-        self.walkthrough_index    = 0
-        self.excluded_concepts    = []
-
-        log_framework_switched(
-            session_id     = self.session_id,
-            from_framework = from_framework,
-            to_framework   = to_framework,
-            switch_index   = self.walkthrough_index,
-        )
-
-        if self.concept_swap.is_detected:
-            wrong = self.concept_swap.config["wrong_concept"]
-            self.excluded_concepts.append(wrong)
-            self.swap_presented = True
-        else:
-            self.swap_presented = False
-
     def _current_concept(self) -> str | None:
         excluded_lower = [e.lower() for e in self.excluded_concepts]
         while self.walkthrough_index < len(self.walkthrough_concepts):
@@ -892,11 +745,7 @@ class ExplainableAgent(BlackBoxAgent):
 
     def _is_ready_to_advance(self, user_input: str) -> bool:
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{ADVANCE_CLASSIFIER_PROMPT}\n\nUser reply: \"{user_input}\"",
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(f"{ADVANCE_CLASSIFIER_PROMPT}\n\nUser reply: \"{user_input}\"")
             result = (
                 parsed.get("advance", False) and
                 parsed.get("confidence", 0.0) >= ADVANCE_THRESHOLD
@@ -908,84 +757,16 @@ class ExplainableAgent(BlackBoxAgent):
             return False
 
     # ══════════════════════════════════════════════════════════════════════
-    # Framework resolver
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _fetch_kg_context_by_framework(self, framework_name: str) -> dict | None:
-        try:
-            concepts = kg.get_ordered_concepts(framework_name)
-            if not concepts:
-                return None
-            all_fw = kg.get_all_frameworks()
-            case_type = next(
-                (f["case_type"] for f in all_fw if f["framework"] == framework_name),
-                "Unknown"
-            )
-            return {"case_type": case_type, "framework": framework_name, "concepts": concepts}
-        except Exception as e:
-            logging.warning(f"[KG] _fetch_kg_context_by_framework error: {e}")
-            return None
-
-    def _resolve_framework(self, user_mention: str) -> list[str]:
-        try:
-            if not hasattr(self, "_kg_all_frameworks") or not self._kg_all_frameworks:
-                self._kg_all_frameworks = kg.get_all_frameworks()
-            frameworks = self._kg_all_frameworks
-            if not frameworks:
-                return []
-
-            fw_list = "\n".join(
-                f"- {f['framework']} (case: {f['case_type']}): {f['description']}"
-                for f in frameworks
-            )
-
-            prompt = (
-                f"{FRAMEWORK_RESOLVER_PROMPT}\n\n"
-                f"─── AVAILABLE FRAMEWORKS ─────────────────────────────────────────────\n"
-                f"{fw_list}\n"
-                f"──────────────────────────────────────────────────────────────────────\n\n"
-                f"User mentioned: \"{user_mention}\""
-            )
-
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=prompt,
-            )
-            matches = json.loads(self._strip_fences(response.text))
-            if not isinstance(matches, list):
-                matches = []
-
-            valid_names = {f["framework"] for f in frameworks}
-            matches = [m for m in matches if m in valid_names]
-
-            logging.info(f"[RESOLVER] user_mention='{user_mention}' → matches={matches}")
-            return matches
-
-        except Exception as e:
-            logging.warning(f"[RESOLVER] error: {e}")
-            return []
-
-    def _format_framework_list(self) -> str:
-        try:
-            frameworks = kg.get_all_frameworks()
-            return ", ".join(f["framework"] for f in frameworks)
-        except Exception:
-            return "the available frameworks"
-
-    # ══════════════════════════════════════════════════════════════════════
     # Addition flow helpers — Change log: 2026-05-28
     # ══════════════════════════════════════════════════════════════════════
 
     def _classify_addition(self, item: str) -> dict:
         """LLM: is this a sub-bullet or a new pillar? Best-guess target pillar."""
-        
+        from backend import knowledge_base as kb
         pillars = ", ".join(p["name"] for p in kb.get_shown_pillars())
         prompt = ADD_CLASSIFY_PROMPT.format(pillars=pillars, item=item)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             return {
                 "kind":   parsed.get("kind", "sub_bullet"),
                 "target": parsed.get("target"),
@@ -1023,10 +804,7 @@ class ExplainableAgent(BlackBoxAgent):
             pillars=pillars, item=item, target=target or "(unspecified)", reply=reply,
         )
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed   = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             choice   = parsed.get("choice", "under_target")
             override = parsed.get("target_override")
             if choice == "cancel":
@@ -1059,10 +837,7 @@ class ExplainableAgent(BlackBoxAgent):
             item=item, pillar=pillar_name, key_questions=kq_block
         )
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 idx = parsed.get("matched_index")
@@ -1088,10 +863,7 @@ class ExplainableAgent(BlackBoxAgent):
         )
         prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 return parsed.get("matched_pillar")
@@ -1115,10 +887,7 @@ class ExplainableAgent(BlackBoxAgent):
         )
         prompt = ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD):
                 idx = parsed.get("matched_index")
@@ -1145,10 +914,7 @@ class ExplainableAgent(BlackBoxAgent):
         )
         prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             if (parsed.get("matched") and
                     parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
                 return parsed.get("matched_pillar")
@@ -1249,10 +1015,7 @@ class ExplainableAgent(BlackBoxAgent):
             user_msg=user_input,
         )
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             level = parsed.get("level", "pillar")
             return {
                 "level":  level if level in ("pillar", "sub_bullet") else "pillar",
@@ -1286,12 +1049,9 @@ class ExplainableAgent(BlackBoxAgent):
             user_msg=user_input,
         )
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL, contents=prompt,
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             intent = parsed.get("intent", "question")
-            valid = {"advance", "add", "remove", "question", "doubt", "redo", "switch", "none"}
+            valid = {"advance", "add", "remove", "question", "doubt", "redo", "none"}
             if intent not in valid:
                 intent = "question"
             return {"intent": intent, "detail": parsed.get("detail")}
@@ -1306,6 +1066,7 @@ class ExplainableAgent(BlackBoxAgent):
             response = client.models.generate_content(
                 model=CLASSIFIER_MODEL,
                 contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
+                config=types.GenerateContentConfig(temperature=0.0),
             )
             out = self._strip_fences(response.text).strip().strip("-• ").rstrip(".")
             if out:
@@ -1412,11 +1173,7 @@ class ExplainableAgent(BlackBoxAgent):
     def _is_removal_doubt(self, user_input: str) -> bool:
         """Vague doubt about whether the current concept belongs. Change log: 2026-05-31"""
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{CLARIFY_DOUBT_PROMPT}\n\nUser message: \"{user_input}\"",
-            )
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(f"{CLARIFY_DOUBT_PROMPT}\n\nUser message: \"{user_input}\"")
             return bool(parsed.get("doubt")) and parsed.get("confidence", 0.0) >= CLARIFY_DOUBT_THRESHOLD
         except Exception as e:
             logging.warning(f"[CLARIFY] doubt classifier error: {e}")
@@ -1425,11 +1182,7 @@ class ExplainableAgent(BlackBoxAgent):
     def _classify_clarify(self, reply: str) -> str:
         """remove | explain | advance. Change log: 2026-05-31"""
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=CLARIFY_RESOLVE_PROMPT.format(reply=reply),
-            )
-            parsed   = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(CLARIFY_RESOLVE_PROMPT.format(reply=reply))
             decision = parsed.get("decision", "explain")
             return decision if decision in ("remove", "explain", "advance") else "explain"
         except Exception as e:
@@ -1481,39 +1234,6 @@ class ExplainableAgent(BlackBoxAgent):
         else:  # explain — grounded answer, stay on concept
             yield from self._stream_concept_qa()
     # ══════════════════════════════════════════════════════════════════════
-    # Override detection — walkthrough-aware
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _detect_override(self, user_input: str) -> dict | None:
-        import json as _json
-        from backend.black_box_agent import OVERRIDE_THRESHOLD as _THRESH
-
-        if not self.walkthrough_active or self.walkthrough_done:
-            return super()._detect_override(user_input)
-
-        concepts_str = ", ".join(self.walkthrough_concepts) \
-                       if self.walkthrough_concepts else "none"
-        prompt = WALKTHROUGH_OVERRIDE_PROMPT.format(concepts=concepts_str)
-
-        try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{prompt}\n\nUser message: \"{user_input}\"",
-            )
-            parsed = _json.loads(self._strip_fences(response.text))
-            if (parsed.get("override", False) and
-                    parsed.get("confidence", 0.0) >= _THRESH and
-                    parsed.get("type", "none") != "none"):
-                return {
-                    "type":       parsed["type"],
-                    "detail":     parsed.get("detail"),
-                    "confidence": parsed["confidence"],
-                }
-        except Exception as e:
-            logging.warning(f"[OVERRIDE] walkthrough classifier error: {e}")
-        return None
-
-    # ══════════════════════════════════════════════════════════════════════
     # Main phase — stateful walkthrough router
     # Change log: 2026-05-12 — override first, swap gated
     # Change log: 2026-05-16 — skip log_memory_override for concept_added
@@ -1550,7 +1270,7 @@ class ExplainableAgent(BlackBoxAgent):
             yield from self._resolve_pending_sub_excl(user_input)
             return
 
-        if self.pending_excl is not None or self.pending_fw is not None:
+        if self.pending_excl is not None:
             log_user_message(self.session_id, user_input)
             self.history.append(
                 types.Content(role="user", parts=[types.Part(text=user_input)])
@@ -1628,7 +1348,6 @@ class ExplainableAgent(BlackBoxAgent):
                 self.swap_presented       = False
                 self.swap_position        = 0
                 self.pending_excl         = None
-                self.pending_fw           = None
                 self.pending_add          = None
                 self.pending_clarify = None
                 self.pending_sub_excl     = None
@@ -1640,20 +1359,6 @@ class ExplainableAgent(BlackBoxAgent):
                     self.history = self._strip_concept_swap_from_history()
                 yield "Noted! Let me start the walkthrough fresh...\n\n"
                 log_user_message(self.session_id, "[REDO TRIGGERED]")
-
-            elif intent == "switch":
-                if not detail:
-                    override = {"type": "framework_unspecified"}
-                else:
-                    matches = self._resolve_framework(detail)
-                    if len(matches) == 1:
-                        self.pending_fw = matches[0]
-                        override = {"type": "pending_fw_set"}
-                    elif len(matches) >= 2:
-                        override = {"type": "framework_clarification", "matches": matches,
-                                    "detail": detail}
-                    else:
-                        override = {"type": "framework_not_found", "detail": detail}
 
             elif intent == "remove":
                 # Disambiguate: whole pillar, or one sub-bullet? Change log: 2026-06-04
@@ -1730,49 +1435,8 @@ class ExplainableAgent(BlackBoxAgent):
                 self.pending_sub_excl["pillar"], self.pending_sub_excl["bullet"]
             )
 
-        elif override and override["type"] == "pending_fw_set":
-            yield from self._stream_pushback("framework", self.pending_fw)
-
         elif override and override["type"] == "pending_add_set":
             yield from self._ask_add_placement()
-
-        elif override and override["type"] == "framework_switch":
-            yield from self._stream_concept(is_first=True)
-
-        elif override and override["type"] == "framework_clarification":
-            matches   = override["matches"]
-            match_str = " or ".join(f"**{m}**" for m in matches)
-            yield from self._stream_with_instruction(
-                instruction=(
-                    f"The user mentioned switching frameworks. It could mean {match_str}. "
-                    f"Ask them which one they meant in one short, friendly sentence. "
-                    f"Do not present any concept yet."
-                )
-            )
-
-        elif override and override["type"] == "framework_not_found":
-            available = self._format_framework_list()
-            detail    = override.get("detail") or "that framework"
-            yield from self._stream_with_instruction(
-                instruction=(
-                    f"The user mentioned '{detail}' as a framework. "
-                    f"Respond in 2 short sentences: "
-                    f"(1) Say you don't recognise '{detail}' — brief and neutral. "
-                    f"(2) Ask which of these they'd like instead: {available}. "
-                    f"Do not present any concept yet."
-                )
-            )
-
-        elif override and override["type"] == "framework_unspecified":
-            available = self._format_framework_list()
-            yield from self._stream_with_instruction(
-                instruction=(
-                    f"The user wants to switch frameworks but hasn't named one. "
-                    f"Ask in one friendly sentence: do they have a specific framework "
-                    f"in mind? If not, suggest: {available}. "
-                    f"Do not present any concept yet."
-                )
-            )
 
         elif cs_detected:
             yield from self._stream_swap_caught()
@@ -1881,42 +1545,6 @@ class ExplainableAgent(BlackBoxAgent):
                 yield from self._stream_pushback("concept", excl)
 
         # ── Pending framework switch (same 3-way) ──────────────────────────
-        elif self.pending_fw is not None:
-            fw = self.pending_fw
-
-            if decision == "confirm":
-                new_context = self._fetch_kg_context_by_framework(fw)
-                if new_context:
-                    from_fw = self.kg_context["framework"]
-                    self.kg_context = new_context
-                    self._rebuild_walkthrough_on_framework_switch(from_framework=from_fw)
-                self.pending_fw = None
-                logging.info("[PENDING] framework switch confirmed: " + fw)
-                yield "Switching to **" + fw + "**. Let's start from the beginning.\n\n"
-                yield from self._stream_concept(is_first=True)
-
-            elif decision == "decline":
-                self.pending_fw = None
-                logging.info("[PENDING] framework switch declined — keeping: "
-                             + self.kg_context["framework"])
-                msg = (
-                    "No problem — we'll stay with **" + self.kg_context["framework"] + "**.\n\n"
-                    "*Would you like to add, change, or question anything here? "
-                    "Or shall we move on to the next pillar? Feel free to raise any "
-                    "pillar you think is important.*"
-                )
-                self.history.append(
-                    types.Content(role="model", parts=[types.Part(text=msg)])
-                )
-                log_agent_response(self.session_id, msg)
-                yield msg
-
-            else:
-                if cls.get("is_question"):
-                    log_question(self.session_id, "text", detail=user_input[:200])
-                logging.info("[PENDING] framework switch unresolved (other) — re-offering: " + fw)
-                yield from self._stream_pushback("framework", fw)
-
     # ══════════════════════════════════════════════════════════════════════
     # Addition placement flow — Change log: 2026-05-28
     # ══════════════════════════════════════════════════════════════════════

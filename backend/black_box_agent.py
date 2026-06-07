@@ -13,17 +13,18 @@ from backend.logger import (
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
-from backend import knowledge_graph as kg
 from backend import knowledge_base as kb
 
 load_dotenv()
 
 # ── Gemini client ──────────────────────────────────────────────────────────
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
+from backend.llm import (
+    client, MAIN_MODEL, CLASSIFIER_MODEL, classify_json, strip_fences,
+    ANSWER_THRESHOLD, OVERRIDE_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
+)
 
 # ── Model config ───────────────────────────────────────────────────────────
-MAIN_MODEL       = "gemini-2.5-flash"
-CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
+# MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "AI Implementation"
@@ -78,7 +79,7 @@ UNLESS the user explicitly requests it)
 - Is GenAI the right tool, or would simpler rules-based automation achieve the same result?
 - Is the use case consistent with responsible AI principles — transparency, human oversight, and accountability?
 
-**Use Case and Solution**
+**Solution Design & Scope**
 - Is the prototype scoped tightly enough to be reviewable and governable?
 - What is the input data classification level — this determines the compliance path?
 
@@ -97,7 +98,7 @@ a framework, ask ONE short natural follow-up question to invite exploration.
 
 If the user wants to ADD a new concept or bucket:
 - Add it immediately, no pushback
-- If it fits within Strategic Fit, Use Case and Solution, or Feasibility → add as a sub-bullet under the right pillar
+- If it fits within Strategic Fit, Solution Design & Scope, or Feasibility → add as a sub-bullet under the right pillar
 - If it is a new top-level area (e.g. Risks, Financial Impact) → add as a new primary pillar
 - Never refuse user additions
 - When a user explicitly asks to add a sub-bullet, always honour it — no limit applies
@@ -143,8 +144,9 @@ If yes, classify the type:
                        ("start over", "redo this", "start again", "regenerate everything").
                        Removing ONE concept is NEVER redo — that is concept_excluded.
 - "concept_excluded" : wants to remove a specific concept or bucket
-- "concept_added"    : wants to add a new concept or bucket
-- "framework_switch" : wants to use a specific named different framework
+- "concept_added"    : wants to add a new concept or bucket — includes soft proposals
+                       ("we should consider X", "we need to think about / understand X",
+                       "what about X", "can we also look at X"; detail = the NEW thing)
 - "none"             : not steering the output
 
 This does NOT include:
@@ -165,7 +167,7 @@ INSTRUCTION, not the leading word. Only a standalone negation with no instructio
 - "parent": the existing concept named after "under" / "as part of" / "within" — null if no parent explicitly named
 
 Respond ONLY with valid JSON, no explanation, no markdown:
-{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"framework_switch"|"none", "detail": string or null, "parent": string or null, "confidence": float}
+{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"none", "detail": string or null, "parent": string or null, "confidence": float}
 
 Examples:
 - "redo this" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.99}
@@ -173,7 +175,6 @@ Examples:
 - "remove feasibility" → {"override": true, "type": "concept_excluded", "detail": "Feasibility", "parent": null, "confidence": 0.97}
 - "add financial impact as a bucket" → {"override": true, "type": "concept_added", "detail": "Financial Impact", "parent": null, "confidence": 0.97}
 - "what about regulatory risks?" → {"override": true, "type": "concept_added", "detail": "Regulatory risks", "parent": null, "confidence": 0.95}
-- "use a different framework" → {"override": true, "type": "framework_switch", "detail": null, "parent": null, "confidence": 0.96}
 - "give me a framework" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
 - "why is feasibility here?" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.95}
 - "yes" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
@@ -190,6 +191,9 @@ Examples:
 - "remove it" → {"override": true, "type": "concept_excluded", "detail": "it", "parent": null, "confidence": 0.94}
 - "remove this" → {"override": true, "type": "concept_excluded", "detail": "this", "parent": null, "confidence": 0.93}
 - "start over" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.98}
+- "we should consider team strategy alignment" → {"override": true, "type": "concept_added", "detail": "team strategy alignment", "parent": null, "confidence": 0.95}
+- "we need to understand the frequency of the problem" → {"override": true, "type": "concept_added", "detail": "frequency of the problem", "parent": null, "confidence": 0.95}
+- "consider if the use case meets the team goal" → {"override": true, "type": "concept_added", "detail": "use case meets the team goal", "parent": null, "confidence": 0.94}
 """
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -241,8 +245,7 @@ Your task: produce an updated plan that incorporates the user's ideas.
 # ══════════════════════════════════════════════════════════════════════════
 # Thresholds
 # ══════════════════════════════════════════════════════════════════════════
-ANSWER_THRESHOLD      = 0.90
-OVERRIDE_THRESHOLD    = 0.85
+# ANSWER_THRESHOLD / OVERRIDE_THRESHOLD imported from backend.llm (§S Step 1)
 MAX_TURNS_PER_SESSION = 50
 
 # Light cancel-escape phrases for the "which part to remove?" prompt (no LLM).
@@ -257,13 +260,13 @@ _REF_RE = re.compile(r"\s*\[[a-z]\]")
 def _strip_source_refs(text: str) -> str:
     return _REF_RE.sub("", text or "").strip()
 
-ADD_MATCH_THRESHOLD = 0.75
+# ADD_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
 
 # Whole-KB concept search runs over ~34 non-swap concepts (much broader than the
 # 5-item pillar-name search), and a false hit REVEALS a withheld pillar — i.e.
 # stimulus contamination. So this path uses a deliberately higher bar than the
 # pillar matcher. Change log: 2026-06-02
-CONCEPT_MATCH_THRESHOLD = 0.85
+# CONCEPT_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
 
 ADD_PILLAR_MATCH_PROMPT = """
 You are a classifier for a case interview framework tool.
@@ -321,6 +324,35 @@ Respond ONLY with valid JSON, no markdown:
 {{"matched": true or false, "matched_index": integer or null, "confidence": float}}
 """
 
+REMOVAL_TARGET_PROMPT = """
+You classify WHAT a user wants to remove from a framework.
+
+Decide whether they mean:
+- "pillar"     : a whole top-level area/pillar
+- "sub_bullet" : ONE specific point/bullet inside a pillar
+
+─── FRAMEWORK (all visible pillars and their current points) ──────────────────
+{framework_bullets}
+────────────────────────────────────────────────────────────────────────────
+─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
+{last_agent}
+────────────────────────────────────────────────────────────────────────────
+─── USER MESSAGE ─────────────────────────────────────────────────────────────
+{user_msg}
+────────────────────────────────────────────────────────────────────────────
+
+Rules:
+- Names/refers to a whole pillar or area → level="pillar", pillar=that name, bullet=null.
+- Refers to one specific point → level="sub_bullet", pillar=its pillar name,
+  bullet = the EXACT matching point text copied verbatim from the framework above.
+- Vague "remove it / this / that": if the agent's last message discussed ONE
+  specific point, treat as that sub_bullet; otherwise treat as the whole pillar.
+- "bullet" MUST be copied verbatim from the framework above, or null for a pillar.
+
+Respond ONLY with valid JSON, no markdown:
+{{"level": "pillar" | "sub_bullet", "pillar": string or null, "bullet": string or null}}
+"""
+
 SUB_BULLET_FORMAT_PROMPT = """
 You reformat a user's note into the terse style of a case-framework sub-bullet.
 Rules:
@@ -347,7 +379,9 @@ class BlackBoxAgent:
         self.user_sub_points    = {}    # pillar name -> [sub-bullet, ...]
         self.user_added_pillars = []    # user-added pillar names (order preserved)
         self.excluded_concepts  = []    # confirmed-removed pillar names
+        self.excluded_sub_bullets = {}  # pillar name -> [removed bullet texts]
         self.pending_excl       = None  # pillar awaiting "Are you sure?" confirmation
+        self.pending_sub_excl   = None  # {"pillar": str, "bullet": str} — sub-bullet pending removal
         self.awaiting_removal_target = False  # True after an unresolved "remove X" — next reply names the target
         self._ack_index         = 0     # rotates the no-reprint acknowledgements
         self.phase = "warmup"
@@ -362,14 +396,6 @@ class BlackBoxAgent:
         print(f"[KB INIT] case_type={CASE_TYPE}, "
               f"framework={self.kg_context['framework']}, "
               f"concepts={self.kg_context['concepts']}")
-
-        self._kg_framework_keywords = {
-            "Economic Feasibility":    ["economic feasibility", "market entry", "market potential"],
-            "Expanded Profit Formula": ["profit formula", "profitability", "revenue", "cost tree"],
-            "Four-Pronged Strategy":   ["four-pronged", "pricing strategy", "price elasticity"],
-            "Formulaic Breakdown":     ["formulaic breakdown", "guesstimate", "market sizing"],
-            "Customized Issue Trees":  ["issue tree", "unconventional", "internal external"],
-        }
 
         self.history = [
             types.Content(
@@ -399,21 +425,6 @@ class BlackBoxAgent:
         concepts  = [p["name"] for p in kb.get_shown_pillars()]
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
-    def _update_kg_if_framework_mentioned(self, user_input: str) -> None:
-        lowered = user_input.lower()
-        for framework_name, keywords in self._kg_framework_keywords.items():
-            if any(kw in lowered for kw in keywords):
-                if framework_name != self.kg_context["framework"]:
-                    concepts = kg.get_ordered_concepts(framework_name)
-                    self.kg_context = {
-                        "case_type": self.kg_context["case_type"],
-                        "framework": framework_name,
-                        "concepts":  concepts,
-                    }
-                    print(f"[KG UPDATE] switched to '{framework_name}', "
-                          f"{'concepts from KG' if concepts else 'model fallback'}")
-                break
-
     def _build_clarification_system_prompt(self) -> str:
         if self.clarification_facts:
             facts_lines = "\n".join(
@@ -439,7 +450,7 @@ class BlackBoxAgent:
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) \
                        if self.kg_context["concepts"] else \
-                       "Strategic Fit, Use Case and Solution, Feasibility"
+                       "Strategic Fit, Solution Design & Scope, Feasibility"
 
         framework_block = (
             f"─── FRAMEWORK CONTEXT ────────────────────────────────────────────────\n"
@@ -678,6 +689,10 @@ class BlackBoxAgent:
         if self.pending_excl is not None:
             yield from self._resolve_pending_excl(user_input)
             return
+        # ── 0a. Pending sub-bullet removal confirmation ─────────────────────
+        if self.pending_sub_excl is not None:
+            yield from self._resolve_pending_sub_excl(user_input)
+            return
         # ── 0b. Awaiting removal target (unresolved referent) ──────────────
         if self.awaiting_removal_target:
             self.awaiting_removal_target = False
@@ -707,7 +722,7 @@ class BlackBoxAgent:
                 yield from self._begin_removal(override["detail"], user_input); return
             if override["type"] == "concept_added" and override.get("detail"):
                 yield from self._handle_add(override["detail"], override.get("parent")); return
-            # framework_switch / other → no-op ack (framework is fixed for the study)
+            # any non-handled override type → no-op ack (framework is fixed for the study)
             yield from self._ack_no_reprint(); return
 
         # ── 3. Swap just caught — neutral ack + re-render without it ────────
@@ -743,22 +758,26 @@ class BlackBoxAgent:
         def emit(name, kb_bullets):
             lines.append(f"**{name}**")
             for b in kb_bullets:
-                lines.append(f"- {_strip_source_refs(b)}")
+                if not self._is_excluded_bullet(name, b):
+                    lines.append(f"- {_strip_source_refs(b)}")
             for sp in self.user_sub_points.get(name, []):
-                lines.append(f"- {sp}")
+                if not self._is_excluded_bullet(name, sp):
+                    lines.append(f"- {sp}")
             lines.append("")
 
         for i, p in enumerate(shown):
             if show_swap and i == position:
                 lines.append(f"**{wrong}**")
                 for b in swap_bul:
-                    lines.append(f"- {_strip_source_refs(b)}")
+                    if not self._is_excluded_bullet(wrong, b):
+                        lines.append(f"- {_strip_source_refs(b)}")
                 lines.append("")
             emit(p["name"], p.get("sub_bullets", []))
         if show_swap and position >= len(shown):
             lines.append(f"**{wrong}**")
             for b in swap_bul:
-                lines.append(f"- {_strip_source_refs(b)}")
+                if not self._is_excluded_bullet(wrong, b):
+                    lines.append(f"- {_strip_source_refs(b)}")
             lines.append("")
         for name in self.user_added_pillars:
             if name.lower() in excluded:
@@ -783,27 +802,48 @@ class BlackBoxAgent:
         is_swap = self.concept_swap.matches(user_input) or self.concept_swap.matches(detail)
         if is_swap and self.concept_swap.is_injected and not self.concept_swap.is_detected:
             self.pending_excl = wrong                      # detection logged on confirm
-        else:
-            target = self._normalize_pillar(detail)
-            if not self._is_known_pillar(target):
-                # Unresolved referent — confirm what they mean, don't guess/redo.
-                # Stay in removal; the next reply re-enters here via step 0b.
-                self.awaiting_removal_target = True
-                options = self._removable_pillar_names()
-                options_line = (
-                    "\n\nCurrently in the framework: "
-                    + ", ".join(f"**{o}**" for o in options) + "."
-                ) if options else ""
-                msg = ("Which part would you like to remove? "
-                       "You can name the pillar or the point."
-                       + options_line
-                       + "\n\n*(Or say **never mind** to keep everything as is.)*")
-                self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-                log_agent_response(self.session_id, msg)
-                yield msg
-                return
-            self.pending_excl = target
-            log_delete(self.session_id, target, "text")    # removal intent (#1)
+            msg = (f"Are you sure you want to remove **{self.pending_excl}**?\n\n"
+                   f"*Reply **yes** to confirm, or **no** to keep it.*")
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+            return
+
+        # Classify: whole pillar or one sub-bullet?
+        rt = self._classify_removal_target(user_input or detail)
+        if rt["level"] == "sub_bullet" and rt.get("bullet"):
+            pillar = self._normalize_pillar(rt["pillar"]) if rt.get("pillar") else detail
+            self.pending_sub_excl = {"pillar": pillar, "bullet": rt["bullet"]}
+            log_delete(self.session_id, rt["bullet"], "text")
+            msg = (f"Are you sure you want to remove this point from **{pillar}**?\n\n"
+                   f"*\"{rt['bullet']}\"*\n\n"
+                   f"*Reply **yes** to confirm, or **no** to keep it.*")
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+            return
+
+        target = self._normalize_pillar(rt.get("pillar") or detail)
+        if not self._is_known_pillar(target):
+            # Unresolved referent — confirm what they mean, don't guess/redo.
+            # Stay in removal; the next reply re-enters here via step 0b.
+            self.awaiting_removal_target = True
+            options = self._removable_pillar_names()
+            options_line = (
+                "\n\nCurrently in the framework: "
+                + ", ".join(f"**{o}**" for o in options) + "."
+            ) if options else ""
+            msg = ("Which part would you like to remove? "
+                   "You can name the pillar or the point."
+                   + options_line
+                   + "\n\n*(Or say **never mind** to keep everything as is.)*")
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+            return
+
+        self.pending_excl = target
+        log_delete(self.session_id, target, "text")    # removal intent (#1)
         msg = (f"Are you sure you want to remove **{self.pending_excl}**?\n\n"
                f"*Reply **yes** to confirm, or **no** to keep it.*")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
@@ -844,8 +884,7 @@ class BlackBoxAgent:
             f'Reply: "{user_input}"'
         )
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
-            return bool(json.loads(self._strip_fences(r.text)).get("cancel", False))
+            return bool(classify_json(prompt).get("cancel", False))
         except Exception as e:
             print(f"[CANCEL] error: {e}")
             return False   # safe default — re-ask rather than abandon the removal
@@ -855,6 +894,109 @@ class BlackBoxAgent:
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg
+
+    # ── Sub-bullet removal helpers ─────────────────────────────────────────
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return re.sub(r"\s+", " ", _REF_RE.sub("", text or "")).strip().lower()
+
+    def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
+        removed = {self._norm(b) for b in self.excluded_sub_bullets.get(pillar_name, [])}
+        return self._norm(bullet) in removed
+
+    def _last_agent_message(self) -> str:
+        for c in reversed(self.history):
+            if c.role == "model" and c.parts and c.parts[0].text:
+                return c.parts[0].text[:600]
+        return ""
+
+    def _classify_removal_target(self, user_input: str) -> dict:
+        """Decide whether a removal targets a whole pillar or one sub-bullet.
+        Falls back to pillar-level on any error."""
+        from backend import knowledge_base as kb
+        excluded = [e.lower() for e in self.excluded_concepts]
+        shown    = [p for p in kb.get_shown_pillars() if p["name"].lower() not in excluded]
+        swap     = kb.get_swap_concept()
+        wrong    = self.concept_swap.config["wrong_concept"]
+
+        lines = []
+        for p in shown:
+            lines.append(f"**{p['name']}**")
+            for b in p.get("sub_bullets", []):
+                if not self._is_excluded_bullet(p["name"], b):
+                    lines.append(f"  - {_strip_source_refs(b)}")
+            for sp in self.user_sub_points.get(p["name"], []):
+                if not self._is_excluded_bullet(p["name"], sp):
+                    lines.append(f"  - {sp}")
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected and swap:
+            lines.append(f"**{wrong}**")
+            for b in swap.get("sub_bullets", []):
+                if not self._is_excluded_bullet(wrong, b):
+                    lines.append(f"  - {_strip_source_refs(b)}")
+        for name in self.user_added_pillars:
+            if name.lower() in excluded:
+                continue
+            lines.append(f"**{name}**")
+            kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == name.lower()), None)
+            for b in (kbp.get("sub_bullets", []) if kbp else []):
+                if not self._is_excluded_bullet(name, b):
+                    lines.append(f"  - {_strip_source_refs(b)}")
+            for sp in self.user_sub_points.get(name, []):
+                if not self._is_excluded_bullet(name, sp):
+                    lines.append(f"  - {sp}")
+
+        framework_block = "\n".join(lines) or "(none)"
+        prompt = REMOVAL_TARGET_PROMPT.format(
+            framework_bullets=framework_block,
+            last_agent=self._last_agent_message() or "(nothing yet)",
+            user_msg=user_input,
+        )
+        try:
+            parsed = classify_json(prompt)
+            level = parsed.get("level", "pillar")
+            return {
+                "level":  level if level in ("pillar", "sub_bullet") else "pillar",
+                "pillar": parsed.get("pillar"),
+                "bullet": parsed.get("bullet"),
+            }
+        except Exception as e:
+            print(f"[REMOVAL TARGET] error: {e} — defaulting to pillar")
+            return {"level": "pillar", "pillar": None, "bullet": None}
+
+    def _resolve_pending_sub_excl(self, user_input: str):
+        """3-way gate for a pending sub-bullet removal: confirm | decline | other.
+        BlackBox: no reasoned pushback — re-offer the plain yes/no on 'other'."""
+        pillar = self.pending_sub_excl["pillar"]
+        bullet = self.pending_sub_excl["bullet"]
+        cls    = self._classify_confirmation(user_input)
+
+        if cls["decision"] == "confirm":
+            self.excluded_sub_bullets.setdefault(pillar, [])
+            if not self._is_excluded_bullet(pillar, bullet):
+                self.excluded_sub_bullets[pillar].append(bullet)
+            self.pending_sub_excl = None
+            log_memory_override(self.session_id,
+                old_context=f"sub-bullet in {pillar}: {bullet}",
+                new_context=f"user confirmed removal")
+            yield from self._yield_rerender(f"Done — I've removed that point from **{pillar}**.\n\n")
+
+        elif cls["decision"] == "decline":
+            self.pending_sub_excl = None
+            msg = f"No problem — I'll keep that point in **{pillar}**."
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+
+        else:
+            if cls.get("is_question"):
+                log_question(self.session_id, "text", detail=user_input[:200])
+            msg = (f"No rush — reply **yes** to remove that point from **{pillar}**, "
+                   f"or **no** to keep it.")
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
+
     def _resolve_pending_excl(self, user_input: str):
         concept = self.pending_excl
         cls = self._classify_confirmation(user_input)
@@ -915,8 +1057,7 @@ class BlackBoxAgent:
             f'Reply: "{user_input}"'
         )
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
-            p = json.loads(self._strip_fences(r.text))
+            p = classify_json(prompt)
             decision = p.get("decision", "other")
             if decision not in ("confirm", "decline", "other"):
                 decision = "other"
@@ -1058,9 +1199,7 @@ class BlackBoxAgent:
             f"- {p['name']}: {(p.get('description') or '').strip()}" for p in pillars
         )
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL,
-                contents=ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block))
-            parsed = json.loads(self._strip_fences(r.text))
+            parsed = classify_json(ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block))
             if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
                 return parsed.get("matched_pillar")
         except Exception as e:
@@ -1082,9 +1221,7 @@ class BlackBoxAgent:
             for i, c in enumerate(concepts)
         )
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL,
-                contents=ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block))
-            parsed = json.loads(self._strip_fences(r.text))
+            parsed = classify_json(ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block))
             if parsed.get("matched") and parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD:
                 idx = parsed.get("matched_index")
                 if idx is not None and 0 <= idx < len(concepts):
@@ -1106,9 +1243,7 @@ class BlackBoxAgent:
             return None
         kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(kqs))
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL,
-                contents=ADD_MATCH_PROMPT.format(item=item, pillar=pillar_name, key_questions=kq_block))
-            parsed = json.loads(self._strip_fences(r.text))
+            parsed = classify_json(ADD_MATCH_PROMPT.format(item=item, pillar=pillar_name, key_questions=kq_block))
             if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
                 idx = parsed.get("matched_index")
                 if idx is not None and 0 <= idx < len(kqs):
@@ -1119,8 +1254,11 @@ class BlackBoxAgent:
 
     def _format_sub_bullet(self, item: str) -> str:
         try:
-            r = client.models.generate_content(model=CLASSIFIER_MODEL,
-                contents=SUB_BULLET_FORMAT_PROMPT.format(item=item))
+            r = client.models.generate_content(
+                model=CLASSIFIER_MODEL,
+                contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
+                config=types.GenerateContentConfig(temperature=0.0),
+            )
             out = _strip_source_refs(self._strip_fences(r.text)).strip().strip("-• ").rstrip(".")
             if out:
                 return out
@@ -1130,10 +1268,12 @@ class BlackBoxAgent:
 
     # ── Redo / Q&A / ack / summary ─────────────────────────────────────────
     def _handle_redo(self):
-        self.user_sub_points    = {}
-        self.user_added_pillars = []
-        self.excluded_concepts  = []
-        self.pending_excl       = None
+        self.user_sub_points      = {}
+        self.user_added_pillars   = []
+        self.excluded_concepts    = []
+        self.excluded_sub_bullets = {}
+        self.pending_excl         = None
+        self.pending_sub_excl     = None
         self.has_main_contribution = False
         self.awaiting_removal_target = False
         log_user_message(self.session_id, "[REDO TRIGGERED]")
@@ -1146,7 +1286,7 @@ class BlackBoxAgent:
     def _stream_qa(self, user_input: str):
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) or \
-                       "Strategic Fit, Use Case and Solution, Feasibility"
+                       "Strategic Fit, Solution Design & Scope, Feasibility"
         instruction = (
             "You are a strategic consultant answering a question about a framework "
             "you have already presented.\n\n"
@@ -1169,7 +1309,7 @@ class BlackBoxAgent:
         user's next yes/no still resolves the removal. Change log: 2026-06-02"""
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) or \
-                    "Strategic Fit, Use Case and Solution, Feasibility"
+                    "Strategic Fit, Solution Design & Scope, Feasibility"
         instruction = (
             "You are a strategic consultant. The user was asked to confirm removing "
             f"**{concept}** from the framework, and instead of answering yes or no they "
@@ -1299,11 +1439,9 @@ class BlackBoxAgent:
 
     def _is_answer(self, text: str) -> bool:
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{ANSWER_CLASSIFIER_PROMPT}\n\nAgent response: \"{text[:800]}\"",
+            parsed = classify_json(
+                f"{ANSWER_CLASSIFIER_PROMPT}\n\nAgent response: \"{text[:800]}\""
             )
-            parsed = json.loads(self._strip_fences(response.text))
             result = (
                 parsed.get("is_answer", False) and
                 parsed.get("confidence", 0.0) >= ANSWER_THRESHOLD
@@ -1318,11 +1456,9 @@ class BlackBoxAgent:
     def _detect_override(self, user_input: str) -> dict | None:
         """Single classifier for all override types. Used for research logging only."""
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{OVERRIDE_CLASSIFIER_PROMPT}\n\nUser message: \"{user_input}\"",
+            parsed = classify_json(
+                f"{OVERRIDE_CLASSIFIER_PROMPT}\n\nUser message: \"{user_input}\""
             )
-            parsed = json.loads(self._strip_fences(response.text))
             if (parsed.get("override", False) and
                     parsed.get("confidence", 0.0) >= OVERRIDE_THRESHOLD and
                     parsed.get("type", "none") != "none"):
@@ -1360,8 +1496,7 @@ class BlackBoxAgent:
             f'User message: "{user_input}"'
         )
         try:
-            response = client.models.generate_content(model=CLASSIFIER_MODEL, contents=prompt)
-            parsed = json.loads(self._strip_fences(response.text))
+            parsed = classify_json(prompt)
             return {"is_question": bool(parsed.get("is_question", False)),
                     "is_about_swap": bool(parsed.get("is_about_swap", False))}
         except Exception as e:
@@ -1372,9 +1507,9 @@ class BlackBoxAgent:
         """
         Three-layer duplicate guard for concept_added path.
         Layer 2: exact string match (Python, no LLM)
-        Layer 3: fuzzy LLM check on gemini-3.1-flash-lite
+        Layer 3: fuzzy LLM check via classify_json (shared CLASSIFIER_MODEL)
         Change log: 2026-05-12
-        Change log: 2026-05-16 — updated model to gemini-3.1-flash-lite (2.0 deprecated)
+        Change log: 2026-06-07 — routed via backend.llm.classify_json (§S Step 1); dropped stray fuzzy-duplicate model
         """
         # Layer 2 — exact string match
         for existing in existing_concepts:
@@ -1384,9 +1519,7 @@ class BlackBoxAgent:
 
         # Layer 3 — LLM fuzzy check
         try:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
-                contents=(
+            parsed = classify_json(
                     f"You are checking if a user-suggested concept is essentially "
                     f"the same as an existing concept.\n\n"
                     f"User suggested: \"{concept}\"\n\n"
@@ -1397,9 +1530,7 @@ class BlackBoxAgent:
                     f"is_duplicate=true ONLY if clearly the same concept — "
                     f"same topic, possibly different wording.\n"
                     f"WHEN IN DOUBT: is_duplicate=false."
-                ),
             )
-            parsed = json.loads(self._strip_fences(response.text))
             print(f"[DUPLICATE] fuzzy check: '{concept}' → {parsed}")
             return parsed
         except Exception as e:
@@ -1504,10 +1635,6 @@ class BlackBoxAgent:
 
     @staticmethod
     def _strip_fences(text: str) -> str:
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        return text
+        # Single definition lives in backend.llm; thin wrapper kept so inherited
+        # self._strip_fences call sites (explainable/hitl) still resolve. (§S Step 1)
+        return strip_fences(text)

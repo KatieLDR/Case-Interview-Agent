@@ -7,9 +7,8 @@ import re
 
 load_dotenv()
 
-# ── Gemini client ──────────────────────────────────────────────────────────
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
-CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
+# ── LLM (centralised in backend.llm) ───────────────────────────────────────
+from backend.llm import client, CLASSIFIER_MODEL, classify_json, DETECTION_B_THRESHOLD, DETECTION_C_THRESHOLD
 
 # ══════════════════════════════════════════════════════════════════════════
 # Per-agent swap config
@@ -152,8 +151,7 @@ Examples:
 # ══════════════════════════════════════════════════════════════════════════
 # Detection thresholds
 # ══════════════════════════════════════════════════════════════════════════
-DETECTION_B_THRESHOLD = 0.90
-DETECTION_C_THRESHOLD = 0.85
+# DETECTION_B_THRESHOLD / DETECTION_C_THRESHOLD now imported from backend.llm
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -286,7 +284,7 @@ class ConceptSwap:
             self.detected = True
             self._log_detected()
             print(
-                f"[SWAP] force_detected() — button-triggered, "
+                f"[SWAP] force_detected() — non-text-triggered, "
                 f"session={self.session_id}, agent={self.agent_type}"
             )
 
@@ -337,12 +335,7 @@ class ConceptSwap:
         wrong  = self.config["wrong_concept"]
         prompt = _DETECTION_B_PROMPT.format(wrong_concept=wrong)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{prompt}\n\nUser message: \"{user_message}\"",
-            )
-            raw    = self._strip_fences(response.text)
-            parsed = json.loads(raw)
+            parsed = classify_json(f"{prompt}\n\nUser message: \"{user_message}\"")
 
             detected   = parsed.get("detected", False)
             confidence = parsed.get("confidence", 0.0)
@@ -372,12 +365,7 @@ class ConceptSwap:
         wrong  = self.config["wrong_concept"]
         prompt = _DETECTION_C_PROMPT.format(wrong_concept=wrong)
         try:
-            response = client.models.generate_content(
-                model=CLASSIFIER_MODEL,
-                contents=f"{prompt}\n\nUser message: \"{user_message}\"",
-            )
-            raw    = self._strip_fences(response.text)
-            parsed = json.loads(raw)
+            parsed = classify_json(f"{prompt}\n\nUser message: \"{user_message}\"")
             result = (
                 parsed.get("detected", False) and
                 parsed.get("confidence", 0.0) >= DETECTION_C_THRESHOLD
@@ -411,13 +399,3 @@ class ConceptSwap:
 
     # ── Utility ────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _strip_fences(text: str) -> str:
-        """Strip markdown code fences from Gemini classifier responses."""
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        return text
