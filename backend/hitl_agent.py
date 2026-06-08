@@ -15,6 +15,7 @@ from backend.logger import (
     log_concept_added, stamp_started_at,log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned,
 )
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
+from backend.domain import matching, grounding      # Step 2: shared KB matchers + grounding
 
 # Strip inline source refs like " [a]" / "[b]" — HITL suppresses sources, so these
 # markers must never reach the user (no Sources line resolves them). Change log: 2026-05-29
@@ -49,44 +50,14 @@ JUSTIFICATION_ACKS = [
     "Understood.",
 ]
 
-# ── New-area / sub-point matching — Change log: 2026-05-29 ──────────────────
-# Mirror Explainable's add-flow matchers. Defined here to avoid an agent-to-agent
-# import; fold into a shared module post-study.
-ADD_PILLAR_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user wants to add a new area: "{item}".
-Check whether it matches one of the framework's other (currently hidden) areas below.
-
-─── OTHER AREAS ─────────────────────────────────────────────────────────────
-{pillars}
-────────────────────────────────────────────────────────────────────────────
-
-A match means the user's new area is essentially the same area of analysis
-as one of the areas above — same topic, possibly different wording.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
-"""
-
-ADD_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user added "{item}" under the pillar "{pillar}".
-Check whether it matches one of the pillar's existing key questions below.
-
-─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
-{key_questions}
-────────────────────────────────────────────────────────────────────────────
-
-A match means the user's addition is essentially the same point as one of the
-key questions above — same topic, possibly different wording.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
-
-ADD_MATCH_THRESHOLD = 0.75
+# ── New-area / sub-point matching — moved to domain/ (Step 2) ───────────────
+# The local ADD_PILLAR_MATCH_PROMPT / ADD_MATCH_PROMPT / ADD_MATCH_THRESHOLD copies
+# were retired: _match_pillar / _match_key_question below now delegate to the shared
+# backend.domain.matching functions, so all three arms resolve identically by
+# construction (I-1/I-3). NOTE this is a deliberate convergence for HITL — its old
+# pillar matcher used a bare-name, un-guarded, "hidden areas only" prompt; the shared
+# matcher is description-enriched and carries the area-vs-point guard (the canonical
+# Explainable wording the plan selected — the "HITL dropped the guard"/F-M1 family).
 
 # Reformat an unmatched user sub-point into the terse framework sub-bullet style.
 # No new content, no source — just style normalization. Change log: 2026-05-29
@@ -451,54 +422,19 @@ class HITLAgent(BlackBoxAgent):
             return {"is_duplicate": False, "matched_concept": None}
 
     def _match_pillar(self, item: str) -> str | None:
-        """LLM: does a suggested area match any framework pillar (shown OR withheld)?
-        Returns the matched pillar name, or None. Change log: 2026-05-31
-        (was _match_withheld_pillar — widened to all pillars so suggestions overlapping
-        an already-shown pillar resolve consistently, not only withheld ones.)"""
-        pillars = kb.get_all_pillars()
-        if not pillars:
-            return None
-        pillars_block = "\n".join(f"- {p['name']}" for p in pillars)
-        prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=pillars_block)
-        try:
-            parsed = classify_json(prompt)
-            if (parsed.get("matched") and
-                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
-                return parsed.get("matched_pillar")
-        except Exception as e:
-            logging.warning(f"[PILLAR MATCH] error: {e}")
-        return None
+        """→ shared domain matcher (Step 2). Returns the matched AREA name (any pillar,
+        shown or withheld) or None — contract unchanged. Resolution is now identical
+        across all three arms: see the module-top note for the deliberate convergence
+        (description-enriched + area-vs-point guard) this adopts for HITL."""
+        name, _score = matching.match_pillar(item)
+        return name
 
     def _match_key_question(self, item: str, pillar_name: str) -> str | None:
-        """
-        LLM: does item match a key question in this pillar?
-        Returns the matched key-question text with inline [a][b] refs STRIPPED
-        (HITL suppresses sources), or None. Change log: 2026-05-29
-        """
-        pillar = next(
-            (p for p in kb.get_all_pillars() if p["name"].lower() == pillar_name.lower()),
-            None
-        )
-        if pillar is None:
-            return None
-        key_questions = pillar.get("key_questions", [])
-        if not key_questions:
-            return None
-        kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(key_questions))
-        prompt   = ADD_MATCH_PROMPT.format(
-            item=item, pillar=pillar_name, key_questions=kq_block
-        )
-        try:
-            parsed = classify_json(prompt)
-            if (parsed.get("matched") and
-                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
-                idx = parsed.get("matched_index")
-                if idx is not None and 0 <= idx < len(key_questions):
-                    # Strip inline source refs — no dangling markers
-                    return _strip_source_refs(key_questions[idx])
-        except Exception as e:
-            logging.warning(f"[ADD MATCH] error: {e}")
-        return None
+        """→ shared domain matcher (Step 2). Returns the matched key-question text with
+        inline [a] refs STRIPPED (HITL suppresses sources), or None — contract unchanged.
+        The shared matcher already strips refs, so this is a direct passthrough."""
+        text, _score = matching.match_key_question(item, pillar_name)
+        return text
 
     def _format_sub_bullet(self, item: str) -> str:
         """
@@ -1082,24 +1018,12 @@ class HITLAgent(BlackBoxAgent):
                 "or **➕ add** a point? Just use the buttons below.*"
             )
     def _concept_grounding(self, concept: str) -> str:
-        """Q&A grounding: description + key-questions, source refs stripped
-        (HITL suppresses sources). Change log: 2026-05-31"""
-        pillar = next(
-            (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
-            None
-        )
-        if pillar:
-            pts = [_strip_source_refs(q) for q in pillar.get("key_questions", [])]
-            parts = []
-            if pillar.get("description"):
-                parts.append(pillar["description"])
-            if pts:
-                parts.append("\n".join(f"- {p}" for p in pts))
-            return "\n\n".join(parts).strip()
-        swap = kb.get_swap_concept()
-        if swap and concept.lower() == self.concept_swap.config["wrong_concept"].lower():
-            return "\n".join(f"- {_strip_source_refs(b)}" for b in swap.get("sub_bullets", []))
-        return ""
+        """Q&A grounding → shared grounding.ground_pillar (Step 2): description +
+        key-questions (refs stripped), plus the planted-swap fallback. Behaviour-
+        identical to the old local copy — HITL already stripped refs, and the shared
+        swap fallback keys off the KB swap concept's own name (== this arm's
+        wrong_concept)."""
+        return grounding.ground_pillar(concept)
     def _stream_swap_caught(self):
         wrong       = self.concept_swap.config["wrong_concept"]
         wrong_fw    = self.concept_swap.config["wrong_framework"]

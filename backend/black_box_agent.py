@@ -22,6 +22,7 @@ from backend.llm import (
     client, MAIN_MODEL, CLASSIFIER_MODEL, classify_json, strip_fences,
     ANSWER_THRESHOLD, OVERRIDE_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
 )
+from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
 
 # ── Model config ───────────────────────────────────────────────────────────
 # MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
@@ -268,61 +269,9 @@ def _strip_source_refs(text: str) -> str:
 # pillar matcher. Change log: 2026-06-02
 # CONCEPT_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
 
-ADD_PILLAR_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-The user wants to add a new area: "{item}".
-Each area below is given as "Name: description". Check whether the user's new
-area is essentially the SAME AREA of analysis as one of them — same topic or
-clearly the same scope, possibly different wording.
-
-─── AREAS ───────────────────────────────────────────────────────────────────
-{pillars}
-────────────────────────────────────────────────────────────────────────────
-Match only at the level of the whole AREA. If the user's text is just one
-specific point that would sit *inside* an area (rather than naming the area
-itself), set matched=false.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
-"""
-
-ADD_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-The user added "{item}" under the pillar "{pillar}".
-Check whether it matches one of the pillar's existing key questions below.
-
-─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
-{key_questions}
-────────────────────────────────────────────────────────────────────────────
-A match means the addition is essentially the same point as one of the key
-questions above — same topic, possibly different wording.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
-
-# Whole-KB concept matcher — searches every analytical concept (name + explanation)
-# across ALL pillars, shown or withheld, so a user naming a sub-concept of a withheld
-# pillar ("breakeven point") can be resolved to its parent ("Financial Impact").
-# The swap concept is excluded by the caller (swap:true). Change log: 2026-06-02
-ADD_CONCEPT_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-The user wrote: "{item}".
-
-Below is a numbered list of analytical concepts, each as "Name: explanation".
-Decide whether the user's text clearly refers to ONE of these concepts — i.e.
-it is essentially that concept, or a specific instance of it, possibly worded
-differently.
-
-─── CONCEPTS ────────────────────────────────────────────────────────────────
-{concepts}
-────────────────────────────────────────────────────────────────────────────
-Match ONLY if you are confident it is essentially that concept. If the user's
-text is only loosely or topically related, set matched=false.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
+# ADD_PILLAR_MATCH_PROMPT / ADD_MATCH_PROMPT / ADD_CONCEPT_MATCH_PROMPT moved to
+# backend.domain.matching (Step 2 — one shared copy). The matcher methods below delegate;
+# prompts + thresholds are unchanged (canonical text = EXP/BB, which were identical here).
 
 REMOVAL_TARGET_PROMPT = """
 You classify WHAT a user wants to remove from a framework.
@@ -897,13 +846,9 @@ class BlackBoxAgent:
 
     # ── Sub-bullet removal helpers ─────────────────────────────────────────
 
-    @staticmethod
-    def _norm(text: str) -> str:
-        return re.sub(r"\s+", " ", _REF_RE.sub("", text or "")).strip().lower()
-
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
-        removed = {self._norm(b) for b in self.excluded_sub_bullets.get(pillar_name, [])}
-        return self._norm(bullet) in removed
+        """→ shared pure predicate (Step 2); session excluded-map passed by value."""
+        return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
 
     def _last_agent_message(self) -> str:
         for c in reversed(self.history):
@@ -1188,69 +1133,26 @@ class BlackBoxAgent:
         return name
 
     def _match_pillar(self, item: str):
-        """Stage-1 matcher: does the user's text name one of the framework's AREAS?
-        Candidate block now includes each pillar's description so semantically-adjacent
-        terms ("IT Budget" → "Financial Impact") resolve. Change log: 2026-06-02"""
-        from backend import knowledge_base as kb
-        pillars = kb.get_all_pillars()
-        if not pillars:
-            return None
-        block = "\n".join(
-            f"- {p['name']}: {(p.get('description') or '').strip()}" for p in pillars
-        )
-        try:
-            parsed = classify_json(ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block))
-            if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
-                return parsed.get("matched_pillar")
-        except Exception as e:
-            print(f"[PILLAR MATCH] error: {e}")
-        return None
+        """Stage-1 matcher → shared domain matcher (Step 2). Returns the matched AREA
+        name or None (contract unchanged)."""
+        name, _score = matching.match_pillar(item)
+        return name
 
     def _match_concept(self, item: str):
-        """Stage-2 matcher: search EVERY analytical concept (name + explanation) across
-        all pillars (swap excluded). On a confident hit, return the parent pillar's name
-        via pillar_id. Lets a sub-concept of a withheld pillar ("breakeven point") resolve
-        to its parent ("Financial Impact"). Change log: 2026-06-02"""
-        from backend import knowledge_base as kb
-        concepts = [c for c in kb.get_all_concepts()
-                    if not c.get("swap", False) and c.get("pillar_id")]
-        if not concepts:
+        """Stage-2 matcher → shared domain matcher (Step 2). Returns the matched concept's
+        PARENT pillar name (contract unchanged; concept_id is exposed by locate() and
+        adopted by the Step-4 handlers — see F-M1)."""
+        concept, _score = matching.match_concept(item)
+        if not concept:
             return None
-        block = "\n".join(
-            f"{i}. {c['name']}: {(c.get('explanation') or '').strip()}"
-            for i, c in enumerate(concepts)
-        )
-        try:
-            parsed = classify_json(ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block))
-            if parsed.get("matched") and parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD:
-                idx = parsed.get("matched_index")
-                if idx is not None and 0 <= idx < len(concepts):
-                    pillar = kb.get_pillar_by_id(concepts[idx]["pillar_id"])
-                    if pillar:
-                        return pillar["name"]
-        except Exception as e:
-            print(f"[CONCEPT MATCH] error: {e}")
-        return None
+        pillar = kb.get_pillar_by_id(concept["pillar_id"])
+        return pillar["name"] if pillar else None
 
     def _match_key_question(self, item: str, pillar_name: str):
-        from backend import knowledge_base as kb
-        pillar = next((p for p in kb.get_all_pillars()
-                       if p["name"].lower() == pillar_name.lower()), None)
-        if pillar is None:
-            return None
-        kqs = pillar.get("key_questions", [])
-        if not kqs:
-            return None
-        kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(kqs))
-        try:
-            parsed = classify_json(ADD_MATCH_PROMPT.format(item=item, pillar=pillar_name, key_questions=kq_block))
-            if parsed.get("matched") and parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD:
-                idx = parsed.get("matched_index")
-                if idx is not None and 0 <= idx < len(kqs):
-                    return _strip_source_refs(kqs[idx])
-        except Exception as e:
-            print(f"[ADD MATCH] error: {e}")
-        return None
+        """→ shared domain matcher (Step 2). Returns the matched key-question text
+        (source refs stripped) or None (contract unchanged)."""
+        text, _score = matching.match_key_question(item, pillar_name)
+        return text
 
     def _format_sub_bullet(self, item: str) -> str:
         try:

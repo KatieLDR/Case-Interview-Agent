@@ -15,6 +15,9 @@ from backend.logger import (
     log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned
 )
 from backend.rag_explainer import build_citation_header, check_and_append_warning
+from backend.domain import matching, grounding          # Step 2: shared KB matchers + grounding
+from backend.domain.matching import ADD_PILLAR_MATCH_PROMPT  # canonical; reused by _match_withheld_pillar
+from backend.llm import ADD_MATCH_THRESHOLD                  # canonical threshold (matcher copies retired)
 
 # ── Source display: letter scheme kept, entries shown as named links ────────
 # Change log: 2026-05-30
@@ -447,70 +450,15 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {{"choice": "under_target" | "separate" | "cancel", "target_override": "pillar name or null"}}
 """
 
-ADD_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user added "{item}" under the pillar "{pillar}".
-Check whether it matches one of the pillar's existing key questions below.
-
-─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
-{key_questions}
-────────────────────────────────────────────────────────────────────────────
-
-A match means the user's addition is essentially the same point as one of the
-key questions above — same topic, possibly different wording.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
-
-# Enriched: candidate areas now carry their description so semantically-adjacent
-# terms ("IT Budget" → "Financial Impact") resolve. Mirrors BlackBox. Change log: 2026-06-02
-ADD_PILLAR_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user wants to add a new area: "{item}".
-Each area below is given as "Name: description". Check whether the user's new
-area is essentially the SAME AREA of analysis as one of them — same topic or
-clearly the same scope, possibly different wording.
-
-─── AREAS ───────────────────────────────────────────────────────────────────
-{pillars}
-────────────────────────────────────────────────────────────────────────────
-Match only at the level of the whole AREA. If the user's text is just one
-specific point that would sit *inside* an area (rather than naming the area
-itself), set matched=false.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
-"""
-
-ADD_MATCH_THRESHOLD = 0.75
-
-# Whole-KB concept search — searches every analytical concept (name + explanation)
-# across all pillars (swap excluded). On a confident hit, the caller resolves the
-# parent pillar via pillar_id. Higher bar than the pillar matcher because a false hit
-# REVEALS a withheld pillar = stimulus contamination. Mirrors BlackBox. Change log: 2026-06-02
-CONCEPT_MATCH_THRESHOLD = 0.85
-
-ADD_CONCEPT_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-The user wrote: "{item}".
-
-Below is a numbered list of analytical concepts, each as "Name: explanation".
-Decide whether the user's text clearly refers to ONE of these concepts — i.e.
-it is essentially that concept, or a specific instance of it, possibly worded
-differently.
-
-─── CONCEPTS ────────────────────────────────────────────────────────────────
-{concepts}
-────────────────────────────────────────────────────────────────────────────
-Match ONLY if you are confident it is essentially that concept. If the user's
-text is only loosely or topically related, set matched=false.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
+# ── ADD matchers moved to domain/ (Step 2) ─────────────────────────────────
+# ADD_MATCH_PROMPT / ADD_PILLAR_MATCH_PROMPT / ADD_CONCEPT_MATCH_PROMPT and the
+# ADD_MATCH_THRESHOLD / CONCEPT_MATCH_THRESHOLD thresholds are now single-sourced:
+# the prompts live in backend.domain.matching, the thresholds in backend.llm.
+# _match_pillar / _match_concept / _match_key_question below delegate to
+# matching.*; ADD_PILLAR_MATCH_PROMPT + ADD_MATCH_THRESHOLD are imported at the
+# top of this module solely so the Explainable-only _match_withheld_pillar (a
+# withheld-candidate variant, not one of the shared matchers) keeps the canonical
+# prompt/threshold rather than a private copy.
 
 SUB_BULLET_FORMAT_PROMPT = """
 You reformat a user's note into the style of a sub-bullet in this case framework.
@@ -820,7 +768,14 @@ class ExplainableAgent(BlackBoxAgent):
             return {"confirmed": True, "target": target, "as_new_pillar": False}
 
     def _match_key_question(self, item: str, pillar_name: str) -> dict | None:
-        """LLM: does item match a key_question in this pillar? Return matched text+sources."""
+        """Matching DECISION → shared domain matcher (Step 2). Explainable then recovers
+        the VERBATIM KB question (inline [a] refs KEPT) plus its sources so citations
+        render — the shared matcher returns ref-stripped text, so we re-find the raw
+        question by its stripped form (matching._strip_source_refs == the matcher's own
+        stripping). Contract unchanged: returns {"question", "sources"} or None."""
+        text, _score = matching.match_key_question(item, pillar_name)
+        if not text:
+            return None
         from backend import knowledge_base as kb
         pillar = next(
             (p for p in kb.get_all_pillars() if p["name"].lower() == pillar_name.lower()),
@@ -828,76 +783,30 @@ class ExplainableAgent(BlackBoxAgent):
         )
         if pillar is None:
             return None
-        key_questions = pillar.get("key_questions", [])
-        if not key_questions:
-            return None
-
-        kq_block = "\n".join(f"{i}. {q}" for i, q in enumerate(key_questions))
-        prompt   = ADD_MATCH_PROMPT.format(
-            item=item, pillar=pillar_name, key_questions=kq_block
+        raw = next(
+            (q for q in pillar.get("key_questions", [])
+             if matching._strip_source_refs(q) == text),
+            text,
         )
-        try:
-            parsed = classify_json(prompt)
-            if (parsed.get("matched") and
-                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
-                idx = parsed.get("matched_index")
-                if idx is not None and 0 <= idx < len(key_questions):
-                    return {
-                        "question": key_questions[idx],
-                        "sources":  pillar.get("key_questions_sources", ""),
-                    }
-        except Exception as e:
-            logging.warning(f"[ADD MATCH] error: {e}")
-        return None
+        return {"question": raw, "sources": pillar.get("key_questions_sources", "")}
 
     def _match_pillar(self, item: str) -> str | None:
-        """LLM: does the user's text name one of the framework's AREAS (any pillar,
-        shown or withheld)? Candidate block carries each pillar's description so
-        semantically-adjacent terms resolve. Mirrors BlackBox. Change log: 2026-06-02"""
-        from backend import knowledge_base as kb
-        pillars = kb.get_all_pillars()
-        if not pillars:
-            return None
-        block = "\n".join(
-            f"- {p['name']}: {(p.get('description') or '').strip()}" for p in pillars
-        )
-        prompt = ADD_PILLAR_MATCH_PROMPT.format(item=item, pillars=block)
-        try:
-            parsed = classify_json(prompt)
-            if (parsed.get("matched") and
-                    parsed.get("confidence", 0.0) >= ADD_MATCH_THRESHOLD):
-                return parsed.get("matched_pillar")
-        except Exception as e:
-            logging.warning(f"[PILLAR MATCH] error: {e}")
-        return None
+        """→ shared domain matcher (Step 2). Returns the matched AREA name or None
+        (contract unchanged). Identical resolution across all three arms by construction."""
+        name, _score = matching.match_pillar(item)
+        return name
 
     def _match_concept(self, item: str) -> str | None:
-        """LLM: search EVERY analytical concept (name + explanation) across all pillars
-        (swap excluded). On a confident hit, return the parent pillar's name via
-        pillar_id. Lets a sub-concept of a withheld pillar ("breakeven point") resolve
-        to its parent ("Financial Impact"). Mirrors BlackBox. Change log: 2026-06-02"""
-        from backend import knowledge_base as kb
-        concepts = [c for c in kb.get_all_concepts()
-                    if not c.get("swap", False) and c.get("pillar_id")]
-        if not concepts:
+        """Whole-KB concept search → shared domain matcher (Step 2). Returns the matched
+        concept's PARENT pillar name or None (contract unchanged; lets a sub-concept of a
+        withheld pillar resolve to its parent — concept_id is exposed by locate() and
+        consumed by the Step-4 handlers, F-M1)."""
+        concept, _score = matching.match_concept(item)
+        if not concept:
             return None
-        block = "\n".join(
-            f"{i}. {c['name']}: {(c.get('explanation') or '').strip()}"
-            for i, c in enumerate(concepts)
-        )
-        prompt = ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block)
-        try:
-            parsed = classify_json(prompt)
-            if (parsed.get("matched") and
-                    parsed.get("confidence", 0.0) >= CONCEPT_MATCH_THRESHOLD):
-                idx = parsed.get("matched_index")
-                if idx is not None and 0 <= idx < len(concepts):
-                    pillar = kb.get_pillar_by_id(concepts[idx]["pillar_id"])
-                    if pillar:
-                        return pillar["name"]
-        except Exception as e:
-            logging.warning(f"[CONCEPT MATCH] error: {e}")
-        return None
+        from backend import knowledge_base as kb
+        pillar = kb.get_pillar_by_id(concept["pillar_id"])
+        return pillar["name"] if pillar else None
 
     def _match_withheld_pillar(self, item: str) -> str | None:
         """LLM: does new pillar match a withheld pillar (Financial Impact / Risks)?
@@ -972,14 +881,10 @@ class ExplainableAgent(BlackBoxAgent):
 
     # ── Sub-bullet removal helpers — Change log: 2026-06-04 ─────────────────
 
-    @staticmethod
-    def _norm(text: str) -> str:
-        """Normalise a bullet for comparison: strip inline [a] refs, collapse space, lower."""
-        return re.sub(r"\s+", " ", _INLINE_REF_RE.sub("", text or "")).strip().lower()
-
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
-        removed = {self._norm(b) for b in self.excluded_sub_bullets.get(pillar_name, [])}
-        return self._norm(bullet) in removed
+        """→ shared domain predicate (Step 2; excluded-map passed by value). The local
+        _norm was retired — matching owns ref-insensitive normalisation now."""
+        return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
 
     def _last_agent_message(self) -> str:
         for c in reversed(self.history):
@@ -1150,25 +1055,13 @@ class ExplainableAgent(BlackBoxAgent):
         return "\n".join(lines)
     
     def _concept_grounding(self, concept: str) -> str:
-        """Q&A grounding: description + key-questions, refs stripped. Change log: 2026-05-31"""
-        from backend import knowledge_base as kb
-        pillar = next(
-            (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
-            None
-        )
-        if pillar:
-            pts = [re.sub(r"\s+", " ", _INLINE_REF_RE.sub("", q)).strip()
-                for q in pillar.get("key_questions", [])]
-            parts = []
-            if pillar.get("description"):
-                parts.append(pillar["description"])
-            if pts:
-                parts.append("\n".join(f"- {p}" for p in pts))
-            return "\n\n".join(parts).strip()
-        swap = kb.get_swap_concept()
-        if swap and concept.lower() == self.concept_swap.config["wrong_concept"].lower():
-            return "\n".join(f"- {b}" for b in swap.get("sub_bullets", []))
-        return ""
+        """Q&A grounding → shared grounding.ground_pillar (Step 2): description +
+        key-questions (refs stripped), plus the planted-swap fallback. Behaviour-
+        preserving — the shared fallback keys off the KB swap concept's own name (==
+        this arm's wrong_concept) and the swap sub-bullets carry no [a] refs, so the
+        shared ref-strip is a no-op. Sources stay an Explainable-only render concern,
+        layered elsewhere, never in grounding."""
+        return grounding.ground_pillar(concept)
 
     def _is_removal_doubt(self, user_input: str) -> bool:
         """Vague doubt about whether the current concept belongs. Change log: 2026-05-31"""
