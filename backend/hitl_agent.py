@@ -3,9 +3,9 @@ import logging
 import random
 import re
 from google.genai import types
-from backend.black_box_agent import (
-    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json,
-    ANSWER_THRESHOLD,
+from backend.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
+from backend.llm import (
+    CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json, ANSWER_THRESHOLD,
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -41,6 +41,27 @@ _REF_RE = re.compile(r"\s*\[[a-z]\]")
 
 def _strip_source_refs(text: str) -> str:
     return _REF_RE.sub("", text).strip()
+
+# Deictic references to "the concept we're on" — never a pillar name. The intent
+# classifier emits these RAW in the `parent` slot (D-Q2; intents.py preserves
+# deictics for downstream resolution, see its line-316 note). The elicited add
+# path resolves them to the CURRENT concept at dispatch — see _add_sub_point.
+# Change log: 2026-06-09 (Step-5 gap #1: elicited add_sub_bullet attribution).
+_DEICTIC_PARENTS = frozenset({
+    "this", "it", "here", "this one", "this concept", "this area",
+    "this pillar", "this section", "current", "current concept",
+    "the current concept", "the current pillar",
+})
+
+
+def _is_deictic_parent(name) -> bool:
+    """True if `name` is a deictic reference to the current concept rather than a
+    named pillar. Whole-string match on the normalized text (mirrors intents.py's
+    filler/steering guards) — never a substring, so a real pillar that merely
+    contains such a word is unaffected."""
+    if not name:
+        return False
+    return re.sub(r"\s+", " ", str(name).strip().lower()).strip("?.!, ") in _DEICTIC_PARENTS
 
 # ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "AI Implementation"
@@ -149,7 +170,7 @@ After answering, stop — do not re-present the concept block.
 """
 
 
-class HITLAgent(BlackBoxAgent):
+class HITLAgent(BaseAgent):
     """
     Human-in-the-Loop agent — concept-by-concept walkthrough with explicit
     Include / Skip / Add buttons per concept, proactive prompts between concepts,
@@ -880,6 +901,17 @@ class HITLAgent(BlackBoxAgent):
         yield a confirmation. Used by the proactive sub_point + override paths.
         Change log: 2026-05-29 — writes user_sub_points; dedupe-aware
         """
+        # Deictic parent ("this concept"/"this"/"it"/"here") names no pillar — the
+        # classifier emits it raw (D-Q2). Resolve to the CURRENT concept HERE, before
+        # _normalize_pillar (which only canonicalises real names): otherwise an elicited
+        # "add under this concept: X" stores X under a phantom pillar named "this
+        # concept", corrupting the elicited-contribution DV attribution.
+        # Change log: 2026-06-09 (Step-5 gap #1).
+        if _is_deictic_parent(matched_concept):
+            current = self._current_concept()
+            if current:
+                logging.info(f"[PROACTIVE] deictic parent {matched_concept!r} -> {current!r}")
+                matched_concept = current
         pillar = self._normalize_pillar(matched_concept)
         # Only caller is the proactive (awaiting_user_suggestion) path -> elicited (I-4).
         stored, is_new = self._store_sub_point(pillar, sub_point, source="user_elicited")

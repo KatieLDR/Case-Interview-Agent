@@ -2,9 +2,9 @@ import json
 import logging
 import re
 from google.genai import types
-from backend.black_box_agent import (
-    BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json,
-    ANSWER_THRESHOLD,
+from backend.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
+from backend.llm import (
+    CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json, ANSWER_THRESHOLD,
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -425,11 +425,11 @@ User note: "{item}"
 Output ONLY the reformatted sub-bullet, nothing else.
 """
 
-class ExplainableAgent(BlackBoxAgent):
+class ExplainableAgent(BaseAgent):
     """
     Explainable agent — stateful concept-by-concept walkthrough.
 
-    Inherits from BlackBoxAgent:
+    Inherits from BaseAgent (Step 6b; method list below may predate later steps):
       - Clarification phase (_stream_clarification)
       - _detect_override(), _is_answer(), _strip_fences()
       - _strip_concept_swap_from_history()
