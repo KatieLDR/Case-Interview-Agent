@@ -5,7 +5,7 @@ import re
 from google.genai import types
 from backend.black_box_agent import (
     BlackBoxAgent, CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json,
-    ANSWER_THRESHOLD, OVERRIDE_THRESHOLD,
+    ANSWER_THRESHOLD,
 )
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
@@ -16,6 +16,21 @@ from backend.logger import (
 )
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
 from backend.domain import matching, grounding      # Step 2: shared KB matchers + grounding
+from backend.interaction import intents              # Step 3: unified intent taxonomy (I-2)
+
+# D-Q1: the shared button<->intent map is canonical. DERIVE the set of free-text
+# intents that HITL also exposes as a button from intent_for_button, so HITL and the
+# shared map can never drift. A free-text action in one of these is NUDGED to its
+# button instead of executed; question / ask_agent_to_suggest are answered directly.
+_BUTTON_ACTION_INTENTS = frozenset(
+    intents.intent_for_button(b) for b in intents.BUTTON_INTENT
+) - {None}
+_HITL_BUTTON_LABELS = {
+    "advance": "**✅ Include** or **❌ Skip** (to move past this pillar)",
+    "remove":  "**❌ Skip** (whole pillar) or **➖ Remove a point**",
+    "add":     "**➕ Add point to consider in this pillar**",
+    "revisit": "**↩️ Add point to a past pillar**",
+}
 
 # Strip inline source refs like " [a]" / "[b]" — HITL suppresses sources, so these
 # markers must never reach the user (no Sources line resolves them). Change log: 2026-05-29
@@ -365,38 +380,10 @@ class HITLAgent(BlackBoxAgent):
 
     # ── LLM classifiers ────────────────────────────────────────────────────
 
-    def _classify_intent(self, user_input: str) -> dict:
-        """suggestion | guidance | sub_point (with parent)."""
-        try:
-            result = classify_json(
-                    f"You are classifying a user response in a case interview session.\n\n"
-                    f"The user was asked: 'What's your suggestion for the next area to "
-                    f"explore, or would you like me to guide you?'\n\n"
-                    f"User response: \"{user_input}\"\n\n"
-                    f"Reply with JSON only, no markdown, no explanation:\n"
-                    f"{{\"type\": \"suggestion\" or \"guidance\" or \"sub_point\", "
-                    f"\"concept\": \"extracted noun phrase or null\", "
-                    f"\"parent\": \"parent concept or null\"}}\n\n"
-                    f"type=sub_point when user names BOTH a new thing AND an existing parent:\n"
-                    f"- 'add data privacy under Feasibility' → concept='data privacy', parent='Feasibility'\n"
-                    f"- 'X should go under Y' → concept=X, parent=Y\n"
-                    f"CRITICAL for sub_point: concept = the NEW thing, parent = the EXISTING concept after 'under'/'as part of'/'within'\n\n"
-                    f"type=suggestion when user names a concept with NO parent:\n"
-                    f"- 'how about budget' → concept='budget', parent=null\n"
-                    f"- Names a specific business/analytical area as a noun phrase\n\n"
-                    f"type=guidance ALWAYS for:\n"
-                    f"- Questions: 'anything else?', 'what's next?'\n"
-                    f"- Deferrals: 'you decide', 'take a lead', 'continue', 'proceed'\n"
-                    f"- Uncertainty: 'I don't know', 'not sure', 'guide me'\n"
-                    f"- Affirmations: 'ok', 'sure', 'yes', 'fine'\n"
-                    f"- Verb phrases without a clear business noun\n\n"
-                    f"WHEN IN DOUBT: use guidance."
-            )
-            logging.info(f"[INTENT] classified: {result}")
-            return result
-        except Exception as e:
-            logging.warning(f"[INTENT] classifier failed: {e} — defaulting to guidance")
-            return {"type": "guidance", "concept": None, "parent": None}
+    # _classify_intent retired (Step 3, W3): the proactive branch now uses the ONE
+    # shared backend.interaction.intents.classify_intent — both HITL entry points
+    # (this + the inherited _detect_override) are replaced by the single router, so
+    # one input can no longer reach the add path twice (F-M4).
 
     def _check_duplicate_proactive(self, concept: str) -> dict:
         """Check if a user-suggested concept matches one already in the walkthrough."""
@@ -555,24 +542,36 @@ class HITLAgent(BlackBoxAgent):
             self.awaiting_user_suggestion = False
             log_user_message(self.session_id, f"[PROACTIVE RESPONSE] {user_input}")
 
-            intent = self._classify_intent(user_input)
+            # Step 3 (W3): the proactive response goes through the ONE shared router
+            # (I-1/I-2), NOT a second classifier. State-dependent persona rendering:
+            # in this ELICITED-suggestion state an `add` is EXECUTED (the legitimate
+            # user_elicited contribution) — the normal turn nudges instead (F-M4).
+            pres = intents.classify_intent(
+                user_input,
+                current_pillar=self._current_concept() or "(none)",
+                current_bullets=self._ctx_bullets(),
+                walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+                last_agent=self._last_agent_text() or "(nothing yet)",
+            )
 
-            if intent["type"] == "guidance":
-                logging.info(f"[PROACTIVE] user chose guidance")
-                yield from self._stream_concept(is_first=False)
-                return
-
-            if intent["type"] == "sub_point" and intent.get("concept") and intent.get("parent"):
-                concept = intent["concept"]
-                parent  = intent["parent"]
-                logging.info(f"[PROACTIVE] sub-point: '{concept}' → '{parent}'")
-                yield from self._add_sub_point(parent, concept)
+            # add + explicit parent ("X under Y") = a sub-point on an existing pillar.
+            if pres.intent == "add" and pres.detail and pres.parent:
+                logging.info(f"[PROACTIVE] sub-point: '{pres.detail}' → '{pres.parent}'")
+                yield from self._add_sub_point(pres.parent, pres.detail)
                 yield from self._stream_concept_qa()  # stay on current concept
                 return
 
-            # suggestion — resolve to a target concept (existing / withheld pillar /
-            # genuinely new) and NEVER insert a duplicate. Change log: 2026-05-29
-            concept = intent.get("concept") or user_input.strip()
+            # Anything that is NOT the user naming their own concept = 'guide me'
+            # (advance / ask_agent_to_suggest / question / doubt / none): proceed with
+            # the planned next concept, exactly as the old `guidance` branch did.
+            if not (pres.intent == "add" and pres.detail):
+                logging.info(f"[PROACTIVE] guidance/continue (intent={pres.intent})")
+                yield from self._stream_concept(is_first=False)
+                return
+
+            # suggestion — the user named their OWN concept to explore. Resolve to a
+            # target (existing / withheld pillar / genuinely new), never a duplicate.
+            concept = pres.detail
             dup     = self._check_duplicate_proactive(concept)
 
             if dup["is_duplicate"] and dup["matched_concept"]:
@@ -619,33 +618,35 @@ class HITLAgent(BlackBoxAgent):
                 yield from self._stream_user_contributed_concept(target)
             return
 
-        # ── 3. Override detection ──────────────────────────────────────────
+        # ── 3. Unified intent (Step 3) — ONE shared router (I-1/I-2) replaces BOTH
+        #      _detect_override (this normal turn) AND _classify_intent (proactive).
+        #      F-M4 fixed STRUCTURALLY: a FREE-TEXT add no longer executes here (it
+        #      nudges to the ➕ button, D-Q1), so add_pillar cannot fire via two paths
+        #      for one input. W8: no confidence floor.
         just_added_concept = None
-        override = self._detect_override(user_input)
+        res = intents.classify_intent(
+            user_input,
+            current_pillar=self._current_concept() or "(none)",
+            current_bullets=self._ctx_bullets(),
+            walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+            last_agent=self._last_agent_text() or "(nothing yet)",
+        )
+        intent = res.intent
 
-        # ── 3b. Explicit removal of the wrong concept ──────────────────────
-        if (override and
-                override["type"] == "concept_excluded" and
-                override.get("detail") and
-                not self.concept_swap.is_detected and
-                self.swap_presented):
-            wrong = self.concept_swap.config["wrong_concept"]
-            if (self.concept_swap.matches(override["detail"]) or
-                    self.concept_swap.matches(user_input)):
-                self.concept_swap.force_detected()
-                if wrong not in self.excluded_concepts:
-                    self.excluded_concepts.append(wrong)
-                self.walkthrough_index += 1
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"included: {wrong}",
-                    new_context=f"user removed wrong concept explicitly: {wrong}",
-                )
-                logging.info(f"[CONCEPT SWAP] detected via explicit removal")
-
-        # ── 4. Swap detection — only if presented AND no override ──────────
+        # ── 3b. Swap removal is the SAME button path as any pillar (Katie's instrument
+        #      decision 2026-06-09; resolves F-S3 for HITL). A free-text "remove [swap]"
+        #      is NOT specially force-detected on a steering `remove` intent (that would
+        #      contradict W2, which runs swap-check on NON-steering intents only). Like
+        #      any free-text remove it is NUDGED to ❌ (D-Q1, below); detection happens
+        #      when the user clicks ❌ -> on_confirm_reject -> force_detected (swap
+        #      DETECTED, never a delete). swap_questioned (question on the swap) + the
+        #      semantic backstop (below) are the remaining text channels.
         cs_detected = False
-        if self.swap_presented and not override:
+        swap_live   = self.swap_presented and not self.concept_swap.is_detected
+
+        # ── 4. Swap detection — semantic backstop, NON-STEERING only
+        #      (W2: intent not in (add, remove) ≡ the old `not override` gate).
+        if swap_live and intent not in ("add", "remove"):
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
@@ -666,88 +667,20 @@ class HITLAgent(BlackBoxAgent):
             logging.error(f"[INVARIANT] rewinding to swap_position={self.swap_position}")
             self.walkthrough_index = self.swap_position
 
-        # ── 5. Override handling ───────────────────────────────────────────
-        if override:
-            if override["type"] != "concept_added":
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"override_type: {override['type']}",
-                    new_context=f"detail: {override['detail'] or 'n/a'}",
-                )
-            logging.info(f"[OVERRIDE] {override['type']} — {override['detail']}")
-
-            if override["type"] == "redo":
-                self.walkthrough_active        = False
-                self.walkthrough_done          = False
-                self.walkthrough_index         = 0
-                self.walkthrough_concepts      = []
-                self.excluded_concepts         = []
-                self.approved_concepts         = []
-                self.concept_blocks            = {}
-                self.user_sub_points           = {}
-                self.justification_pillars     = set()
-                self.swap_presented            = False
-                self.swap_position             = 0
-                self.pending_excl              = None
-                self.pending_sub_excl          = None
-                self.awaiting_user_suggestion  = False
-                self.awaiting_justification    = False
-                self.justification_for         = None
-                self.awaiting_sub_point        = False
-                self.awaiting_revisit_add      = False
-                self.revisit_target            = None
-                self.prompt_index              = 0
-                self.ack_index                 = 0
-                self.user_contributed_concepts = set()
-                self.navigated_pillars         = set()
-                if self.concept_swap.is_detected:
-                    self.history = self._strip_concept_swap_from_history()
-                yield "Noted — let me start the walkthrough fresh.\n\n"
-                log_user_message(self.session_id, "[REDO TRIGGERED]")
-
-            elif override["type"] == "concept_added" and override.get("detail"):
-                new_concept = override["detail"]
-                parent      = override.get("parent")
-                if parent:
-                    logging.info(f"[CONCEPT ADDED] sub-point: '{new_concept}' → '{parent}'")
-                    yield from self._add_sub_point(parent, new_concept)
-                else:
-                    dup = self._check_duplicate(new_concept, self.walkthrough_concepts)
-                    if dup["is_duplicate"]:
-                        logging.info(
-                            f"[CONCEPT ADDED] sub-point: '{new_concept}' → '{dup['matched_concept']}'"
-                        )
-                        yield from self._add_sub_point(dup["matched_concept"], new_concept)
-                    else:
-                        # Match alternate wording to a withheld pillar so it renders
-                        # real KB content when reached — consistent with the proactive
-                        # path. Change log: 2026-05-29
-                        matched_withheld = self._match_pillar(new_concept)
-                        resolved  = matched_withheld or new_concept
-                        insert_at = self.walkthrough_index + 1
-                        self.walkthrough_concepts.insert(insert_at, resolved)
-                        log_concept_added(self.session_id, resolved)
-                        log_add_pillar(self.session_id, resolved, "text")
-                        logging.info(
-                            f"[CONCEPT ADDED] '{new_concept}' inserted as "
-                            f"'{resolved}' at index={insert_at}"
-                        )
-                        just_added_concept = resolved
-
-        # ── 6. Log and append user message ────────────────────────────────
+        # ── 5. Log and append user message ─────────────────────────────────
         log_user_message(self.session_id, user_input)
         self.history.append(
             types.Content(role="user", parts=[types.Part(text=user_input)])
         )
 
-        # ── 7. Routing log ─────────────────────────────────────────────────
+        # ── 6. Routing log ─────────────────────────────────────────────────
         logging.info(
             f"[ROUTE] active={self.walkthrough_active}, done={self.walkthrough_done}, "
             f"swap_presented={self.swap_presented}, index={self.walkthrough_index}, "
-            f"cs_detected={cs_detected}"
+            f"intent={intent}, cs_detected={cs_detected}"
         )
 
-        # ── 8. Route ───────────────────────────────────────────────────────
+        # ── 7. Route ───────────────────────────────────────────────────────
         if not self.walkthrough_active:
             self.walkthrough_concepts     = self._build_walkthrough_concepts()
             self.walkthrough_active       = True
@@ -767,24 +700,78 @@ class HITLAgent(BlackBoxAgent):
             else:
                 yield from self._stream_proactive_prompt()
 
+        elif intent in _BUTTON_ACTION_INTENTS:
+            # D-Q1: HITL exposes add/remove/revisit/advance as buttons, so a FREE-TEXT
+            # action is NUDGED to its button instead of executed (intended HITL change,
+            # W5 convergence; the F-M4 fix). Full nudge render is a Step-4 seam.
+            yield from self._nudge_to_button(intent)
+
+        elif intent == "ask_agent_to_suggest":
+            # Answered directly (D-Q1): STATE a grounded withheld-KB suggestion, never
+            # free-form (catalog D1). Suggesting is not adding.
+            yield from self._handle_suggest(user_input)
+
         else:
-            if override is None:   # pure question/comment, not a steering action
-                current  = self._current_concept()
-                _on_swap = (self.swap_presented
-                            and not self.concept_swap.is_detected
-                            and current is not None
-                            and self._is_wrong_concept(current))
-                # Parity with BlackBox/Explainable: a typed turn landing in Q&A IS a
-                # question — log it unconditionally. swap_questioned is a subset
-                # logged on top (Finding A). Change log: 2026-06-02
-                log_question(self.session_id, "text", detail=user_input[:200])
-                if _on_swap:
-                    log_swap_questioned(self.session_id, "text", detail=user_input[:200])
+            # question / doubt / none — answered directly via KB-grounded Q&A.
+            current  = self._current_concept()
+            _on_swap = (swap_live and current is not None
+                        and self._is_wrong_concept(current))
+            # Parity with BlackBox/Explainable: a typed turn landing in Q&A IS a
+            # question — log it. swap_questioned is the on-swap subset (W9).
+            log_question(self.session_id, "text", detail=user_input[:200])
+            if _on_swap:
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
             yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
     # Proactive prompt + justification
     # ══════════════════════════════════════════════════════════════════════
+
+    def _ctx_bullets(self) -> str:
+        """Current concept's visible points (KB block + user sub-points) — router context."""
+        cur   = self._current_concept() or ""
+        block = (self.concept_blocks.get(cur, "") or "").strip()
+        pts   = self.user_sub_points.get(cur, [])
+        lines = ([block] if block else []) + [f"- {p}" for p in pts]
+        return "\n".join(lines) or "(none)"
+
+    def _handle_suggest(self, user_input: str):
+        """ask_agent_to_suggest (normal turn) — STATE a suggestion drawn
+        DETERMINISTICALLY from the WITHHELD KB (catalog D1), grounded, NEVER free-form
+        -> cannot confabulate. Suggesting is NOT adding (no artifact, no add_pillar).
+        HITL override of the inherited BlackBox method: HITL tracks surfaced pillars
+        differently (walkthrough_concepts / user_contributed_concepts / excluded_
+        concepts, NOT user_added_pillars). The shared SuggestOutcome handler unifies
+        all three arms in Step 4 (§S)."""
+        surfaced = ({c.lower() for c in self.walkthrough_concepts}
+                    | {c.lower() for c in self.user_contributed_concepts}
+                    | {e.lower() for e in self.excluded_concepts})
+        withheld = [p for p in kb.get_all_pillars()
+                    if not p.get("shown", False) and p["name"].lower() not in surfaced]
+        if withheld:
+            target = withheld[0]
+            why = grounding.ground_pillar(target["name"]).split("\n")[0].strip()
+            msg = (f"One area we haven't covered yet is **{target['name']}**"
+                   + (f" — {why}" if why else "")
+                   + "\n\nIf it fits your case, you can add it with the **➕** button.")
+        else:
+            msg = ("You've surfaced the main areas I'd flag — use the buttons to add, "
+                   "skip, or revisit any part of the framework.")
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def _nudge_to_button(self, intent: str):
+        """D-Q1 persona render: HITL surfaces add/remove/revisit/advance as buttons, so
+        a FREE-TEXT action is nudged to its button rather than executed. This is the
+        intended HITL behaviour change behind the F-M4 fix (a free-text add no longer
+        logs add_pillar a second time). The richer nudge render is a Step-4 seam."""
+        label = _HITL_BUTTON_LABELS.get(intent, "the buttons below")
+        msg = ("In this mode each change is made with a button, so it stays explicit. "
+               f"You can do that with {label} below — go ahead and click when you're ready.")
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
 
     def _stream_proactive_prompt(self):
         self.awaiting_user_suggestion = True

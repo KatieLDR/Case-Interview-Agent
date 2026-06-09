@@ -23,6 +23,7 @@ from backend.llm import (
     ANSWER_THRESHOLD, OVERRIDE_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
 )
 from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
+from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
 
 # ── Model config ───────────────────────────────────────────────────────────
 # MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
@@ -625,6 +626,13 @@ class BlackBoxAgent:
     # Change log: 2026-05-16 — skip log_memory_override for concept_added
     # ══════════════════════════════════════════════════════════════════════
 
+    def _last_agent_text(self) -> str:
+        """Last model message (router context). BlackBox has no walkthrough cursor."""
+        for c in reversed(self.history):
+            if c.role == "model" and c.parts:
+                return (c.parts[0].text or "")[:500]
+        return ""
+
     def _stream_main(self, user_input: str):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
@@ -650,45 +658,62 @@ class BlackBoxAgent:
                 return
             yield from self._begin_removal(user_input, user_input)
             return
-        # ── 1. Override detection ──────────────────────────────────────────
-        override = self._detect_override(user_input)
+        # ── 1. Unified intent (Step 3) — replaces the _detect_override +
+        #      _classify_question cascade. ONE shared taxonomy across arms (I-1/I-2).
+        #      BlackBox renders the whole framework, so there is NO single 'current
+        #      pillar'; the router gets the shown-pillar list + last agent message.
+        res = intents.classify_intent(
+            user_input,
+            current_pillar="(none)",
+            current_bullets="(none)",
+            walkthrough_pillars=", ".join(self.kg_context["concepts"])
+                or "Strategic Fit, Solution Design & Scope, Feasibility",
+            last_agent=self._last_agent_text() or "(nothing yet)",
+        )
+        intent = res.intent
 
-        # ── 1a. Swap detection — only if presented AND no override ─────────
+        # ── 1a. Swap detection — W2: run only when the intent is NON-steering, the
+        #      faithful equivalent of the old `not override` gate (override-truthy
+        #      was concept_added/concept_excluded == add/remove; redo is gone).
         cs_detected = False
-        if self.concept_swap.is_injected and not override:
+        if self.concept_swap.is_injected and intent not in ("add", "remove"):
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
                 log_memory_override(self.session_id,
                     old_context=f"included: {wrong}",
-                    new_context=f"user rejected: {wrong}")   # stays detection (#3), no log_delete
+                    new_context=f"user rejected: {wrong}")   # detection (#3), no log_delete
 
-        # ── 2. Override handling — deterministic, no LLM framework regen ───
-        if override:
-            if override["type"] == "redo":
-                yield from self._handle_redo(); return
-            if override["type"] == "concept_excluded" and override.get("detail"):
-                yield from self._begin_removal(override["detail"], user_input); return
-            if override["type"] == "concept_added" and override.get("detail"):
-                yield from self._handle_add(override["detail"], override.get("parent")); return
-            # any non-handled override type → no-op ack (framework is fixed for the study)
-            yield from self._ack_no_reprint(); return
+        # ── 2. Steering intents — deterministic, no LLM framework regen.
+        #      W1: removal stays on the existing flow; Fork-A deictic is Step 4.
+        if intent == "remove" and res.detail:
+            yield from self._begin_removal(res.detail, user_input); return
+        if intent == "add" and res.detail:
+            yield from self._handle_add(res.detail, res.parent); return
 
         # ── 3. Swap just caught — neutral ack + re-render without it ────────
         if cs_detected:
             yield from self._yield_rerender("Understood — I've taken that out.\n\n")
             return
 
-        # ── 4. Question vs contextless reply ───────────────────────────────
+        # ── 4. Non-steering intents ────────────────────────────────────────
         swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
-        q = self._classify_question(user_input,
-                                    self.concept_swap.config["wrong_concept"], swap_active)
-        if q["is_question"]:
+        if intent == "question":
             log_question(self.session_id, "text", detail=user_input[:200])
-            if swap_active and q["is_about_swap"]:
+            # W9: preserve the swap-questioned firing that _classify_question carried
+            #     (is_about_swap). The §3.6 single shared prompt is Step 5.
+            if swap_active and self._classify_swap_question(user_input):
                 log_swap_questioned(self.session_id, "text", detail=user_input[:200])
             yield from self._stream_qa(user_input)
+        elif intent == "ask_agent_to_suggest":
+            # D6 fix + grounded: NEVER an add, and the suggestion is drawn
+            # DETERMINISTICALLY from the WITHHELD KB (catalog D1), never free-form,
+            # so it cannot confabulate a pillar (the F-M6 family). The structured
+            # SuggestOutcome (§3.5) + the ask_agent_suggestion event are Step 4/5.
+            yield from self._handle_suggest(user_input)
         else:
+            # advance / doubt / none (revisit is not a BlackBox behaviour — BB shows
+            # the whole framework). No reprint. W5: expected new-intent acks.
             yield from self._ack_no_reprint()
 
     # ── Deterministic render ───────────────────────────────────────────────
@@ -1169,22 +1194,6 @@ class BlackBoxAgent:
         return item.strip()
 
     # ── Redo / Q&A / ack / summary ─────────────────────────────────────────
-    def _handle_redo(self):
-        self.user_sub_points      = {}
-        self.user_added_pillars   = []
-        self.excluded_concepts    = []
-        self.excluded_sub_bullets = {}
-        self.pending_excl         = None
-        self.pending_sub_excl     = None
-        self.has_main_contribution = False
-        self.awaiting_removal_target = False
-        log_user_message(self.session_id, "[REDO TRIGGERED]")
-        reply = "Noted — here's a fresh framework.\n\n" + self._render_full_framework(is_first=True)
-        self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
-        update_answer(self.session_id, reply)
-        log_agent_response(self.session_id, reply)
-        yield reply
-
     def _stream_qa(self, user_input: str):
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) or \
@@ -1230,6 +1239,31 @@ class BlackBoxAgent:
             "──────────────────────────────────────────────────────────────────────\n"
         )
         yield from self._stream_with_instruction(instruction=instruction)
+    def _handle_suggest(self, user_input: str):
+        """ask_agent_to_suggest — STATE a suggestion drawn from the WITHHELD KB
+        (catalog D1). Built deterministically from KB grounding, NEVER free-form, so
+        it cannot confabulate a pillar. Suggesting is not adding: no artifact, no
+        add_pillar. (Selection moves to the shared handler + structured SuggestOutcome
+        in Step 4; the ask_agent_suggestion event is Step 5.)"""
+        from backend import knowledge_base as kb
+        from backend.domain import grounding
+        surfaced = ({n.lower() for n in self.user_added_pillars}
+                    | {e.lower() for e in self.excluded_concepts})
+        withheld = [p for p in kb.get_all_pillars()
+                    if not p.get("shown", False) and p["name"].lower() not in surfaced]
+        if withheld:
+            target = withheld[0]                       # deterministic: first withheld by KB order
+            why = grounding.ground_pillar(target["name"]).split("\n")[0].strip()
+            msg = (f"One area we haven't covered yet is **{target['name']}**"
+                   + (f" — {why}" if why else "")
+                   + "\n\nIt's worth considering whether it applies to your case.")
+        else:
+            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
+                   "remove, or question any part of what's here.")
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
     def _ack_no_reprint(self):
         acks = ["Sure — I'm here if you'd like to revisit anything.",
                 "Understood — let me know if anything comes to mind.",
@@ -1374,36 +1408,28 @@ class BlackBoxAgent:
             print(f"[OVERRIDE] error: {e}")
         return None
     
-    def _classify_question(self, user_input: str, swap_concept: str, swap_active: bool) -> dict:
-        """
-        Lite classifier: is this a question / explanation request (vs an affirmation
-        or comment), and is it specifically about the swap concept? Runs only on
-        non-steering, non-swap-rejection turns. Change log: 2026-05-30
-        """
-        swap_clause = (
-            f'Then decide whether the question is specifically ABOUT this concept:\n"{swap_concept}"\n'
-            if swap_active else 'Set is_about_swap to false.\n'
-        )
+    def _classify_swap_question(self, user_input: str) -> bool:
+        """Swap-question check (W9): is this question specifically ABOUT the swap
+        concept? The `is_about_swap` half of the retired `_classify_question` — the
+        intent router now owns is_question. Called only on `question` turns while the
+        swap is active. Returns False on any error (never over-logs swap_questioned).
+        The §3.6 single shared questioned-vs-detected prompt is Step 5."""
+        swap_concept = self.concept_swap.config["wrong_concept"]
         prompt = (
             "You are a classifier for a case interview tool.\n"
             "Determine whether the user's message is a QUESTION or request for explanation "
-            "about the framework/case — as opposed to an affirmation, acknowledgement, "
-            "comment, or steering command.\n\n"
-            "Questions: 'why is X here?', 'can you explain...', 'what does ... mean?', "
-            "'how does this apply?', 'is this relevant?'\n"
-            "NOT questions: 'ok', 'thanks', 'sounds good', 'yes', 'no', plain statements.\n\n"
-            f"{swap_clause}\n"
+            "specifically ABOUT this concept:\n"
+            f'"{swap_concept}"\n\n'
             'Respond ONLY with valid JSON, no markdown:\n'
-            '{"is_question": true or false, "is_about_swap": true or false}\n\n'
+            '{"is_about_swap": true or false}\n\n'
             f'User message: "{user_input}"'
         )
         try:
-            parsed = classify_json(prompt)
-            return {"is_question": bool(parsed.get("is_question", False)),
-                    "is_about_swap": bool(parsed.get("is_about_swap", False))}
+            return bool(classify_json(prompt).get("is_about_swap", False))
         except Exception as e:
-            print(f"[QUESTION] classifier error: {e}")
-            return {"is_question": False, "is_about_swap": False}
+            print(f"[SWAP-Q] classifier error: {e}")
+            return False
+
         
     def _check_duplicate(self, concept: str, existing_concepts: list) -> dict:
         """

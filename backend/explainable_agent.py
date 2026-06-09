@@ -18,6 +18,7 @@ from backend.rag_explainer import build_citation_header, check_and_append_warnin
 from backend.domain import matching, grounding          # Step 2: shared KB matchers + grounding
 from backend.domain.matching import ADD_PILLAR_MATCH_PROMPT  # canonical; reused by _match_withheld_pillar
 from backend.llm import ADD_MATCH_THRESHOLD                  # canonical threshold (matcher copies retired)
+from backend.interaction import intents                      # Step 3: unified intent taxonomy (I-2)
 
 # ── Source display: letter scheme kept, entries shown as named links ────────
 # Change log: 2026-05-30
@@ -331,65 +332,10 @@ Respond ONLY with valid JSON, no markdown:
 {{"level": "pillar" | "sub_bullet", "pillar": "name or null", "bullet": "exact point text or null", "confidence": float}}
 """
 
-# Single intent router — Change log: 2026-06-04
-# Replaces the old cascade (_detect_override + _is_ready_to_advance + _is_removal_doubt)
-# for the walkthrough phase. Returns ONE primary intent so an add can never be
-# mis-caught as a remove/doubt/question.
-INTENT_ROUTER_PROMPT = """
-You route a user's message during a one-concept-at-a-time framework walkthrough.
-Return the SINGLE best intent.
-
-Intents:
-- "advance"  : ready to move to the next pillar ("yes", "ok", "next", "move on",
-               "makes sense", "got it", "sounds good") with no other request.
-- "add"      : wants to ADD a new point or area — including proposals phrased as
-               "we should consider X", "we need to think about X", "what about X",
-               "how about X", "can we also look at X", "add X", "include X".
-               detail = the thing to add. A leading "no" does NOT cancel an add
-               ("no, add X" is still add).
-- "remove"   : wants to remove a whole pillar OR one specific point
-               ("remove X", "drop this", "take out the part about Y", "delete that bullet").
-               detail = what to remove.
-- "question" : asking to understand the current concept ("what is X?", "why is this
-               here?", "how does this apply?", "can you explain?").
-- "doubt"    : vaguely doubts the current concept belongs, WITHOUT a clear remove
-               command ("I'm not sure this fits", "this seems off", "is this necessary?").
-- "redo"     : restart the whole walkthrough from scratch.
-- "none"     : none of the above / unclear.
-
-KEY DISAMBIGUATION:
-- Proposing a NEW consideration to include is "add", even when phrased as
-  "consider if X ...", "we need to understand X", "we need to account for X",
-  "we should capture X". ("We need to consider if the team strategy aligns" → add,
-  detail "team strategy alignment".)
-- "add" vs "question": proposing something to include → add; asking to understand
-  what is already shown → question.
-- Naming an existing pillar AS THE PLACE for a new point is still "add" — the pillar
-  is just the location, the new point is the thing being added. detail = the new
-  point. ("Let's revisit Strategic Fit, we need to understand the frequency of the
-  opportunity" → add, detail "frequency of the opportunity".)
-- Only treat naming an existing pillar as "question" when the user asks to UNDERSTAND
-  its existing content (e.g. "remind me what Strategic Fit covers"), with no new point.
-- "doubt" vs "remove": doubt is hesitation with no command; remove is a clear instruction.
-
-─── CURRENT PILLAR ───────────────────────────────────────────────────────────
-{current_pillar}
-Its points:
-{current_bullets}
-────────────────────────────────────────────────────────────────────────────
-─── WALKTHROUGH PILLARS ──────────────────────────────────────────────────────
-{concepts}
-────────────────────────────────────────────────────────────────────────────
-─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
-{last_agent}
-────────────────────────────────────────────────────────────────────────────
-─── USER MESSAGE ─────────────────────────────────────────────────────────────
-{user_msg}
-────────────────────────────────────────────────────────────────────────────
-
-Respond ONLY with valid JSON, no markdown:
-{{"intent": "advance|add|remove|question|doubt|redo|none", "detail": "string or null", "confidence": float}}
-"""
+# Single intent router retired (Step 3): routing now goes through the shared
+# backend.interaction.intents.classify_intent (ONE taxonomy across all arms, I-1/I-2).
+# The local router prompt + the per-arm intent method were removed here; the
+# canonical prompt lives in the interaction layer. See REFACTOR_PLAN §S Step 3.
 
 # ══════════════════════════════════════════════════════════════════════════
 # Addition flow prompts — Change log: 2026-05-28
@@ -533,6 +479,13 @@ class ExplainableAgent(BlackBoxAgent):
                              ("we should consider X") can't be mis-caught as remove/doubt.
                              Swap detection kept identical (2a explicit remove + 2b semantic
                              backstop). question → KB-grounded QA (_concept_grounding).
+    Change log: 2026-06-08 — Step 3: routing switched to the SHARED interaction-layer
+                             classifier (one taxonomy across arms, I-1/I-2). Local
+                             router prompt + per-arm intent method retired; redo
+                             removed (W4, §0 no session wipe); swap gate re-expressed
+                             as non-steering (W2); new shared intents handled —
+                             ask_agent_to_suggest via inherited _handle_suggest
+                             (grounded, not free-form), revisit navigates a passed pillar.
     Change log: 2026-06-04d — adding to a not-yet-reached pillar now lifts it to the
                              next slot and discusses it immediately (_move_pillar_to_next;
                              swap shifts back one, still shown). Current/passed pillars
@@ -931,38 +884,8 @@ class ExplainableAgent(BlackBoxAgent):
             logging.warning(f"[REMOVAL TARGET] error: {e} — defaulting to pillar")
             return {"level": "pillar", "pillar": current, "bullet": None}
 
-    def _classify_intent(self, user_input: str) -> dict:
-        """Single primary-intent classifier for a walkthrough turn. Replaces the old
-        cascade. Defaults to 'question' (safe — never silently advances or removes).
-        Change log: 2026-06-04"""
-        from backend import knowledge_base as kb
-        current = self._current_concept() or "(none)"
-        pillar = next((p for p in kb.get_all_pillars()
-                       if p["name"].lower() == current.lower()), None)
-        bullets = []
-        if pillar:
-            bullets += list(pillar.get("sub_bullets", []))
-        bullets += self.user_sub_points.get(current, [])
-        bullets = [b for b in bullets if not self._is_excluded_bullet(current, b)]
-        bullets_block = "\n".join(f"- {b}" for b in bullets) or "(none)"
-        concepts = ", ".join(self.walkthrough_concepts) or "(none)"
-        prompt = INTENT_ROUTER_PROMPT.format(
-            current_pillar=current,
-            current_bullets=bullets_block,
-            concepts=concepts,
-            last_agent=self._last_agent_message() or "(nothing yet)",
-            user_msg=user_input,
-        )
-        try:
-            parsed = classify_json(prompt)
-            intent = parsed.get("intent", "question")
-            valid = {"advance", "add", "remove", "question", "doubt", "redo", "none"}
-            if intent not in valid:
-                intent = "question"
-            return {"intent": intent, "detail": parsed.get("detail")}
-        except Exception as e:
-            logging.warning(f"[INTENT] error: {e} — defaulting to question")
-            return {"intent": "question", "detail": None}
+    # _classify_intent retired (Step 3): the per-arm router was replaced by the
+    # shared backend.interaction.intents.classify_intent call in _stream_main.
 
     def _format_sub_bullet(self, item: str) -> str:
         """Reformat an unmatched user sub-point into terse bullet style. Style only —
@@ -1174,10 +1097,27 @@ class ExplainableAgent(BlackBoxAgent):
         # ── 1. Single intent router (replaces _detect_override + advance + doubt).
         #    Change log: 2026-06-04 ─────────────────────────────────────────────
         just_added_concept = None
-        intent_obj = self._classify_intent(user_input)
-        intent = intent_obj["intent"]
-        detail = intent_obj.get("detail")
-        logging.info(f"[INTENT] {intent} — detail={detail!r}")
+        # Step 3: ONE shared router across all arms (I-1/I-2). Build exactly the
+        # context the old per-arm classifier assembled (current concept + its
+        # non-excluded points + walkthrough pillars + last agent msg). W8: NO
+        # confidence floor (EXP never had one).
+        from backend import knowledge_base as kb
+        _cur = self._current_concept() or "(none)"
+        _pillar = next((p for p in kb.get_all_pillars()
+                        if p["name"].lower() == _cur.lower()), None)
+        _bul = list(_pillar.get("sub_bullets", [])) if _pillar else []
+        _bul += self.user_sub_points.get(_cur, [])
+        _bul = [b for b in _bul if not self._is_excluded_bullet(_cur, b)]
+        res = intents.classify_intent(
+            user_input,
+            current_pillar=_cur,
+            current_bullets="\n".join(f"- {b}" for b in _bul) or "(none)",
+            walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+            last_agent=self._last_agent_message() or "(nothing yet)",
+        )
+        intent = res.intent
+        detail = res.detail
+        logging.info(f"[INTENT] {intent} — detail={detail!r} parent={res.parent!r}")
 
         override = None   # reused to drive the existing step-6 routing branches
         wrong = self.concept_swap.config["wrong_concept"]
@@ -1217,7 +1157,7 @@ class ExplainableAgent(BlackBoxAgent):
         #    (mirrors the old 'swap_presented and not override').
         if (not cs_detected and self.swap_presented
                 and not self.concept_swap.is_detected
-                and intent in ("question", "doubt", "advance", "none")):
+                and intent not in ("add", "remove")):   # W2: non-steering (≡ old not override)
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 log_memory_override(
@@ -1232,28 +1172,9 @@ class ExplainableAgent(BlackBoxAgent):
 
         # ── 3. Translate intent → routing setup (skipped if the swap was caught) ──
         if not cs_detected:
-            if intent == "redo":
-                self.walkthrough_active   = False
-                self.walkthrough_done     = False
-                self.walkthrough_index    = 0
-                self.walkthrough_concepts = []
-                self.excluded_concepts    = []
-                self.swap_presented       = False
-                self.swap_position        = 0
-                self.pending_excl         = None
-                self.pending_add          = None
-                self.pending_clarify = None
-                self.pending_sub_excl     = None
-                self.excluded_sub_bullets = {}
-                self.has_main_contribution = False
-                self.user_added_pillars   = []
-                self.user_sub_points      = {}
-                if self.concept_swap.is_detected:
-                    self.history = self._strip_concept_swap_from_history()
-                yield "Noted! Let me start the walkthrough fresh...\n\n"
-                log_user_message(self.session_id, "[REDO TRIGGERED]")
-
-            elif intent == "remove":
+            # W4: redo branch deleted — "start over" classifies as none and renders
+            # the fallback (§0: users may not wipe a session).
+            if intent == "remove":
                 # Disambiguate: whole pillar, or one sub-bullet? Change log: 2026-06-04
                 rt = self._classify_removal_target(user_input)
                 if rt["level"] == "sub_bullet" and rt.get("bullet"):
@@ -1360,6 +1281,34 @@ class ExplainableAgent(BlackBoxAgent):
             self.pending_clarify = current
             logging.info(f"[CLARIFY] doubt on '{self.pending_clarify}' — asking")
             yield from self._ask_clarify()
+
+        elif intent == "revisit":
+            # Step 3 (W5 convergence): revisit is now a first-class shared intent.
+            # Navigate to a PASSED pillar named in `detail`, reusing EXP's existing
+            # revisit mechanism. Final consolidation (intent vs locate()->passed) is
+            # the Step-4 watch item; this does NOT move a baseline row (EXP's old
+            # 7-intent classifier never emitted revisit).
+            target = self._resolve_to_concept_name(detail) if detail else None
+            if target and target not in self.walkthrough_concepts:
+                target = self._match_pillar(detail) or target
+            past = [c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
+                    if c.lower() not in [e.lower() for e in self.excluded_concepts]]
+            if target and target in past:
+                self.walkthrough_index = self.walkthrough_concepts.index(target)
+                yield f"Going back to **{target}** — here's where we left off.\n\n"
+                yield from self._stream_concept(is_first=False)
+            else:
+                # named area not yet covered / unresolved -> non-destructive Q&A.
+                log_question(self.session_id, "text", detail=user_input[:200])
+                yield from self._stream_concept_qa(just_added=just_added_concept)
+
+        elif intent == "ask_agent_to_suggest":
+            # D6 fix + grounded: STATE a suggestion drawn DETERMINISTICALLY from the
+            # WITHHELD KB (catalog D1) via the INHERITED BlackBox _handle_suggest —
+            # never free-form, so it cannot confabulate a pillar. Suggesting is NOT
+            # adding (no artifact, no add_*). The shared SuggestOutcome + the
+            # ask_agent_suggestion event are Step 4/5 (§S).
+            yield from self._handle_suggest(user_input)
 
         else:
             # question / none / add-without-detail → KB-grounded Q&A.
