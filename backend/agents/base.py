@@ -32,9 +32,9 @@ from backend.logger import (
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
-from backend.cases import get_case, get_clarification_facts
-from backend.concept_swap import ConceptSwap
-from backend import knowledge_base as kb
+from backend.knowledge.cases import get_case, get_clarification_facts
+from backend.tools.concept_swap import ConceptSwap
+from backend.knowledge import knowledge_base as kb
 
 load_dotenv()
 
@@ -216,7 +216,7 @@ class BaseAgent:
         Load framework context from JSON knowledge base.
         Change log: 2026-05-28 — migrated from KG to JSON knowledge base.
         """
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         framework = kb.get_framework_name()
         concepts  = [p["name"] for p in kb.get_shown_pillars()]
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
@@ -243,7 +243,7 @@ class BaseAgent:
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_tree_overview(self) -> str:
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         shown = kb.get_shown_pillars()
         lines = ["**Framework Overview**\n"]
         for pillar in shown:
@@ -386,7 +386,7 @@ class BaseAgent:
         return ""
 
     def _render_full_framework(self, is_first: bool = False, closing: bool = True) -> str:
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         excluded  = [e.lower() for e in self.excluded_concepts]
         shown     = [p for p in kb.get_shown_pillars() if p["name"].lower() not in excluded]
         swap      = kb.get_swap_concept()

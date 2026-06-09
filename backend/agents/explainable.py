@@ -2,19 +2,19 @@ import json
 import logging
 import re
 from google.genai import types
-from backend.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
+from backend.agents.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
 from backend.llm import (
     CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json, ANSWER_THRESHOLD,
 )
-from backend.cases import get_case, get_clarification_facts
-from backend.concept_swap import ConceptSwap
+from backend.knowledge.cases import get_case, get_clarification_facts
+from backend.tools.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, update_answer,
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
-from backend.rag_explainer import build_citation_header, check_and_append_warning
+from backend.tools.rag_explainer import build_citation_header, check_and_append_warning
 from backend.domain import matching, grounding          # Step 2: shared KB matchers + grounding
 from backend.interaction import intents                      # Step 3: unified intent taxonomy (I-2)
 from backend.interaction import handlers                     # Step 4c: shared handlers + PendingAction (I-1)
@@ -661,7 +661,7 @@ class ExplainableAgent(BaseAgent):
         text, _score = matching.match_key_question(item, pillar_name)
         if not text:
             return None
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         pillar = next(
             (p for p in kb.get_all_pillars() if p["name"].lower() == pillar_name.lower()),
             None
@@ -689,7 +689,7 @@ class ExplainableAgent(BaseAgent):
         concept, _score = matching.match_concept(item)
         if not concept:
             return None
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         pillar = kb.get_pillar_by_id(concept["pillar_id"])
         return pillar["name"] if pillar else None
 
@@ -729,7 +729,7 @@ class ExplainableAgent(BaseAgent):
         keep their refs; user sub-points have their matched refs re-lettered to continue
         after the static ones (deduped by URL) and merged into one named Sources line.
         Returns (bullets_text, sources_line). Read-only. Change log: 2026-06-04"""
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         pillar = next(
             (p for p in kb.get_all_pillars() if p["name"].lower() == concept.lower()),
             None
@@ -821,7 +821,7 @@ class ExplainableAgent(BaseAgent):
 
         # ── 1. Unified intent (Step 3). Context = current concept + its non-excluded
         #      points + walkthrough pillars + last agent msg (W8: no confidence floor). ──
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         _cur    = self.current_pillar() or "(none)"
         _pillar = next((p for p in kb.get_all_pillars()
                         if p["name"].lower() == _cur.lower()), None)
@@ -898,7 +898,7 @@ class ExplainableAgent(BaseAgent):
     def presented_sub_bullets(self) -> dict:
         """{concept -> [non-excluded bullet texts]} for each presented concept (KB
         sub-bullets ref-stripped + user sub-points). Drives the removal existence guard."""
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         out = {}
         for name in self._presented_concepts():
             kbp = next((p for p in kb.get_all_pillars()
@@ -916,7 +916,7 @@ class ExplainableAgent(BaseAgent):
     def surfaced_pillar_names(self) -> set:
         """Everything already surfaced (shown KB pillars / in the walk / user-added /
         excluded). suggest_handler offers the first WITHHELD pillar NOT in this set."""
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         names = {p["name"].lower() for p in kb.get_shown_pillars()}
         names |= {c.lower() for c in self.walkthrough_concepts}
         names |= {n.lower() for n in self.user_added_pillars}
@@ -955,7 +955,7 @@ class ExplainableAgent(BaseAgent):
         keeps the verbatim KB question (inline refs kept); otherwise the terse formatted
         text (Fork-B: log the STORED text). Dedup against existing user points + static KB
         bullets. Stash stored/raw/is_new so the render logs add_sub_bullet from the outcome."""
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         match = self._match_key_question(text, pillar)
         if match:
             stored = match["question"]
@@ -1323,7 +1323,7 @@ class ExplainableAgent(BaseAgent):
         swap_block = self.concept_swap.get_system_prompt_block() if is_wrong else ""
 
         # ── Build static prefix from JSON ──────────────────────────────────
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
 
         if not is_wrong:
             # Look up pillar by name directly (walkthrough uses pillar names)
@@ -1464,7 +1464,7 @@ class ExplainableAgent(BaseAgent):
     def _stream_summary(self):
         self.walkthrough_done = True
 
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
 
         wrong          = self.concept_swap.config["wrong_concept"].lower()
         excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong] \

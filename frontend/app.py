@@ -1,10 +1,10 @@
 import uuid
 import inspect
 import chainlit as cl
-from backend.black_box_agent import BlackBoxAgent
-from backend.base import MAX_TURNS_PER_SESSION   # Step 6a: turn-budget const moved to BaseAgent's module
-from backend.explainable_agent import ExplainableAgent
-from backend.hitl_agent import HITLAgent
+from backend.agents.black_box import BlackBoxAgent
+from backend.agents.base import MAX_TURNS_PER_SESSION   # Step 6a: turn-budget const moved to BaseAgent's module
+from backend.agents.explainable import ExplainableAgent
+from backend.agents.hitl import HITLAgent
 import asyncio
 
 

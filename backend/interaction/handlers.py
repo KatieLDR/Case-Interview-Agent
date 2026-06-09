@@ -44,7 +44,7 @@ from typing import Protocol
 
 from backend.domain import matching as m
 from backend.domain import grounding as g
-from backend import knowledge_base as kb
+from backend.knowledge import knowledge_base as kb
 from backend.llm import classify_json
 
 

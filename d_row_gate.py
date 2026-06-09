@@ -79,7 +79,7 @@ CTX_OVERRIDE = {
 def _context():
     """Realistic turn context from the live KB (router takes it by value)."""
     try:
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         shown = kb.get_shown_pillars()
         cur = shown[0]["name"] if shown else "Strategic Fit"
         bullets = "\n".join(f"- {b}" for b in (shown[0].get("sub_bullets", []) if shown else [])) or "(none)"

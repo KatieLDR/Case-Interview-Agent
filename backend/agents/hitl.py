@@ -3,19 +3,19 @@ import logging
 import random
 import re
 from google.genai import types
-from backend.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
+from backend.agents.base import BaseAgent           # Step 6b: sibling of BaseAgent (F-ARCH2)
 from backend.llm import (
     CLASSIFIER_MODEL, MAIN_MODEL, client, classify_json, ANSWER_THRESHOLD,
 )
-from backend.cases import get_case, get_clarification_facts
-from backend.concept_swap import ConceptSwap
+from backend.knowledge.cases import get_case, get_clarification_facts
+from backend.tools.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
     log_interruption, update_answer, stamp_started_at,
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
-from backend import knowledge_base as kb           # JSON KB — static presentation + matching
+from backend.knowledge import knowledge_base as kb           # JSON KB — static presentation + matching
 from backend.domain import matching, grounding      # Step 2: shared KB matchers + grounding
 from backend.interaction import intents              # Step 3: unified intent taxonomy (I-2)
 from backend.interaction import handlers as h        # Step 4d: shared PendingAction + resolve_pending (I-1)

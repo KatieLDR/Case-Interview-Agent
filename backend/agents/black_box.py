@@ -12,9 +12,9 @@ from backend.logger import (
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
-from backend.cases import get_case, get_clarification_facts
-from backend.concept_swap import ConceptSwap
-from backend import knowledge_base as kb
+from backend.knowledge.cases import get_case, get_clarification_facts
+from backend.tools.concept_swap import ConceptSwap
+from backend.knowledge import knowledge_base as kb
 
 load_dotenv()
 
@@ -27,7 +27,7 @@ from backend.domain import matching   # Step 2: shared KB matchers (locate / pas
 from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
 from backend.interaction import handlers  # Step 4: shared handlers + PendingAction (I-1)
 from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
-from backend.base import BaseAgent          # Step 6a: shared turn engine (F-ARCH2)
+from backend.agents.base import BaseAgent          # Step 6a: shared turn engine (F-ARCH2)
 
 # ── Model config ───────────────────────────────────────────────────────────
 # MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
@@ -432,7 +432,7 @@ class BlackBoxAgent(BaseAgent):
         return stored, True
 
     def _normalize_pillar(self, name: str) -> str:
-        from backend import knowledge_base as kb
+        from backend.knowledge import knowledge_base as kb
         for p in kb.get_all_pillars():
             if p["name"].lower() == name.lower():
                 return p["name"]

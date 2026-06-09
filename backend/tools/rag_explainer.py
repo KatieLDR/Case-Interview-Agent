@@ -3,7 +3,7 @@ import logging
 import os
 from google import genai
 from dotenv import load_dotenv
-from backend import knowledge_base as kb
+from backend.knowledge import knowledge_base as kb
 
 load_dotenv()
 

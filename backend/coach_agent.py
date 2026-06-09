@@ -9,7 +9,7 @@ from backend.logger import (
     log_interruption, log_memory_override,
     update_answer,
 )
-from backend.cases import get_case
+from backend.knowledge.cases import get_case
 load_dotenv()
 
 # ── Gemini client ──────────────────────────────────────────────────────────

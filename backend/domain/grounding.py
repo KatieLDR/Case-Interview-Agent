@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from backend import knowledge_base as kb
+from backend.knowledge import knowledge_base as kb
 
 # Leaf utility (mirrors matching._strip_source_refs intentionally; both read only their
 # input — kept self-contained so grounding does not import matching's private helpers).

@@ -7,3 +7,5 @@ backend/__pycache__/
 .files
 case-interview-coach-firebase-adminsdk-fbsvc-349123bbd2.json
 test_rag_explainer.py
+__pycache__/
+*.pyc

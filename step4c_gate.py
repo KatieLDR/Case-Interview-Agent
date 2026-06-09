@@ -12,8 +12,8 @@ import _bootstrap                                   # noqa: F401  (SDK/dotenv/fi
 import types as _t
 from backend.interaction import intents, handlers as h
 from backend.domain import matching as m
-from backend import explainable_agent as EA
-from backend.explainable_agent import ExplainableAgent
+from backend.agents import explainable as EA
+from backend.agents.explainable import ExplainableAgent
 
 passed = total = 0
 def check(label, cond, detail=""):

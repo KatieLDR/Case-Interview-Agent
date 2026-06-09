@@ -44,9 +44,9 @@ import re  # noqa: E402
 
 from backend.domain import matching as m       # noqa: E402
 from backend.domain import grounding as g       # noqa: E402
-from backend import knowledge_base as kb        # noqa: E402
-from backend.explainable_agent import ExplainableAgent  # noqa: E402
-from backend.hitl_agent import HITLAgent                # noqa: E402
+from backend.knowledge import knowledge_base as kb        # noqa: E402
+from backend.agents.explainable import ExplainableAgent  # noqa: E402
+from backend.agents.hitl import HITLAgent                # noqa: E402
 
 passed = total = 0
 

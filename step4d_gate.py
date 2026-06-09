@@ -14,8 +14,8 @@ GATE-COVERAGE LESSON (carried from BUG-4c1, §S/line 150): the FIRST rows exerci
 sub-bullet removal path (the gap that hid the 4c NameError), not pillar/swap removal only.
 """
 import _bootstrap                                      # noqa: F401  (SDK stubs, no key)
-from backend import hitl_agent as HA
-from backend.hitl_agent import HITLAgent
+from backend.agents import hitl as HA
+from backend.agents.hitl import HITLAgent
 from backend.interaction import handlers as h
 from backend.domain import matching as m
 

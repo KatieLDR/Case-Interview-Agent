@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from backend import knowledge_base as kb
+from backend.knowledge import knowledge_base as kb
 from backend.llm import classify_json, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD
 
 # ── ported verbatim from the agents (source-ref stripping) ──────────────────

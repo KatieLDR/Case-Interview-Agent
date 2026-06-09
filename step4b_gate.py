@@ -52,7 +52,7 @@ sys.modules["backend.logger"] = _log
 
 from backend.interaction import handlers as h        # noqa: E402
 from backend.domain import matching as m             # noqa: E402
-import backend.black_box_agent as bbm                # noqa: E402
+import backend.agents.black_box as bbm                # noqa: E402
 BlackBoxAgent = bbm.BlackBoxAgent
 
 passed = total = 0
