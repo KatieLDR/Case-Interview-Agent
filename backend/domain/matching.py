@@ -26,8 +26,7 @@ from backend.llm import classify_json, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESH
 # ── ported verbatim from the agents (source-ref stripping) ──────────────────
 _REF_RE = re.compile(r"\s*\[[a-z]\]")
 
-def _strip_source_refs(text: str) -> str:
-    return _REF_RE.sub("", text or "").strip()
+from backend.domain.grounding import _strip_source_refs  # F-ARCH2: single source
 
 def _norm(text: str) -> str:
     """Whitespace/ref-insensitive, lower-cased — for set-membership comparisons."""

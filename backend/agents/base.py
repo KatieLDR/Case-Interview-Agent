@@ -401,7 +401,7 @@ class BaseAgent:
             lines.append(f"**{name}**")
             for b in kb_bullets:
                 if not self._is_excluded_bullet(name, b):
-                    lines.append(f"- {_strip_source_refs(b)}")
+                    lines.append(f"- {grounding._strip_source_refs(b)}")
             for sp in self.user_sub_points.get(name, []):
                 if not self._is_excluded_bullet(name, sp):
                     lines.append(f"- {sp}")
@@ -412,14 +412,14 @@ class BaseAgent:
                 lines.append(f"**{wrong}**")
                 for b in swap_bul:
                     if not self._is_excluded_bullet(wrong, b):
-                        lines.append(f"- {_strip_source_refs(b)}")
+                        lines.append(f"- {grounding._strip_source_refs(b)}")
                 lines.append("")
             emit(p["name"], p.get("sub_bullets", []))
         if show_swap and position >= len(shown):
             lines.append(f"**{wrong}**")
             for b in swap_bul:
                 if not self._is_excluded_bullet(wrong, b):
-                    lines.append(f"- {_strip_source_refs(b)}")
+                    lines.append(f"- {grounding._strip_source_refs(b)}")
             lines.append("")
         for name in self.user_added_pillars:
             if name.lower() in excluded:

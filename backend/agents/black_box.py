@@ -135,9 +135,6 @@ _CANCEL_PHRASES = {
 }
 
 # ── Deterministic add-flow matchers (source-free) — Change log: 2026-06-01 ──
-_REF_RE = re.compile(r"\s*\[[a-z]\]")
-def _strip_source_refs(text: str) -> str:
-    return _REF_RE.sub("", text or "").strip()
 
 # ADD_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
 
@@ -413,7 +410,7 @@ class BlackBoxAgent(BaseAgent):
         # Already a shown static bullet on this pillar (incl. KB-backed user pillars)
         # → already in the framework, don't duplicate. Change log: 2026-06-02
         kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == pillar.lower()), None)
-        if any(stored.lower() == _strip_source_refs(b).lower()
+        if any(stored.lower() == grounding._strip_source_refs(b).lower()
                for b in (kbp.get("sub_bullets", []) if kbp else [])):
             return stored, False
         # Re-placement: if this exact point already sits under another pillar, move it.
@@ -470,7 +467,7 @@ class BlackBoxAgent(BaseAgent):
                 contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
                 config=types.GenerateContentConfig(temperature=0.0),
             )
-            out = _strip_source_refs(self._strip_fences(r.text)).strip().strip("-• ").rstrip(".")
+            out = grounding._strip_source_refs(self._strip_fences(r.text)).strip().strip("-• ").rstrip(".")
             if out:
                 return out
         except Exception as e:
@@ -509,7 +506,7 @@ class BlackBoxAgent(BaseAgent):
         out = {}
         excluded = [e.lower() for e in self.excluded_concepts]
         def collect(name, kb_bullets):
-            bl = [_strip_source_refs(b) for b in kb_bullets
+            bl = [grounding._strip_source_refs(b) for b in kb_bullets
                   if not self._is_excluded_bullet(name, b)]
             bl += [sp for sp in self.user_sub_points.get(name, [])
                    if not self._is_excluded_bullet(name, sp)]

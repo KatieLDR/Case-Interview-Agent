@@ -36,11 +36,8 @@ _HITL_BUTTON_LABELS = {
 
 # Strip inline source refs like " [a]" / "[b]" — HITL suppresses sources, so these
 # markers must never reach the user (no Sources line resolves them). Change log: 2026-05-29
-_REF_RE = re.compile(r"\s*\[[a-z]\]")
 
 
-def _strip_source_refs(text: str) -> str:
-    return _REF_RE.sub("", text).strip()
 
 # Deictic references to "the concept we're on" — never a pillar name. The intent
 # classifier emits these RAW in the `parent` slot (D-Q2; intents.py preserves
@@ -468,7 +465,7 @@ class HITLAgent(BaseAgent):
                 contents=SUB_BULLET_FORMAT_PROMPT.format(item=item),
                 config=types.GenerateContentConfig(temperature=0.0),
             )
-            out = _strip_source_refs(self._strip_fences(response.text)).strip().strip("-• ").rstrip(".")
+            out = grounding._strip_source_refs(self._strip_fences(response.text)).strip().strip("-• ").rstrip(".")
             if out:
                 logging.info(f"[SUB-POINT FORMAT] '{item}' → '{out}'")
                 return out
@@ -948,7 +945,7 @@ class HITLAgent(BaseAgent):
             # Strip inline [a][b] refs — HITL suppresses sources. Stripping here
             # means both the live block AND the summary (which reads concept_blocks)
             # come out clean. Change log: 2026-05-29
-            bullets = [_strip_source_refs(b) for b in bullets]
+            bullets = [grounding._strip_source_refs(b) for b in bullets]
             bullet_lines = "\n".join(f"- {b}" for b in bullets)
             # Store bullets ONLY (no heading) for the deterministic summary
             self.concept_blocks[concept] = bullet_lines
@@ -1508,11 +1505,11 @@ class HITLAgent(BaseAgent):
         for name in self.presented_pillars():
             bl = []
             for line in self.concept_blocks.get(name, "").splitlines():
-                t = _strip_source_refs(line.strip().lstrip("-• ").strip())
+                t = grounding._strip_source_refs(line.strip().lstrip("-• ").strip())
                 if t and not matching.is_excluded_bullet(self.excluded_sub_bullets, name, t):
                     bl.append(t)
             for sp in self.user_sub_points.get(name, []):
-                t = _strip_source_refs(sp).strip()
+                t = grounding._strip_source_refs(sp).strip()
                 if t and not matching.is_excluded_bullet(self.excluded_sub_bullets, name, t):
                     bl.append(t)
             out[name] = bl
