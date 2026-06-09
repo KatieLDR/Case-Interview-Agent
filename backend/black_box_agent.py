@@ -20,10 +20,12 @@ load_dotenv()
 # ── Gemini client ──────────────────────────────────────────────────────────
 from backend.llm import (
     client, MAIN_MODEL, CLASSIFIER_MODEL, classify_json, strip_fences,
-    ANSWER_THRESHOLD, OVERRIDE_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
+    ANSWER_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
 )
 from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
 from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
+from backend.interaction import handlers  # Step 4: shared handlers + PendingAction (I-1)
+from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
 
 # ── Model config ───────────────────────────────────────────────────────────
 # MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
@@ -135,68 +137,8 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 {"is_answer": true or false, "confidence": float between 0.0 and 1.0}
 """
 
-OVERRIDE_CLASSIFIER_PROMPT = """
-You are a classifier for a case interview research tool.
-
-Determine whether the user's message is attempting to steer or change the
-agent's output — i.e. the content, structure, or direction of the framework.
-
-If yes, classify the type:
-- "redo"             : wants the ENTIRE framework regenerated from scratch / a fresh start
-                       ("start over", "redo this", "start again", "regenerate everything").
-                       Removing ONE concept is NEVER redo — that is concept_excluded.
-- "concept_excluded" : wants to remove a specific concept or bucket
-- "concept_added"    : wants to add a new concept or bucket — includes soft proposals
-                       ("we should consider X", "we need to think about / understand X",
-                       "what about X", "can we also look at X"; detail = the NEW thing)
-- "none"             : not steering the output
-
-This does NOT include:
-- Asking for a framework for the first time
-- Asking follow-up questions ("can you elaborate?", "why is X here?")
-- General questions about the case
-- Single word responses ("yes", "no", "ok", "sure")
-- Questions asking where a concept is ("where's X", "where is X")
-- Conversational rejections ("no thanks", "not needed", "no")
-- Asking what happened to a concept ("what happened to X")
-
-A leading "no" or "not" does NOT make a message non-steering. If a negation is
-followed by an instruction to add, remove, or change a concept, classify by the
-INSTRUCTION, not the leading word. Only a standalone negation with no instruction
-("no", "no thanks", "not needed") is non-steering.
-
-
-- "parent": the existing concept named after "under" / "as part of" / "within" — null if no parent explicitly named
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{"override": true or false, "type": "redo"|"concept_excluded"|"concept_added"|"none", "detail": string or null, "parent": string or null, "confidence": float}
-
-Examples:
-- "redo this" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.99}
-- "try a completely different approach" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.97}
-- "remove feasibility" → {"override": true, "type": "concept_excluded", "detail": "Feasibility", "parent": null, "confidence": 0.97}
-- "add financial impact as a bucket" → {"override": true, "type": "concept_added", "detail": "Financial Impact", "parent": null, "confidence": 0.97}
-- "what about regulatory risks?" → {"override": true, "type": "concept_added", "detail": "Regulatory risks", "parent": null, "confidence": 0.95}
-- "give me a framework" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "why is feasibility here?" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.95}
-- "yes" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "no" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "no thanks" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "ok" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "sure" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "where's strategic fit" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "what happened to feasibility" → {"override": false, "type": "none", "detail": null, "parent": null, "confidence": 0.99}
-- "add data quality under Feasibility" → {"override": true, "type": "concept_added", "detail": "Data quality", "parent": "Feasibility", "confidence": 0.97}
-- "add cost analysis as part of Financial Impact" → {"override": true, "type": "concept_added", "detail": "Cost analysis", "parent": "Financial Impact", "confidence": 0.96}
-- "no, remove feasibility" → {"override": true, "type": "concept_excluded", "detail": "Feasibility", "parent": null, "confidence": 0.96}
-- "no I think we should exclude it" → {"override": true, "type": "concept_excluded", "detail": "it", "parent": null, "confidence": 0.93}
-- "remove it" → {"override": true, "type": "concept_excluded", "detail": "it", "parent": null, "confidence": 0.94}
-- "remove this" → {"override": true, "type": "concept_excluded", "detail": "this", "parent": null, "confidence": 0.93}
-- "start over" → {"override": true, "type": "redo", "detail": null, "parent": null, "confidence": 0.98}
-- "we should consider team strategy alignment" → {"override": true, "type": "concept_added", "detail": "team strategy alignment", "parent": null, "confidence": 0.95}
-- "we need to understand the frequency of the problem" → {"override": true, "type": "concept_added", "detail": "frequency of the problem", "parent": null, "confidence": 0.95}
-- "consider if the use case meets the team goal" → {"override": true, "type": "concept_added", "detail": "use case meets the team goal", "parent": null, "confidence": 0.94}
-"""
+# OVERRIDE_CLASSIFIER_PROMPT retired (Step 3 dead-code pass): _detect_override is
+# gone; the unified router (interaction/intents.py) owns steering classification.
 
 # ══════════════════════════════════════════════════════════════════════════
 # Warm-up content
@@ -247,7 +189,7 @@ Your task: produce an updated plan that incorporates the user's ideas.
 # ══════════════════════════════════════════════════════════════════════════
 # Thresholds
 # ══════════════════════════════════════════════════════════════════════════
-# ANSWER_THRESHOLD / OVERRIDE_THRESHOLD imported from backend.llm (§S Step 1)
+# ANSWER_THRESHOLD imported from backend.llm (§S Step 1); OVERRIDE_THRESHOLD retired (Step 3)
 MAX_TURNS_PER_SESSION = 50
 
 # Light cancel-escape phrases for the "which part to remove?" prompt (no LLM).
@@ -330,9 +272,15 @@ class BlackBoxAgent:
         self.user_added_pillars = []    # user-added pillar names (order preserved)
         self.excluded_concepts  = []    # confirmed-removed pillar names
         self.excluded_sub_bullets = {}  # pillar name -> [removed bullet texts]
-        self.pending_excl       = None  # pillar awaiting "Are you sure?" confirmation
-        self.pending_sub_excl   = None  # {"pillar": str, "bullet": str} — sub-bullet pending removal
-        self.awaiting_removal_target = False  # True after an unresolved "remove X" — next reply names the target
+        # ── Step 4b: shared HandlerSession flow state (replaces pending_excl /
+        #    pending_sub_excl / awaiting_removal_target). interaction/handlers.py
+        #    owns the two-turn removal loop (PendingAction) now. ─────────────
+        self.pending = None             # PendingAction parked by removal_handler
+        self.pending_suggestion = None  # {level,item,origin} — D7 suggest / B6 remove-offer
+        self.last_discussed = None      # Fork-A focus; BlackBox full-render -> stays None
+        self.shown_bullets = []         # positional-removal context (unused in BB full-render)
+        self._last_surface = None       # stash: surface_pillar result (render reads is_new)
+        self._last_sub_add = None       # stash: add_sub_point result (render reads stored/is_new)
         self._ack_index         = 0     # rotates the no-reprint acknowledgements
         self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("black_box")
@@ -642,26 +590,9 @@ class BlackBoxAgent:
         log_user_message(self.session_id, user_input)
         self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
 
-        # ── 0. Pending removal confirmation ────────────────────────────────
-        if self.pending_excl is not None:
-            yield from self._resolve_pending_excl(user_input)
-            return
-        # ── 0a. Pending sub-bullet removal confirmation ─────────────────────
-        if self.pending_sub_excl is not None:
-            yield from self._resolve_pending_sub_excl(user_input)
-            return
-        # ── 0b. Awaiting removal target (unresolved referent) ──────────────
-        if self.awaiting_removal_target:
-            self.awaiting_removal_target = False
-            if self._is_cancel(user_input):
-                yield from self._cancel_removal()
-                return
-            yield from self._begin_removal(user_input, user_input)
-            return
-        # ── 1. Unified intent (Step 3) — replaces the _detect_override +
-        #      _classify_question cascade. ONE shared taxonomy across arms (I-1/I-2).
-        #      BlackBox renders the whole framework, so there is NO single 'current
-        #      pillar'; the router gets the shown-pillar list + last agent message.
+        # ── 1. Unified intent (Step 3). BlackBox renders the whole framework, so
+        #      there is NO single 'current pillar'; the router gets the shown-pillar
+        #      list + last agent message.
         res = intents.classify_intent(
             user_input,
             current_pillar="(none)",
@@ -672,49 +603,28 @@ class BlackBoxAgent:
         )
         intent = res.intent
 
-        # ── 1a. Swap detection — W2: run only when the intent is NON-steering, the
-        #      faithful equivalent of the old `not override` gate (override-truthy
-        #      was concept_added/concept_excluded == add/remove; redo is gone).
-        cs_detected = False
-        if self.concept_swap.is_injected and intent not in ("add", "remove"):
-            cs_detected = self.concept_swap.check_detection(user_input)
-            if cs_detected:
+        # ── 1a. Swap semantic backstop — W2: only on a FRESH non-steering turn (no
+        #      parked removal / suggestion), the faithful equivalent of the old
+        #      `not override` gate. A NAMED swap removal is intent==remove and is
+        #      detected inside removal_handler, so it is correctly excluded here.
+        if (self.pending is None and self.pending_suggestion is None
+                and self.concept_swap.is_injected and intent not in ("add", "remove")):
+            if self.concept_swap.check_detection(user_input):
                 wrong = self.concept_swap.config["wrong_concept"]
                 log_memory_override(self.session_id,
                     old_context=f"included: {wrong}",
-                    new_context=f"user rejected: {wrong}")   # detection (#3), no log_delete
+                    new_context=f"user rejected: {wrong}")   # detection channel, NO log_delete
+                yield from self._yield_rerender("Understood — I've taken that out.\n\n")
+                return
 
-        # ── 2. Steering intents — deterministic, no LLM framework regen.
-        #      W1: removal stays on the existing flow; Fork-A deictic is Step 4.
-        if intent == "remove" and res.detail:
-            yield from self._begin_removal(res.detail, user_input); return
-        if intent == "add" and res.detail:
-            yield from self._handle_add(res.detail, res.parent); return
-
-        # ── 3. Swap just caught — neutral ack + re-render without it ────────
-        if cs_detected:
-            yield from self._yield_rerender("Understood — I've taken that out.\n\n")
-            return
-
-        # ── 4. Non-steering intents ────────────────────────────────────────
-        swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
-        if intent == "question":
-            log_question(self.session_id, "text", detail=user_input[:200])
-            # W9: preserve the swap-questioned firing that _classify_question carried
-            #     (is_about_swap). The §3.6 single shared prompt is Step 5.
-            if swap_active and self._classify_swap_question(user_input):
-                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
-            yield from self._stream_qa(user_input)
-        elif intent == "ask_agent_to_suggest":
-            # D6 fix + grounded: NEVER an add, and the suggestion is drawn
-            # DETERMINISTICALLY from the WITHHELD KB (catalog D1), never free-form,
-            # so it cannot confabulate a pillar (the F-M6 family). The structured
-            # SuggestOutcome (§3.5) + the ask_agent_suggestion event are Step 4/5.
-            yield from self._handle_suggest(user_input)
-        else:
-            # advance / doubt / none (revisit is not a BlackBox behaviour — BB shows
-            # the whole framework). No reprint. W5: expected new-intent acks.
-            yield from self._ack_no_reprint()
+        # ── 2. Route through the shared handler layer (Step 4b). A parked removal /
+        #      suggestion is resolved inside dispatch; snapshot it first so the render
+        #      can recover pillar/type after the PendingAction machine clears it.
+        was_pending = self.pending is not None
+        pa_snapshot = self.pending
+        outcome = handlers.dispatch(res, self, user_text=user_input)
+        yield from self._render_outcome(outcome, user_input,
+                                        was_pending=was_pending, pa=pa_snapshot)
 
     # ── Deterministic render ───────────────────────────────────────────────
     def _render_full_framework(self, is_first: bool = False, closing: bool = True) -> str:
@@ -770,107 +680,6 @@ class BlackBoxAgent:
         log_agent_response(self.session_id, reply)
         yield reply
 
-    # ── Removal (with confirmation) ────────────────────────────────────────
-    def _begin_removal(self, detail: str, user_input: str = ""):
-        wrong   = self.concept_swap.config["wrong_concept"]
-        is_swap = self.concept_swap.matches(user_input) or self.concept_swap.matches(detail)
-        if is_swap and self.concept_swap.is_injected and not self.concept_swap.is_detected:
-            self.pending_excl = wrong                      # detection logged on confirm
-            msg = (f"Are you sure you want to remove **{self.pending_excl}**?\n\n"
-                   f"*Reply **yes** to confirm, or **no** to keep it.*")
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-            return
-
-        # Classify: whole pillar or one sub-bullet?
-        rt = self._classify_removal_target(user_input or detail)
-        if rt["level"] == "sub_bullet" and rt.get("bullet"):
-            pillar = self._normalize_pillar(rt["pillar"]) if rt.get("pillar") else detail
-            self.pending_sub_excl = {"pillar": pillar, "bullet": rt["bullet"]}
-            log_delete(self.session_id, rt["bullet"], "text")
-            msg = (f"Are you sure you want to remove this point from **{pillar}**?\n\n"
-                   f"*\"{rt['bullet']}\"*\n\n"
-                   f"*Reply **yes** to confirm, or **no** to keep it.*")
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-            return
-
-        target = self._normalize_pillar(rt.get("pillar") or detail)
-        if not self._is_known_pillar(target):
-            # Unresolved referent — confirm what they mean, don't guess/redo.
-            # Stay in removal; the next reply re-enters here via step 0b.
-            self.awaiting_removal_target = True
-            options = self._removable_pillar_names()
-            options_line = (
-                "\n\nCurrently in the framework: "
-                + ", ".join(f"**{o}**" for o in options) + "."
-            ) if options else ""
-            msg = ("Which part would you like to remove? "
-                   "You can name the pillar or the point."
-                   + options_line
-                   + "\n\n*(Or say **never mind** to keep everything as is.)*")
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-            return
-
-        self.pending_excl = target
-        log_delete(self.session_id, target, "text")    # removal intent (#1)
-        msg = (f"Are you sure you want to remove **{self.pending_excl}**?\n\n"
-               f"*Reply **yes** to confirm, or **no** to keep it.*")
-        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-        log_agent_response(self.session_id, msg)
-        yield msg
-
-    def _is_known_pillar(self, name: str) -> bool:
-        from backend import knowledge_base as kb
-        n = (name or "").lower().strip()
-        if not n:
-            return False
-        if n in [p["name"].lower() for p in kb.get_shown_pillars()]:
-            return True
-        return n in [p.lower() for p in self.user_added_pillars]
-    
-    def _removable_pillar_names(self) -> list[str]:
-        """Pillars currently visible to the user (mirrors the rendered framework)."""
-        from backend import knowledge_base as kb
-        excluded = [e.lower() for e in self.excluded_concepts]
-        names = [p["name"] for p in kb.get_shown_pillars()
-                 if p["name"].lower() not in excluded]
-        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
-            names.append(self.concept_swap.config["wrong_concept"])
-        for name in self.user_added_pillars:
-            if name.lower() not in excluded and name not in names:
-                names.append(name)
-        return names
-
-    def _is_cancel(self, user_input: str) -> bool:
-        """LLM intent check: is the user backing out of the removal prompt
-        (keep everything / never mind) rather than naming a part to remove?"""
-        prompt = (
-            "A user was asked which part of a framework they want to REMOVE.\n"
-            "Decide whether their reply is BACKING OUT / cancelling the removal "
-            "(wants to keep everything, never mind, stop) — as opposed to naming "
-            "a part to remove or saying anything else.\n"
-            'Respond ONLY with JSON, no markdown: {"cancel": true or false}\n\n'
-            f'Reply: "{user_input}"'
-        )
-        try:
-            return bool(classify_json(prompt).get("cancel", False))
-        except Exception as e:
-            print(f"[CANCEL] error: {e}")
-            return False   # safe default — re-ask rather than abandon the removal
-
-    def _cancel_removal(self):
-        msg = "No problem — I'll keep everything as is. Let me know if there's anything else."
-        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-        log_agent_response(self.session_id, msg)
-        yield msg
-
-    # ── Sub-bullet removal helpers ─────────────────────────────────────────
-
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
         """→ shared pure predicate (Step 2); session excluded-map passed by value."""
         return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
@@ -881,246 +690,6 @@ class BlackBoxAgent:
                 return c.parts[0].text[:600]
         return ""
 
-    def _classify_removal_target(self, user_input: str) -> dict:
-        """Decide whether a removal targets a whole pillar or one sub-bullet.
-        Falls back to pillar-level on any error."""
-        from backend import knowledge_base as kb
-        excluded = [e.lower() for e in self.excluded_concepts]
-        shown    = [p for p in kb.get_shown_pillars() if p["name"].lower() not in excluded]
-        swap     = kb.get_swap_concept()
-        wrong    = self.concept_swap.config["wrong_concept"]
-
-        lines = []
-        for p in shown:
-            lines.append(f"**{p['name']}**")
-            for b in p.get("sub_bullets", []):
-                if not self._is_excluded_bullet(p["name"], b):
-                    lines.append(f"  - {_strip_source_refs(b)}")
-            for sp in self.user_sub_points.get(p["name"], []):
-                if not self._is_excluded_bullet(p["name"], sp):
-                    lines.append(f"  - {sp}")
-        if self.concept_swap.is_injected and not self.concept_swap.is_detected and swap:
-            lines.append(f"**{wrong}**")
-            for b in swap.get("sub_bullets", []):
-                if not self._is_excluded_bullet(wrong, b):
-                    lines.append(f"  - {_strip_source_refs(b)}")
-        for name in self.user_added_pillars:
-            if name.lower() in excluded:
-                continue
-            lines.append(f"**{name}**")
-            kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == name.lower()), None)
-            for b in (kbp.get("sub_bullets", []) if kbp else []):
-                if not self._is_excluded_bullet(name, b):
-                    lines.append(f"  - {_strip_source_refs(b)}")
-            for sp in self.user_sub_points.get(name, []):
-                if not self._is_excluded_bullet(name, sp):
-                    lines.append(f"  - {sp}")
-
-        framework_block = "\n".join(lines) or "(none)"
-        prompt = REMOVAL_TARGET_PROMPT.format(
-            framework_bullets=framework_block,
-            last_agent=self._last_agent_message() or "(nothing yet)",
-            user_msg=user_input,
-        )
-        try:
-            parsed = classify_json(prompt)
-            level = parsed.get("level", "pillar")
-            return {
-                "level":  level if level in ("pillar", "sub_bullet") else "pillar",
-                "pillar": parsed.get("pillar"),
-                "bullet": parsed.get("bullet"),
-            }
-        except Exception as e:
-            print(f"[REMOVAL TARGET] error: {e} — defaulting to pillar")
-            return {"level": "pillar", "pillar": None, "bullet": None}
-
-    def _resolve_pending_sub_excl(self, user_input: str):
-        """3-way gate for a pending sub-bullet removal: confirm | decline | other.
-        BlackBox: no reasoned pushback — re-offer the plain yes/no on 'other'."""
-        pillar = self.pending_sub_excl["pillar"]
-        bullet = self.pending_sub_excl["bullet"]
-        cls    = self._classify_confirmation(user_input)
-
-        if cls["decision"] == "confirm":
-            self.excluded_sub_bullets.setdefault(pillar, [])
-            if not self._is_excluded_bullet(pillar, bullet):
-                self.excluded_sub_bullets[pillar].append(bullet)
-            self.pending_sub_excl = None
-            log_memory_override(self.session_id,
-                old_context=f"sub-bullet in {pillar}: {bullet}",
-                new_context=f"user confirmed removal")
-            yield from self._yield_rerender(f"Done — I've removed that point from **{pillar}**.\n\n")
-
-        elif cls["decision"] == "decline":
-            self.pending_sub_excl = None
-            msg = f"No problem — I'll keep that point in **{pillar}**."
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-
-        else:
-            if cls.get("is_question"):
-                log_question(self.session_id, "text", detail=user_input[:200])
-            msg = (f"No rush — reply **yes** to remove that point from **{pillar}**, "
-                   f"or **no** to keep it.")
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-
-    def _resolve_pending_excl(self, user_input: str):
-        concept = self.pending_excl
-        cls = self._classify_confirmation(user_input)
-
-        # ── Confirm → remove ───────────────────────────────────────────────
-        if cls["decision"] == "confirm":
-            self.pending_excl = None
-            wrong = self.concept_swap.config["wrong_concept"]
-            if concept.lower() == wrong.lower():
-                self.concept_swap.force_detected()             # swap removal = detection (#3)
-            elif concept.lower() not in [e.lower() for e in self.excluded_concepts]:
-                self.excluded_concepts.append(concept)
-            log_memory_override(self.session_id,
-                old_context=f"concept in framework: {concept}",
-                new_context=f"user confirmed removal: {concept}")
-            yield from self._yield_rerender(f"Done — I've removed **{concept}**.\n\n")
-            return
-
-        # ── Decline → keep ─────────────────────────────────────────────────
-        if cls["decision"] == "decline":
-            self.pending_excl = None
-            msg = f"No problem — I'll keep **{concept}**."
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-            return
-
-        # ── Other → answer if it's a question, then re-offer; KEEP pending ──
-        if cls["is_question"]:
-            log_question(self.session_id, "text", detail=user_input[:200])
-            wrong = self.concept_swap.config["wrong_concept"]
-            swap_active = self.concept_swap.is_injected and not self.concept_swap.is_detected
-            # At the gate the question is about the PENDING concept → state check, not LLM.
-            if swap_active and concept.lower() == wrong.lower():
-                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
-            yield from self._stream_confirm_qa(user_input, concept)
-        else:
-            msg = f"No rush — reply **yes** to remove **{concept}**, or **no** to keep it."
-            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-            log_agent_response(self.session_id, msg)
-            yield msg
-
-    def _classify_confirmation(self, user_input: str) -> dict:
-        """confirm = clear yes; decline = clear no; other = question / hedge / not-a-clear-yes-no.
-        Whether an 'other' question is about the swap is decided by the CALLER from state
-        (the pending concept) — the LLM can't resolve "that"/"this" here. Change log: 2026-06-03"""
-        prompt = (
-            "A user was asked to confirm removing a concept from a framework "
-            "(e.g. 'Are you sure you want to remove it?').\n"
-            "Classify their reply:\n"
-            '- "confirm": a clear yes — go ahead and remove it\n'
-            '- "decline": a clear no — keep it / leave it as is\n'
-            '- "other": a question, an uncertain/hedging reply, or anything that is NOT a clear yes or no\n\n'
-            "Vague 'proceed'-type words on their own ('move on', 'next', 'whatever', 'sure I guess') "
-            'are "other", NOT confirm, unless the user clearly says to remove it.\n\n'
-            'Respond ONLY with valid JSON, no markdown:\n'
-            '{"decision": "confirm" | "decline" | "other", "is_question": true or false}\n\n'
-            f'Reply: "{user_input}"'
-        )
-        try:
-            p = classify_json(prompt)
-            decision = p.get("decision", "other")
-            if decision not in ("confirm", "decline", "other"):
-                decision = "other"
-            return {"decision": decision, "is_question": bool(p.get("is_question", False))}
-        except Exception as e:
-            print(f"[CONFIRM] error: {e}")
-            return {"decision": "other", "is_question": False}
-
-    # ── Add (silent placement + matching) ──────────────────────────────────
-    # Two-stage match — Change log: 2026-06-02
-    #   Stage 1: pillar-level match (user named the AREA). Reveal pillar, log add_pillar.
-    #   Stage 2: whole-KB concept search (user named a POINT inside an area). Reveal the
-    #            parent pillar silently and log add_sub_bullet ONLY — naming a sub-concept
-    #            is a sub-bullet act, not a pillar act, so the add_pillar count must not
-    #            rise. (Reveal is presentation, not a second contribution.)
-    #   Stage 3: genuinely new free-text area → new pillar, log add_pillar.
-    def _handle_add(self, detail: str, parent: str | None):
-        from backend import knowledge_base as kb
-        if parent:
-            target = self._normalize_pillar(parent)
-            if not self._is_known_pillar(target):
-                matched = self._match_pillar(parent)      # semantic resolve (e.g. "use case")
-                if matched:
-                    target = self._normalize_pillar(matched)
-            self._ensure_pillar_visible(target)
-            _, is_new = self._store_sub_point(target, detail, "text")
-            pre = (f"Added under **{target}**.\n\n" if is_new else
-                   f"That's already under **{target}**.\n\n")
-            yield from self._yield_rerender(pre); return
-
-        # ── Stage 1: pillar-level match (naming the area) ──────────────────
-        matched = self._match_pillar(detail)
-        if matched:
-            shown_names = [p["name"].lower() for p in kb.get_shown_pillars()]
-            if matched.lower() in shown_names:
-                # Named an already-shown area → fold the note in as a sub-point.
-                _, is_new = self._store_sub_point(matched, detail, "text")
-                pre = (f"Added under **{matched}**.\n\n" if is_new else
-                       f"That's already under **{matched}**.\n\n")
-                yield from self._yield_rerender(pre); return
-            # Named a WITHHELD area → reveal it as a pillar (add_pillar).
-            if matched.lower() not in [p.lower() for p in self.user_added_pillars]:
-                self.user_added_pillars.append(matched)
-                log_concept_added(self.session_id, matched)
-                log_add_pillar(self.session_id, matched, "text")
-                pre = f"Added **{matched}** as a new area.\n\n"
-            else:
-                pre = f"**{matched}** is already in the framework.\n\n"
-            yield from self._yield_rerender(pre); return
-
-        # ── Stage 2: whole-KB concept search (naming a point inside an area) ─
-        concept_parent = self._match_concept(detail)
-        if concept_parent:
-            # Reveal the parent pillar WITHOUT logging add_pillar (granularity rule);
-            # _store_sub_point logs the user's contribution as add_sub_bullet.
-            self._reveal_pillar_silent(concept_parent)
-            _, is_new = self._store_sub_point(concept_parent, detail, "text")
-            pre = (f"Added under **{concept_parent}**.\n\n" if is_new else
-                   f"That's already under **{concept_parent}**.\n\n")
-            yield from self._yield_rerender(pre); return
-
-        # ── Stage 3: genuinely new area → free-text pillar (add_pillar) ────
-        new_name = detail.strip()
-        if new_name.lower() not in [p.lower() for p in self.user_added_pillars]:
-            self.user_added_pillars.append(new_name)
-            log_concept_added(self.session_id, new_name)
-            log_add_pillar(self.session_id, new_name, "text")
-            pre = f"Added **{new_name}** as a new area.\n\n"
-        else:
-            pre = f"**{new_name}** is already in the framework.\n\n"
-        yield from self._yield_rerender(pre)
-
-    def _ensure_pillar_visible(self, name: str):
-        from backend import knowledge_base as kb
-        if name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
-            return
-        if name.lower() in [p.lower() for p in self.user_added_pillars]:
-            return
-        self.user_added_pillars.append(name)
-        log_add_pillar(self.session_id, name, "text")
-
-    def _reveal_pillar_silent(self, name: str):
-        """Reveal a matched (typically withheld) pillar so its KB sub-bullets render,
-        WITHOUT logging add_pillar. Used when the user named a sub-concept rather than
-        the area itself — the contribution is a sub-bullet act, logged separately by
-        _store_sub_point as add_sub_bullet. No-op if already shown or already revealed.
-        Change log: 2026-06-02"""
-        from backend import knowledge_base as kb
-        if name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]:
-            return                                  # already on screen — no reveal needed
-        if name.lower() in [p.lower() for p in self.user_added_pillars]:
-            return                                  # already revealed
-        self.user_added_pillars.append(name)        # deliberately NO log_add_pillar
 
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
         pillar  = self._normalize_pillar(pillar)
@@ -1143,8 +712,8 @@ class BlackBoxAgent:
         if any(s.lower() == stored.lower() for s in existing):
             return stored, False
         existing.append(stored)
-        log_concept_added(self.session_id, item)
-        log_add_sub_bullet(self.session_id, stored, modality)
+        # Step 4b: add_sub_bullet logging is outcome-driven now (D-H1); the render
+        #   fires log_concept_added + log_add_sub_bullet from the AddOutcome. Storage only.
         return stored, True
 
     def _normalize_pillar(self, name: str) -> str:
@@ -1216,8 +785,9 @@ class BlackBoxAgent:
 
     def _stream_confirm_qa(self, user_input: str, concept: str):
         """Answer a question raised AT the removal-confirmation prompt, then re-offer the
-        pending decision in ONE streamed message. Caller leaves pending_excl set, so the
-        user's next yes/no still resolves the removal. Change log: 2026-06-02"""
+        pending decision in ONE streamed message. The shared PendingAction (self.pending)
+        stays parked, so the user's next yes/no still resolves the removal via
+        handlers.resolve_pending. Change log: 2026-06-02; Step 4b: shared pending machine."""
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) or \
                     "Strategic Fit, Solution Design & Scope, Feasibility"
@@ -1239,30 +809,6 @@ class BlackBoxAgent:
             "──────────────────────────────────────────────────────────────────────\n"
         )
         yield from self._stream_with_instruction(instruction=instruction)
-    def _handle_suggest(self, user_input: str):
-        """ask_agent_to_suggest — STATE a suggestion drawn from the WITHHELD KB
-        (catalog D1). Built deterministically from KB grounding, NEVER free-form, so
-        it cannot confabulate a pillar. Suggesting is not adding: no artifact, no
-        add_pillar. (Selection moves to the shared handler + structured SuggestOutcome
-        in Step 4; the ask_agent_suggestion event is Step 5.)"""
-        from backend import knowledge_base as kb
-        from backend.domain import grounding
-        surfaced = ({n.lower() for n in self.user_added_pillars}
-                    | {e.lower() for e in self.excluded_concepts})
-        withheld = [p for p in kb.get_all_pillars()
-                    if not p.get("shown", False) and p["name"].lower() not in surfaced]
-        if withheld:
-            target = withheld[0]                       # deterministic: first withheld by KB order
-            why = grounding.ground_pillar(target["name"]).split("\n")[0].strip()
-            msg = (f"One area we haven't covered yet is **{target['name']}**"
-                   + (f" — {why}" if why else "")
-                   + "\n\nIt's worth considering whether it applies to your case.")
-        else:
-            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
-                   "remove, or question any part of what's here.")
-        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-        log_agent_response(self.session_id, msg)
-        yield msg
 
     def _ack_no_reprint(self):
         acks = ["Sure — I'm here if you'd like to revisit anything.",
@@ -1273,6 +819,279 @@ class BlackBoxAgent:
         self.history.append(types.Content(role="model", parts=[types.Part(text=ack)]))
         log_agent_response(self.session_id, ack)
         yield ack
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Step 4b — HandlerSession adapter (D-H3) + outcome renderer.
+    #   The shared layer (interaction/handlers.py) does the invariant work and
+    #   returns a structured Outcome; BlackBox renders it (terse persona) and
+    #   fires the §3.6 events DRIVEN BY the outcome (D-H1). The delete event
+    #   therefore fires only at stage="confirmed" — the F-R1 fix.
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── HandlerSession queries ─────────────────────────────────────────────
+    def presented_pillars(self) -> list:
+        """Pillars currently rendered (mirrors _render_full_framework): shown KB
+        pillars (minus excluded) + the swap (while active) + user-added."""
+        excluded = [e.lower() for e in self.excluded_concepts]
+        names = [p["name"] for p in kb.get_shown_pillars()
+                 if p["name"].lower() not in excluded]
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            names.append(self.concept_swap.config["wrong_concept"])
+        for name in self.user_added_pillars:
+            if name.lower() not in excluded and name not in names:
+                names.append(name)
+        return names
+
+    def presented_sub_bullets(self) -> dict:
+        """{pillar -> [non-excluded bullet texts]} for every presented pillar (KB
+        sub-bullets refs-stripped + user sub-points). Drives the removal existence guard."""
+        out = {}
+        excluded = [e.lower() for e in self.excluded_concepts]
+        def collect(name, kb_bullets):
+            bl = [_strip_source_refs(b) for b in kb_bullets
+                  if not self._is_excluded_bullet(name, b)]
+            bl += [sp for sp in self.user_sub_points.get(name, [])
+                   if not self._is_excluded_bullet(name, sp)]
+            out.setdefault(name, [])
+            out[name] += bl
+        for p in kb.get_shown_pillars():
+            if p["name"].lower() in excluded:
+                continue
+            collect(p["name"], p.get("sub_bullets", []))
+        swap = kb.get_swap_concept()
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected and swap:
+            collect(self.concept_swap.config["wrong_concept"], swap.get("sub_bullets", []))
+        for name in self.user_added_pillars:
+            if name.lower() in excluded:
+                continue
+            kbp = next((p for p in kb.get_all_pillars()
+                        if p["name"].lower() == name.lower()), None)
+            collect(name, kbp.get("sub_bullets", []) if kbp else [])
+        return out
+
+    def surfaced_pillar_names(self) -> set:
+        """Everything already surfaced (shown / user-added / excluded). suggest_handler
+        offers the first WITHHELD pillar NOT in this set."""
+        names = {p["name"].lower() for p in kb.get_shown_pillars()}
+        names |= {n.lower() for n in self.user_added_pillars}
+        names |= {e.lower() for e in self.excluded_concepts}
+        return names
+
+    def current_pillar(self):
+        return None   # BlackBox renders the whole framework — no walkthrough cursor.
+
+    # ── HandlerSession mutators (pure state; logging is render-driven, D-H1) ──
+    def surface_pillar(self, name: str) -> None:
+        """Reveal a withheld/unreached pillar OR create a novel area — both are a
+        user_added_pillars append for BlackBox. Stash is_new so the render logs
+        add_pillar once (and not on a re-add)."""
+        shown = name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]
+        already = name.lower() in [p.lower() for p in self.user_added_pillars]
+        if shown or already:
+            self._last_surface = {"name": name, "is_new": False}
+            return
+        self.user_added_pillars.append(name)
+        self._last_surface = {"name": name, "is_new": True}
+
+    def add_sub_point(self, pillar: str, text: str) -> None:
+        """Store a new sub-point (key-question canonicalisation + formatting + dedup +
+        cross-pillar move live in _store_sub_point). Stash stored text + is_new so the
+        render logs add_sub_bullet from the outcome (Fork-B: logs the stored text)."""
+        stored, is_new = self._store_sub_point(pillar, text, "text")
+        self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
+
+    # ── swap channel (PRESERVED per-arm, §0 #4) ─────────────────────────────
+    def swap_name(self):
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            return self.concept_swap.config["wrong_concept"]
+        return None
+
+    def is_swap_target(self, km, user_text: str) -> bool:
+        """Does this turn target the swap concept? Deterministic name/term/stem match
+        (concept_swap.matches) — BlackBox's text-match channel. (W9 question-about-swap
+        is handled in the question render via _classify_swap_question.)"""
+        if not self.swap_name():
+            return False
+        if self.concept_swap.matches(user_text):
+            return True
+        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
+            if cand and self.concept_swap.matches(cand):
+                return True
+        return False
+
+    def mark_swap_detected(self) -> None:
+        self.concept_swap.force_detected()   # swap DETECTED on confirm — never a delete (§0)
+
+    def requires_justification(self, km) -> bool:
+        return False   # D-H2: BlackBox has no justification gate (scope is HITL, Step 6).
+
+    # ── gate-reply question check (W9 / _stream_confirm_qa render) ──────────
+    def _reply_is_question(self, text: str) -> bool:
+        """At a removal-confirm gate, an 'other' reply may be a question. Baseline got
+        is_question from the LLM confirmation classifier; the shared machine returns confirm/
+        decline/other only, so the persona re-derives it here for the answer + W9."""
+        prompt = (
+            "A user was asked to confirm removing part of a framework (yes/no). Instead "
+            "they replied with something else. Is their reply a QUESTION or request for "
+            "information (vs a hedge like 'hmm' / 'not sure')?\n"
+            'Respond ONLY with JSON, no markdown: {"is_question": true or false}\n\n'
+            f'Reply: "{text}"'
+        )
+        try:
+            return bool(classify_json(prompt).get("is_question", False))
+        except Exception as e:
+            print(f"[GATE QUESTION] error: {e}")
+            return False
+
+    def _emit(self, msg: str):
+        """Append a plain (non-rerender) agent message + log it."""
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+
+    # ── outcome renderer ────────────────────────────────────────────────────
+    def _render_outcome(self, outcome, user_input, *, was_pending=False, pa=None):
+        # suggest_handler returns None when nothing is left to suggest.
+        if outcome is None:
+            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
+                   "remove, or question any part of what's here.")
+            self._emit(msg); yield msg; return
+        if isinstance(outcome, handlers.AddOutcome):
+            yield from self._render_add(outcome); return
+        if isinstance(outcome, handlers.RemovalOutcome):
+            yield from self._render_removal(outcome, user_input,
+                                            was_pending=was_pending, pa=pa); return
+        if isinstance(outcome, handlers.QuestionOutcome):
+            log_question(self.session_id, "text", detail=user_input[:200])
+            if (self.concept_swap.is_injected and not self.concept_swap.is_detected
+                    and self._classify_swap_question(user_input)):
+                log_swap_questioned(self.session_id, "text", detail=user_input[:200])   # W9
+            yield from self._stream_qa(user_input); return
+        if isinstance(outcome, handlers.SuggestOutcome):
+            yield from self._render_suggest(outcome); return
+        # AdvanceOutcome / FallbackOutcome -> terse ack, no reprint (W5).
+        yield from self._ack_no_reprint()
+
+    def _render_add(self, o):
+        if o.action == "duplicate":
+            if o.level == "pillar" and o.pillar:
+                pre = f"**{o.pillar}** is already in the framework.\n\n"
+            elif o.pillar:
+                pre = f"That's already covered under **{o.pillar}**.\n\n"
+            else:
+                pre = "That's already in the framework.\n\n"
+            yield from self._yield_rerender(pre); return
+        if o.action == "navigated":
+            yield from self._ack_no_reprint(); return   # revisit is not a BB behaviour
+        if o.action == "revealed" and o.level == "pillar":
+            st = self._last_surface or {}
+            if st.get("is_new"):
+                log_concept_added(self.session_id, o.pillar)
+                log_add_pillar(self.session_id, o.pillar, "text")
+                yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
+            else:
+                yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
+            return
+        if o.action == "added_new" and o.level == "sub_bullet":
+            st = self._last_sub_add or {}
+            if st.get("is_new"):
+                log_concept_added(self.session_id, st.get("raw", o.text or ""))
+                log_add_sub_bullet(self.session_id, st.get("stored", o.text or ""), "text")
+                yield from self._yield_rerender(f"Added under **{o.pillar}**.\n\n")
+            else:
+                yield from self._yield_rerender(f"That's already under **{o.pillar}**.\n\n")
+            return
+        if o.action == "added_new" and o.level == "pillar":
+            st = self._last_surface or {}
+            if st.get("is_new"):
+                log_concept_added(self.session_id, o.pillar)
+                log_add_pillar(self.session_id, o.pillar, "text")
+                yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
+            else:
+                yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
+            return
+        yield from self._ack_no_reprint()   # defensive
+
+    def _render_removal(self, o, user_input, *, was_pending=False, pa=None):
+        stage = o.stage
+        if stage == "confirmed":
+            if o.is_swap:
+                wrong = pa.target if pa else o.target
+                log_memory_override(self.session_id,
+                    old_context=f"concept in framework: {wrong}",
+                    new_context=f"user confirmed removal: {wrong}")   # detection marker, NO log_delete
+                yield from self._yield_rerender(f"Done — I've removed **{wrong}**.\n\n")
+                return
+            if pa and pa.type == "remove_sub_bullet":
+                log_delete(self.session_id, o.target, "text")                    # F-R1: at confirm
+                log_memory_override(self.session_id,
+                    old_context=f"sub-bullet in {pa.pillar}: {o.target}",
+                    new_context="user confirmed removal")
+                yield from self._yield_rerender(
+                    f"Done — I've removed that point from **{pa.pillar}**.\n\n")
+                return
+            log_delete(self.session_id, o.target, "text")                        # F-R1: at confirm
+            log_memory_override(self.session_id,
+                old_context=f"concept in framework: {o.target}",
+                new_context=f"user confirmed removal: {o.target}")
+            yield from self._yield_rerender(f"Done — I've removed **{o.target}**.\n\n")
+            return
+        if stage == "abandoned":
+            if pa and pa.type == "remove_sub_bullet":
+                msg = f"No problem — I'll keep that point in **{pa.pillar}**."
+            else:
+                msg = f"No problem — I'll keep **{o.target}**."
+            self._emit(msg); yield msg; return
+        if stage == "nothing_to_remove":
+            if o.suggest_add_alternative:
+                msg = (f"**{o.suggest_add_alternative}** isn't in the current framework. "
+                       f"Did you mean to *add* it? Reply **yes** to add it.")
+            else:
+                msg = (f"**{o.target or 'That'}** isn't part of the current framework, "
+                       f"so there's nothing to remove there.")
+            self._emit(msg); yield msg; return
+        if stage == "needs_disambiguation":
+            options = self.presented_pillars()
+            opt = ("\n\nCurrently in the framework: "
+                   + ", ".join(f"**{n}**" for n in options) + ".") if options else ""
+            msg = ("Which part would you like to remove? You can name the pillar or the point."
+                   + opt + "\n\n*(Or say **never mind** to keep everything as is.)*")
+            self._emit(msg); yield msg; return
+        if stage == "challenged":
+            if was_pending:
+                if self._reply_is_question(user_input):
+                    log_question(self.session_id, "text", detail=user_input[:200])
+                    if o.is_swap:
+                        log_swap_questioned(self.session_id, "text", detail=user_input[:200])  # W9
+                    yield from self._stream_confirm_qa(user_input, o.target); return
+                msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
+                self._emit(msg); yield msg; return
+            if self.pending and self.pending.type == "remove_sub_bullet":
+                msg = (f"Are you sure you want to remove this point from "
+                       f"**{self.pending.pillar}**?\n\n*\"{o.target}\"*\n\n"
+                       f"*Reply **yes** to confirm, or **no** to keep it.*")
+            else:
+                msg = (f"Are you sure you want to remove **{o.target}**?\n\n"
+                       f"*Reply **yes** to confirm, or **no** to keep it.*")
+            self._emit(msg); yield msg; return
+        # needs_justification (N/A for BlackBox) / defensive
+        msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
+        self._emit(msg); yield msg
+
+    def _render_suggest(self, o):
+        if getattr(o, "revealed", False):
+            # D7 accept: the withheld pillar is now surfaced -> re-render. No DV
+            # (the ask_agent_suggestion event is Step 5); suggesting is not adding.
+            yield from self._yield_rerender(f"Good point — I've included **{o.suggested_item}**.\n\n")
+            return
+        if not getattr(o, "suggested_item", None):
+            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
+                   "remove, or question any part of what's here.")
+            self._emit(msg); yield msg; return
+        why = (o.grounding or "").split("\n")[0].strip()
+        msg = (f"One area we haven't covered yet is **{o.suggested_item}**"
+               + (f" — {why}" if why else "")
+               + "\n\nIt's worth considering whether it applies to your case.")
+        self._emit(msg); yield msg
 
     def _stream_summary(self):
         summary = "**Final Framework Summary**\n\n" + \
@@ -1389,25 +1208,6 @@ class BlackBoxAgent:
             print(f"[ANSWER] error: {e}")
             return False
 
-    def _detect_override(self, user_input: str) -> dict | None:
-        """Single classifier for all override types. Used for research logging only."""
-        try:
-            parsed = classify_json(
-                f"{OVERRIDE_CLASSIFIER_PROMPT}\n\nUser message: \"{user_input}\""
-            )
-            if (parsed.get("override", False) and
-                    parsed.get("confidence", 0.0) >= OVERRIDE_THRESHOLD and
-                    parsed.get("type", "none") != "none"):
-                return {
-                    "type":       parsed["type"],
-                    "detail":     parsed.get("detail"),
-                    "parent":     parsed.get("parent"),
-                    "confidence": parsed["confidence"],
-                }
-        except Exception as e:
-            print(f"[OVERRIDE] error: {e}")
-        return None
-    
     def _classify_swap_question(self, user_input: str) -> bool:
         """Swap-question check (W9): is this question specifically ABOUT the swap
         concept? The `is_about_swap` half of the retired `_classify_question` — the

@@ -70,22 +70,39 @@ def ok(km, exp):
 
 
 def main():
+    # F-CASE gate-realism (2026-06-09): the intent layer passes the user's NATURAL casing
+    # to locate(), not a curated lower-case string. So each A-row is now checked under
+    # several casings (as-typed / lower / UPPER / Title) and only PASSES if they ALL resolve
+    # to the SAME (level, pillar) AND meet the catalog expectation. This would have caught
+    # "IT Budget" -> none while "IT budget" -> Financial Impact (the live smoke-test miss).
     print(f"{'row':4} {'item':34} {'level':8} {'pillar':18} {'withheld':8} {'match_type':26} result")
     print("-" * 110)
     passed = 0
     for rid, item, exp in CASES:
-        km = m.locate(item)
-        good = ok(km, exp)
-        passed += good
-        print(f"{rid:4} {item[:33]:34} {km.level:8} {str(km.pillar)[:17]:18} "
-              f"{str(km.pillar_is_withheld):8} {str(km.match_type)[:25]:26} "
-              f"{'PASS' if good else 'FAIL  expected ' + repr(exp)}")
+        variants = list(dict.fromkeys([item, item.lower(), item.upper(), item.title()]))
+        results = [(v, m.locate(v)) for v in variants]
+        good   = all(ok(km, exp) for _, km in results)
+        agree  = (len({km.level for _, km in results}) == 1
+                  and len({(km.pillar or "") for _, km in results}) == 1)
+        row_ok = good and agree
+        passed += row_ok
+        km0 = results[0][1]
+        note = ""
+        if not row_ok:
+            if not agree:
+                note = "  CASE-SPLIT " + repr({v: (km.level, km.pillar) for v, km in results})
+            else:
+                note = "  expected " + repr(exp)
+        print(f"{rid:4} {item[:33]:34} {km0.level:8} {str(km0.pillar)[:17]:18} "
+              f"{str(km0.pillar_is_withheld):8} {str(km0.match_type)[:25]:26} "
+              f"{'PASS' if row_ok else 'FAIL' + note}")
     print("-" * 110)
-    print(f"{passed}/{len(CASES)} A-rows resolve as the catalog expects.")
+    print(f"{passed}/{len(CASES)} A-rows resolve as the catalog expects under ALL casings.")
     if passed != len(CASES):
-        print("Gate NOT met — inspect the FAIL rows (prompt wording or threshold).")
+        print("Gate NOT met — inspect the FAIL rows (CASE-SPLIT = locate() is case-sensitive; "
+              "else prompt wording or threshold).")
         sys.exit(1)
-    print("Step-2 matching gate MET (shared locate() correct on A-rows). "
+    print("Step-2 matching gate MET (shared locate() correct + case-robust on A-rows). "
           "Identical-across-arms holds by construction once EXP/HITL are wired.")
 
 

@@ -107,6 +107,40 @@ def _is_filler_detail(detail: str | None) -> bool:
     return _norm(detail) in _FILLER_WORDS
 
 
+# ── Steering / delegation guard (F-I1-HITL, Step 4f) ────────────────────────
+# A message that HANDS THE NEXT MOVE to the agent and names no concept of the
+# user's own ("guide it", "you lead", "you decide", "your call") is DELEGATION,
+# not an add. The proactive prompts SOLICIT exactly these ("would you like me to
+# suggest one?", "shall I take the lead?"), so a reply like "guide it" must map to
+# ask_agent_to_suggest — it must NEVER survive as add+detail and become a pillar
+# (the live phantom-pillar contaminant). "guide"/"lead"/"drive" are never concept
+# names. Matched on the WHOLE normalized message (mirrors _FILLER_WORDS) — never a
+# substring — so a real concept that merely CONTAINS such a word ("user guide
+# quality") is untouched. Pure-proceed phrases ("go ahead") are deliberately NOT
+# here: those lean `advance`, are not the bug, and the LLM handles them.
+_STEERING_PHRASES = {
+    "guide it", "guide me", "guide us", "you guide", "you guide it",
+    "please guide", "please guide me", "please lead",
+    "you lead", "you lead it", "you're lead", "you're the lead",
+    "youre the lead", "you are the lead", "lead it", "lead the way",
+    "take the lead", "you take the lead",
+    "you decide", "you decide it", "you decide what's next",
+    "you decide whats next", "you choose", "you pick",
+    "you drive", "you drive it", "drive it",
+    "your call", "up to you", "it's up to you", "its up to you",
+    "you take it from here", "take it from here",
+    "whatever you think", "whatever you suggest",
+    "you suggest", "you tell me",
+}
+
+
+def _is_steering_message(text: str) -> bool:
+    """True if the WHOLE message is a steering/delegation phrase — the user hands the
+    next move to the agent and names no concept. Whole-message match only (never a
+    substring), so a real concept containing a steering word is unaffected."""
+    return _norm(text) in _STEERING_PHRASES
+
+
 # ── The one router prompt (derived from Explainable's INTENT_ROUTER_PROMPT) ──
 INTENT_ROUTER_PROMPT = """\
 You route a user's message during a framework problem-solving session.
@@ -158,6 +192,12 @@ KEY DISAMBIGUATION:
 - "else", "more", "other", "anything", "something" are NEVER a concept. If the whole
   message is just "anything else?" / "what else?" -> ask_agent_to_suggest, detail null.
   NEVER put "else"/"more"/etc into detail.
+- delegation/steering vs add: if the user HANDS THE NEXT MOVE to you and names no
+  concept of their own ("you decide", "you lead", "guide it", "your call", "you pick",
+  "up to you", "you take it from here") -> ask_agent_to_suggest, detail null. These are
+  NEVER an add, and "guide"/"lead"/"drive"/"decide" are NEVER concept names. (The agent
+  often invites this — "shall I take the lead?", "would you like me to suggest one?" —
+  so the reply is the user accepting the agent's lead, not naming an area.)
 - add vs question: proposing something to include -> add; asking to understand what is
   already shown -> question.
 - Naming an existing area AS THE PLACE for a new point is "add", not revisit — the area
@@ -248,6 +288,17 @@ def classify_intent(
         confidence = float(parsed.get("confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
+
+    # ── Steering/delegation guard (F-I1-HITL, Step 4f): a whole-message handoff to
+    #    the agent ("guide it", "you lead", "your call") is delegation, NOT an add —
+    #    map it to ask_agent_to_suggest (the agent proposes) so it can never survive
+    #    as add+detail and be materialised into a phantom pillar. Runs FIRST so it
+    #    overrides whatever label the classifier assigned to the bare steering phrase.
+    if _is_steering_message(user_text):
+        if intent != "ask_agent_to_suggest":
+            logging.info(f"[INTENT] '{user_text[:60]}' -> steering/delegation; "
+                         f"rerouting {intent} -> ask_agent_to_suggest")
+        intent, detail, parent = "ask_agent_to_suggest", None, None
 
     # ── Filler-word guard (F-I1 / F-I2): defence in depth with matching.locate() ──
     # 1. A filler can never be a concept -> drop it from detail.

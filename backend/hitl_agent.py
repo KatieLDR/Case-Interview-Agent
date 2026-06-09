@@ -17,6 +17,7 @@ from backend.logger import (
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
 from backend.domain import matching, grounding      # Step 2: shared KB matchers + grounding
 from backend.interaction import intents              # Step 3: unified intent taxonomy (I-2)
+from backend.interaction import handlers as h        # Step 4d: shared PendingAction + resolve_pending (I-1)
 
 # D-Q1: the shared button<->intent map is canonical. DERIVE the set of free-text
 # intents that HITL also exposes as a button from intent_for_button, so HITL and the
@@ -219,8 +220,18 @@ class HITLAgent(BlackBoxAgent):
         self.justification_pillars = set()
 
         # ── Pending confirmation state ─────────────────────────────────────
-        self.pending_excl     = None
-        self.pending_sub_excl = None             # (concept, bullet) staged for removal
+        # Step 4d: the per-arm pending_excl / pending_sub_excl (a concept string /
+        # a (concept, bullet) tuple) are REPLACED by the shared PendingAction the
+        # removal buttons park and interaction/handlers.resolve_pending resolves.
+        # The shared confirmation machine fires the delete ONLY at stage="confirmed"
+        # (F-R1), so on_reject_concept no longer logs a delete at intent (F-R4).
+        self.pending            = None   # h.PendingAction parked by the removal buttons
+        self.pending_suggestion = None   # HandlerSession surface (D-H3 conformance)
+        self.last_discussed     = None   # Fork-A focus (unused on HITL's button path)
+        self.shown_bullets      = []     # positional-removal context (unused: HITL is button-driven)
+        self.excluded_sub_bullets = {}   # {pillar -> [excluded bullet texts]} (shared record)
+        self._last_surface      = None   # stash: surface_pillar result (D-H3 conformance)
+        self._last_sub_add      = None   # stash: add_sub_point result (D-H3 conformance)
 
         # ── Interaction-mode flags ─────────────────────────────────────────
         self.awaiting_user_suggestion  = False
@@ -482,7 +493,28 @@ class HITLAgent(BlackBoxAgent):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # ── 0. ➕ Add mode — collect sub-points, re-render, stay open ──────
+        # ── 0. A parked removal owns this turn (Step 4d). The shared confirmation
+        #      machine resolves it. For a justification-gated removal this free-text
+        #      turn IS the reason (D-H2: a meaningful reason -> confirm [B8]; a weak
+        #      one -> re-ask, stays parked, NO delete [B9]). A plain yes/no on a
+        #      non-gated parked removal is classified. Buttons take the same machine
+        #      via resolve_pending(decision=...) (D-Q1), so the firing is identical. ─
+        if self.pending is not None:
+            log_user_message(self.session_id, user_input)
+            pa = self.pending
+            if pa.requires_justification and pa.justification is None:
+                # the reason turn — allow an explicit cancel, else treat as the reason
+                if h._classify_confirmation(user_input) == "decline":
+                    outcome = h.resolve_pending(self, user_input, decision="decline")
+                else:
+                    outcome = h.resolve_pending(self, user_input, decision="confirm",
+                                                justification=user_input)
+            else:
+                outcome = h.resolve_pending(self, user_input)      # free-text yes/no
+            yield from self._render_removal_outcome(outcome, pa)
+            return
+
+        # ── 0a. ➕ Add mode — collect sub-points, re-render, stay open ──────
         if self.awaiting_sub_point:
             concept = self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[SUB-POINT ADD] {user_input}")
@@ -1161,72 +1193,148 @@ class HITLAgent(BlackBoxAgent):
                 yield from self._stream_proactive_prompt()
 
     def on_reject_concept(self):
+        """❌ Skip (first removal turn) — PARK a PendingAction; NOTHING is deleted here
+        (F-R1: delete fires only at confirm; F-R4: the old intent-stage delete is gone).
+        The swap is parked as is_swap -> detection on confirm, never a delete (§0/F-S3).
+        A justification-pillar parks requires_justification -> the next typed turn is the
+        reason gate (D-H2); other pillars confirm/cancel via the buttons (D-Q1)."""
         concept = self._current_concept()
         if concept is None:
             return
-
-        self.pending_excl = concept
-
-        logging.info(f"[REJECT] pending set for concept='{concept}'")
-        if not self._is_wrong_concept(concept):
-            log_delete(self.session_id, concept, "button")   # intent (#1); swap stays detection (#3)
-        yield (
-            f"Are you sure you want to skip **{concept}**?\n\n"
-            f"*Use the buttons below to confirm.*"
-        )
+        is_swap = self._is_wrong_concept(concept)
+        # D-H2 SCOPE preserved at baseline: HITL's random 2-of-3 shown pillars; the swap
+        # never requires justification (it is detection, not a graded removal). Scope
+        # reconciliation (all non-user-added incl. swap, + accept side) stays Step 6.
+        req = (concept in self.justification_pillars) and not is_swap
+        self.pending = h.PendingAction(
+            type="remove_pillar", target=concept, level="pillar",
+            is_swap=is_swap, requires_justification=req)
+        logging.info(f"[REJECT] parked pending concept='{concept}' (swap={is_swap}, req_just={req})")
+        if req:
+            yield (
+                f"Before we skip **{concept}** — what's your reasoning for leaving it "
+                f"out? A sentence is plenty."
+            )
+        else:
+            yield (
+                f"Are you sure you want to skip **{concept}**?\n\n"
+                f"*Use the buttons below to confirm.*"
+            )
 
     def on_confirm_reject(self):
-        concept = self.pending_excl
-        if concept is None:
+        """❌ confirm button (D-Q1, bypasses the LLM): resolve the parked removal via the
+        SHARED machine. Delete fires only at stage='confirmed' (F-R1); swap -> detection,
+        NO delete (§0). A justification-gated pillar is resolved by the typed reason in
+        _stream_main, not this button — clicking confirm with no reason re-asks (B9)."""
+        pa = self.pending
+        if pa is None:
             return
-
-        if self._is_wrong_concept(concept):
-            self.concept_swap.force_detected()
-            logging.info(f"[SWAP] detected via Reject button — concept='{concept}'")
-
-        if concept not in self.excluded_concepts:
-            self.excluded_concepts.append(concept)
-
-        log_memory_override(
-            self.session_id,
-            old_context=f"concept in framework: {concept}",
-            new_context=f"user confirmed rejection via button: {concept}",
-        )
-
-        self.pending_excl = None
-        logging.info(f"[REJECT CONFIRMED] concept='{concept}'")
-        self.walkthrough_index += 1
-
-        yield f"Got it — removing **{concept}** from the framework.\n\n"
-
-        if concept in self.justification_pillars:
-            yield from self._stream_justification_prompt("reject", concept=concept)
-        else:
-            next_concept = self._current_concept()
-            if next_concept is None:
-                yield from self._walkthrough_complete_message()
-            else:
-                yield from self._stream_proactive_prompt()
+        outcome = h.resolve_pending(self, "", decision="confirm")
+        yield from self._render_removal_outcome(outcome, pa)
 
     def on_cancel_reject(self):
-        concept = self.pending_excl
-        self.pending_excl = None
-        logging.info(f"[REJECT CANCELLED] concept='{concept}' kept in framework")
+        """❌ cancel button (D-Q1): abandon the parked removal -> keep the concept. NO
+        delete. Keeping = accept side -> the accept-side justification reflection still
+        fires for a justification pillar (that gate is the Step-6 reconciliation, left
+        as baseline here)."""
+        pa = self.pending
+        if pa is None:
+            return
+        outcome = h.resolve_pending(self, "", decision="decline")
+        yield from self._render_removal_outcome(outcome, pa)
 
-        if concept and concept not in self.approved_concepts:
-            self.approved_concepts.append(concept)
+    # ── shared-outcome renderer for the removal buttons + the typed-reason turn ──
+    def _render_removal_outcome(self, o, pa):
+        """Render a RemovalOutcome from the shared machine and drive HITL navigation +
+        logging (D-H1: the stage DRIVES the firing). pa is the PendingAction snapshot
+        (resolve_pending may have cleared self.pending)."""
+        stage = o.stage
 
-        yield f"Keeping **{concept}** — let's continue.\n\n"
-        self.walkthrough_index += 1
+        if stage == "needs_justification":
+            # gate failed (B9) — re-ask, stay parked, NOTHING deleted.
+            yield "Could you say a bit more about your reasoning? A sentence is plenty.\n\n"
+            return
 
-        if concept in self.justification_pillars:
+        if stage == "confirmed":
+            if pa.is_swap:
+                # §0 — swap DETECTED on confirm (mark_swap_detected ran in _confirm_removal:
+                # force_detected + excluded from the walk). NEVER a delete. The
+                # memory_override marks the detection, parity with the old button flow.
+                log_memory_override(
+                    self.session_id,
+                    old_context=f"concept in framework: {pa.target}",
+                    new_context=f"user confirmed rejection via button: {pa.target}",
+                )
+                logging.info(f"[SWAP] detected via Reject button — concept='{pa.target}'")
+                self.walkthrough_index += 1
+                yield f"Got it — removing **{pa.target}** from the framework.\n\n"
+                yield from self._after_removal_continue(pa.target, was_reject=True)
+                return
+            if pa.type == "remove_sub_bullet":
+                # _confirm_removal recorded the exclusion in excluded_sub_bullets; mirror
+                # it into HITL's render sources (concept_blocks / user_sub_points) so the
+                # block re-renders without it, then log the delete at CONFIRM (F-R1).
+                self._apply_sub_bullet_removal(pa.pillar, pa.target)
+                log_delete(self.session_id, pa.target, "button")
+                logging.info(f"[REMOVE POINT CONFIRMED] '{pa.target}' from '{pa.pillar}'")
+                yield f"Done — removed that point from **{pa.pillar}**.\n\n"
+                return
+            # whole pillar — _confirm_removal already excluded it; the cursor auto-skips.
+            log_memory_override(
+                self.session_id,
+                old_context=f"concept in framework: {pa.target}",
+                new_context=f"user confirmed rejection via button: {pa.target}",
+            )
+            log_delete(self.session_id, pa.target, "button")        # F-R1: at CONFIRM
+            logging.info(f"[REJECT CONFIRMED] concept='{pa.target}'")
+            self.walkthrough_index += 1
+            yield f"Got it — removing **{pa.target}** from the framework.\n\n"
+            yield from self._after_removal_continue(pa.target, was_reject=True)
+            return
+
+        if stage == "abandoned":
+            if pa.type == "remove_sub_bullet":
+                logging.info(f"[REMOVE POINT CANCELLED] keeping point under '{pa.pillar}'")
+                yield f"No problem — keeping that point in **{pa.pillar}**.\n\n"
+                return
+            # pillar kept = accept side
+            if pa.target and pa.target not in self.approved_concepts:
+                self.approved_concepts.append(pa.target)
+            logging.info(f"[REJECT CANCELLED] concept='{pa.target}' kept in framework")
+            self.walkthrough_index += 1
+            yield f"Keeping **{pa.target}** — let's continue.\n\n"
+            yield from self._after_removal_continue(pa.target, was_reject=False)
+            return
+
+        # defensive (challenged/other shouldn't surface via the button/reason paths)
+        yield "Reply **yes** to remove, or **no** to keep it.\n\n"
+
+    def _after_removal_continue(self, concept, *, was_reject):
+        """Post-removal navigation. Keeping a justification pillar still triggers the
+        accept-side justification reflection (the accept/advance-side gate is the Step-6
+        reconciliation, line 118 — left at baseline). Reject-side justification is now the
+        PRE-confirm gate, so there is no post-reject reflection prompt."""
+        if (not was_reject) and concept in self.justification_pillars:
             yield from self._stream_justification_prompt("accept", concept=concept)
+            return
+        next_concept = self._current_concept()
+        if next_concept is None:
+            yield from self._walkthrough_complete_message()
         else:
-            next_concept = self._current_concept()
-            if next_concept is None:
-                yield from self._walkthrough_complete_message()
-            else:
-                yield from self._stream_proactive_prompt()
+            yield from self._stream_proactive_prompt()
+
+    def _apply_sub_bullet_removal(self, concept: str, bullet: str):
+        """Strip a confirmed-removed bullet from HITL's render sources (the shared
+        excluded_sub_bullets record was already written by _confirm_removal)."""
+        target = bullet.strip().lstrip("-• ").strip().lower()
+        block = self.concept_blocks.get(concept, "")
+        if block:
+            self.concept_blocks[concept] = "\n".join(
+                l for l in block.splitlines()
+                if l.strip().lstrip("-• ").strip().lower() != target
+            )
+        pts = self.user_sub_points.get(concept, [])
+        self.user_sub_points[concept] = [p for p in pts if p.strip().lower() != target]
 
     def on_add_to_concept(self):
         """➕ Add — open add-mode for the current concept. Change log: 2026-05-29"""
@@ -1250,44 +1358,38 @@ class HITLAgent(BlackBoxAgent):
         logging.info(f"[ADD] add-mode closed for concept='{concept}'")
         yield f"Got it. Back to **{concept}** — include it, skip it, or add more.\n\n"
 
-    # ── ➖ Remove a point: picker → confirm → commit ───────────────────────
+    # ── ➖ Remove a point: picker → confirm → commit (shared machine, Step 4d) ──
     def on_remove_point(self, bullet: str):
+        """➖ Remove a point — PARK a sub-bullet PendingAction (challenge); nothing is
+        deleted here (F-R1). Sub-bullet removals carry no justification gate at baseline
+        (only the 2-of-3 pillar decisions do), so requires_justification stays False."""
         concept = self._current_concept()
         if concept is None or not bullet:
             return
-        self.pending_sub_excl = (concept, bullet)
-        logging.info(f"[REMOVE POINT] pending: '{bullet}' under '{concept}'")
+        self.pending = h.PendingAction(
+            type="remove_sub_bullet", target=bullet, level="concept",
+            pillar=concept, requires_justification=False)
+        logging.info(f"[REMOVE POINT] parked: '{bullet}' under '{concept}'")
         yield (
             f"Remove this point from **{concept}**?\n\n- {bullet}\n\n"
             f"*Use the buttons below to confirm.*"
         )
 
     def on_confirm_remove_point(self):
-        if not self.pending_sub_excl:
+        """➖ confirm button (D-Q1): resolve via the shared machine -> delete at CONFIRM."""
+        pa = self.pending
+        if pa is None:
             return
-        concept, bullet = self.pending_sub_excl
-        self.pending_sub_excl = None
-        target = bullet.strip().lstrip("-• ").strip().lower()
-
-        block = self.concept_blocks.get(concept, "")
-        if block:
-            self.concept_blocks[concept] = "\n".join(
-                l for l in block.splitlines()
-                if l.strip().lstrip("-• ").strip().lower() != target
-            )
-        pts = self.user_sub_points.get(concept, [])
-        self.user_sub_points[concept] = [p for p in pts
-                                         if p.strip().lower() != target]
-
-        log_delete(self.session_id, bullet, "button")   # logged at CONFIRM
-        logging.info(f"[REMOVE POINT CONFIRMED] '{bullet}' from '{concept}'")
-        yield f"Done — removed that point from **{concept}**.\n\n"
+        outcome = h.resolve_pending(self, "", decision="confirm")
+        yield from self._render_removal_outcome(outcome, pa)
 
     def on_cancel_remove_point(self):
-        concept = self.pending_sub_excl[0] if self.pending_sub_excl else "this concept"
-        self.pending_sub_excl = None
-        logging.info(f"[REMOVE POINT CANCELLED] keeping point under '{concept}'")
-        yield f"No problem — keeping that point in **{concept}**.\n\n"
+        """➖ cancel button (D-Q1): abandon -> keep the point. NO delete."""
+        pa = self.pending
+        if pa is None:
+            return
+        outcome = h.resolve_pending(self, "", decision="decline")
+        yield from self._render_removal_outcome(outcome, pa)
 
     # ── ↩️ Revisit a past pillar ───────────────────────────────────────────
     def on_revisit_pillar(self, pillar: str):
@@ -1302,6 +1404,107 @@ class HITLAgent(BlackBoxAgent):
         )
 
     # ══════════════════════════════════════════════════════════════════════
+    # Step 4d — HandlerSession adapter (D-H3). HITL's runtime removal path is
+    # BUTTON-driven (on_*_reject / on_*_remove_point -> resolve_pending), so it
+    # drives the shared confirmation machine, the swap channel, and the
+    # justification gate. The read queries + add mutators complete the neutral
+    # surface so BaseAgent can own it at Step 6. HITL's free-text adds NUDGE to a
+    # button (D-Q1) and suggestions use _handle_suggest, so those don't route
+    # through dispatch here.
+    # ══════════════════════════════════════════════════════════════════════
+
+    # ── swap channel (PRESERVED per-arm, §0 #4) ──
+    def swap_name(self):
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            return self.concept_swap.config["wrong_concept"]
+        return None
+
+    def is_swap_target(self, km, user_text: str) -> bool:
+        if not self.swap_name():
+            return False
+        if self.concept_swap.matches(user_text):
+            return True
+        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
+            if cand and self.concept_swap.matches(cand):
+                return True
+        cur = self.current_pillar()
+        return bool(cur and self._is_wrong_concept(cur))
+
+    def mark_swap_detected(self) -> None:
+        """Swap DETECTED on confirm — force_detected + ensure it is excluded from the
+        walk. NEVER a delete event (§0); the renderer logs no delete."""
+        self.concept_swap.force_detected()
+        wrong = self.concept_swap.config["wrong_concept"]
+        if wrong not in self.excluded_concepts:
+            self.excluded_concepts.append(wrong)
+
+    def requires_justification(self, km) -> bool:
+        """D-H2 SCOPE (baseline-preserved): HITL's deterministic 2-of-3 of the SHOWN
+        pillars require a reason; the swap never does (detection, not a graded removal).
+        Scope reconciliation (all non-user-added incl. swap; the accept/advance side) is
+        the Step-6 work (line 118)."""
+        name = getattr(km, "pillar", None)
+        if not name or self._is_wrong_concept(name):
+            return False
+        return name in self.justification_pillars
+
+    # ── read queries ──
+    def current_pillar(self):
+        """Read-only current concept (skips excluded WITHOUT advancing the cursor)."""
+        excluded = [e.lower() for e in self.excluded_concepts]
+        idx = self.walkthrough_index
+        while idx < len(self.walkthrough_concepts):
+            c = self.walkthrough_concepts[idx]
+            if c.lower() not in excluded:
+                return c
+            idx += 1
+        return None
+
+    def presented_pillars(self) -> list:
+        excluded = [e.lower() for e in self.excluded_concepts]
+        return [c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
+                if c.lower() not in excluded]
+
+    def presented_sub_bullets(self) -> dict:
+        """{concept -> [non-excluded bullet texts]} from HITL's render sources
+        (concept_blocks + user_sub_points), source refs stripped."""
+        out = {}
+        for name in self.presented_pillars():
+            bl = []
+            for line in self.concept_blocks.get(name, "").splitlines():
+                t = _strip_source_refs(line.strip().lstrip("-• ").strip())
+                if t and not matching.is_excluded_bullet(self.excluded_sub_bullets, name, t):
+                    bl.append(t)
+            for sp in self.user_sub_points.get(name, []):
+                t = _strip_source_refs(sp).strip()
+                if t and not matching.is_excluded_bullet(self.excluded_sub_bullets, name, t):
+                    bl.append(t)
+            out[name] = bl
+        return out
+
+    def surfaced_pillar_names(self) -> set:
+        names = {p["name"].lower() for p in kb.get_shown_pillars()}
+        names |= {c.lower() for c in self.walkthrough_concepts}
+        names |= {c.lower() for c in self.user_contributed_concepts}
+        names |= {e.lower() for e in self.excluded_concepts}
+        return names
+
+    # ── add mutators (D-H3 conformance; HITL's runtime adds use the buttons + the
+    #    proactive elicited-add path, not these — kept for the shared/BaseAgent surface) ──
+    def surface_pillar(self, name: str) -> None:
+        if name.lower() in [c.lower() for c in self.walkthrough_concepts]:
+            self._last_surface = {"name": name, "is_new": False}
+            return
+        self.walkthrough_concepts.insert(self.walkthrough_index, name)
+        self.user_contributed_concepts.add(name)
+        self._last_surface = {"name": name, "is_new": True}
+
+    def add_sub_point(self, pillar: str, text: str) -> None:
+        stored, is_new = self._store_sub_point(pillar, text)
+        self._last_sub_add = {"pillar": self._normalize_pillar(pillar),
+                              "stored": stored, "raw": text, "is_new": is_new}
+
+    # ══════════════════════════════════════════════════════════════════════
     # UI state queries
     # ══════════════════════════════════════════════════════════════════════
 
@@ -1311,8 +1514,7 @@ class HITLAgent(BlackBoxAgent):
             and self.walkthrough_active
             and not self.walkthrough_done
             and self._current_concept() is not None
-            and self.pending_excl is None
-            and self.pending_sub_excl is None
+            and self.pending is None
             and not self.awaiting_user_suggestion
             and not self.awaiting_justification
             and not self.awaiting_sub_point
@@ -1321,10 +1523,16 @@ class HITLAgent(BlackBoxAgent):
         )
 
     def should_show_confirmation_buttons(self) -> bool:
-        return self.pending_excl is not None
+        # ❌ confirm/cancel buttons for a parked PILLAR removal. A justification-gated
+        # pillar awaiting its reason shows NO buttons (the user types the reason); the
+        # buttons return once a reason has passed or for a non-gated pillar (D-Q1/D-H2).
+        p = self.pending
+        return (p is not None and p.type == "remove_pillar"
+                and not (p.requires_justification and p.justification is None))
 
     def should_show_remove_point_confirmation(self) -> bool:
-        return self.pending_sub_excl is not None
+        p = self.pending
+        return p is not None and p.type == "remove_sub_bullet"
 
     def removable_bullets(self) -> list[str]:
         concept = self._current_concept()

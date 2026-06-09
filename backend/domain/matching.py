@@ -279,8 +279,15 @@ def locate(user_text: str) -> KBMatch:
     if not text or not toks or all(t in _FILLER for t in toks):
         return KBMatch(level="none", match_type="novel_not_in_kb")
 
+    # F-CASE (Step-2 amendment 2026-06-09): case-fold the probe sent to the LLM matchers.
+    # locate() already lower-cases for the filler/token gate above; the matcher calls must
+    # use the SAME normalised form, or a user's natural casing ("IT Budget") misses a match
+    # the curated lower-case gate input ("IT budget") makes. matched_text / concept_id come
+    # from the KB, so this only changes what the matcher SEES, never the KBMatch fields.
+    probe = text.lower()
+
     # PASS 1 — specific criterion
-    concept, cscore = match_concept(text)
+    concept, cscore = match_concept(probe)
     if concept:
         parent = kb.get_pillar_by_id(concept["pillar_id"])
         pname = parent["name"] if parent else None
@@ -293,7 +300,7 @@ def locate(user_text: str) -> KBMatch:
         )
 
     # PASS 2 — area, enriched with its concrete concerns (key_questions + sub_bullets)
-    pillar_name, ascore = _match_area(text)
+    pillar_name, ascore = _match_area(probe)
     if pillar_name:
         withheld = _pillar_is_withheld(pillar_name)
         return KBMatch(
