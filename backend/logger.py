@@ -17,6 +17,11 @@ def _init_firebase():
 _init_firebase()
 db = firestore.client()
 
+# §3.6 headline counters live in ONE place (events.py). logger -> events is cycle-free
+# (events imports nothing heavy; sink imports logger for `db`, never the reverse).
+from backend.logging import events as _ev
+_HEADLINE_COUNTERS = _ev.HEADLINE_COUNTERS
+
 
 # ── Session ────────────────────────────────────────────────────────────────
 def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> str:
@@ -33,35 +38,22 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         # Change log: 2026-05-01 — added for warm-up phase.
         # Stores raw participant response for optional post-hoc analysis.
         "warmup_response": None,
-        # ── counters ──
+        # ── transcript / apparatus counters (PRESERVED — not §3.6 study events) ──
         "count_user_messages": 0,
         "count_agent_responses": 0,
-        "count_interruptions": 0,
-        "count_memory_overrides": 0,
         "count_answer_updates": 0,
-        # ── disaggregated agency counters (added 2026-05-30) ──
-        # Parallel to count_memory_overrides (kept). count_delete = removal INTENTS.
-        "count_question":        0,
-        "count_add_pillar":      0,
-        "count_add_sub_bullet":  0,
-        "count_delete":          0,
-        "count_update":          0,
-        "count_swap_questioned": 0,
-        # ── concept swap ──
+        # ── §3.6 headline rollups (Step 5). Single source of truth =
+        #    backend.logging.events.HEADLINE_COUNTERS. Events are authoritative;
+        #    these are thin caches recomputed from events in analysis. RETIRED in
+        #    Step 5: count_memory_overrides, count_delete, count_update,
+        #    count_swap_questioned (superseded by §3.6 / fully event-derived). ──
+        **{c: 0 for c in _HEADLINE_COUNTERS},
+        # ── concept swap (preserved apparatus flags) ──
         "concept_swap_presented": False,
         "concept_swap_detected": False,
-        # ── HITL-specific ──
-        # hitl_context / hitl_exigence removed 2026-05-30 — Q1/Q2 no longer exist.
+        # ── HITL-specific (preserved) ──
         "concepts_approved": [],
         "concepts_rejected": [],
-        # ── disaggregated agency counters (added 2026-05-30) ──
-        # Parallel to count_memory_overrides (kept). Split per interaction kind.
-        "count_question":        0,
-        "count_add_pillar":      0,
-        "count_add_sub_bullet":  0,
-        "count_delete":          0,
-        "count_update":          0,
-        "count_swap_questioned": 0,
     })
     return session_id
 
@@ -101,18 +93,15 @@ def stamp_started_at(session_id: str) -> None:
         print(f"[SESSION] failed to stamp started_at: {e}")
 
 # ── Counter map ────────────────────────────────────────────────────────────
+# Step 5: trimmed to the PRESERVED transcript/apparatus counters only. All §3.6
+# study-event counters (add_pillar/add_sub_bullet/question/delete_*/ask_agent_
+# suggestion/passive_advance/interruption) are now owned by the shared sink
+# (backend.logging.sink), bumped via events.COUNTER_FOR. interruption stays here
+# because log_interruption() is a preserved apparatus helper (§3.9 phase machine).
 _COUNTER_MAP = {
     "user_message":    "count_user_messages",
     "agent_response":  "count_agent_responses",
     "interruption":    "count_interruptions",
-    "memory_override": "count_memory_overrides",
-    # ── disaggregated agency events (added 2026-05-30) ──
-    "question":        "count_question",
-    "add_pillar":      "count_add_pillar",
-    "add_sub_bullet":  "count_add_sub_bullet",
-    "delete":          "count_delete",
-    "update":          "count_update",
-    "swap_questioned": "count_swap_questioned",
 }
 
 
@@ -167,68 +156,14 @@ def log_warmup_response(session_id: str, response: str) -> None:
         print(f"[WARMUP] failed to log response: {e}")
 
 
-def log_concept_swap_presented(session_id: str) -> None:
-    db.collection("sessions").document(session_id).update({
-        "concept_swap_presented": True,
-    })
-    _log_event(session_id, "concept_swap_presented", {})
-
-
-def log_concept_swap_detected(session_id: str) -> None:
-    db.collection("sessions").document(session_id).update({
-        "concept_swap_detected": True,
-    })
-    _log_event(session_id, "concept_swap_detected", {})
-
-
-def log_framework_switched(
-    session_id: str,
-    from_framework: str,
-    to_framework: str,
-    switch_index: int,
-) -> None:
-    try:
-        db.collection("sessions").document(session_id).update({
-            "framework_switched": True,
-        })
-        _log_event(session_id, "framework_switched", {
-            "from_framework": from_framework,
-            "to_framework":   to_framework,
-            "at_index":       switch_index,
-        })
-        print(f"[FRAMEWORK SWITCH] logged: {from_framework} → {to_framework} "
-              f"at index={switch_index}")
-    except Exception as e:
-        print(f"[FRAMEWORK SWITCH] failed to log: {e}")
-
-
-# Change log: 2026-04-01 — added log_concept_added().
-# Logs a user-initiated concept addition as both a research event and
-# an override — increments count_memory_overrides since adding a concept
-# is a user override of the original framework structure.
-def log_concept_added(session_id: str, concept_name: str) -> None:
-    """
-    Log a user-initiated concept addition to Firestore.
-
-    Increments count_memory_overrides (via _COUNTER_MAP on memory_override
-    event type) since concept addition is an override of the original
-    framework structure — consistent with concept_excluded and framework_switch.
-
-    Also writes a dedicated concept_added event for granular research analysis.
-    """
-    try:
-        # Log as memory_override to increment count_memory_overrides
-        _log_event(session_id, "memory_override", {
-            "old_context": "framework without user concept",
-            "new_context": f"user added: {concept_name}",
-        })
-        # Log dedicated event for granular analysis
-        _log_event(session_id, "concept_added", {
-            "concept_name": concept_name,
-        })
-        print(f"[CONCEPT ADDED] logged: '{concept_name}' for session={session_id}")
-    except Exception as e:
-        print(f"[CONCEPT ADDED] failed to log: {e}")
+# ── Swap / framework / concept-add logging: RETIRED in Step 5 ────────────────
+# These moved to the shared §3.6 layer:
+#   concept_swap_presented  -> backend.logging.events.swap_presented()
+#   concept_swap_detected   -> backend.logging.events.swap_detected() (+ swap_removed
+#                              on a confirmed swap removal, via events.record)
+#   concept_added/memory_override -> superseded by add_pillar / add_sub_bullet
+#   log_framework_switched  -> dead since Step 0.5 (multi-framework subsystem removed)
+# Kept out of logger.py so the §3.6 schema lives in exactly one module (I-1).
 
 
 def log_user_message(session_id: str, message: str) -> None:
@@ -242,60 +177,11 @@ def log_agent_response(session_id: str, response: str) -> None:
 def log_interruption(session_id: str, context: str = "") -> None:
     _log_event(session_id, "interruption", {"context": context})
 
-
-def log_memory_override(session_id: str, old_context: str, new_context: str) -> None:
-    _log_event(session_id, "memory_override", {
-        "old_context": old_context,
-        "new_context": new_context,
-    })
-
-# Change log: 2026-05-30 — disaggregated, modality-tagged agency events.
-# Fires its own counter via _COUNTER_MAP (same mechanism as count_memory_overrides),
-# which is kept untouched. Events are the source of truth; counters are a cache —
-# derive final counts from events offline. Uniform across all three agents.
-_INTERACTION_TYPES = frozenset({
-    "question", "add_pillar", "add_sub_bullet", "delete", "update", "swap_questioned",
-})
-_INTERACTION_MODALITIES = frozenset({"button", "text"})
-
-def log_interaction_event(session_id: str, event_type: str, modality: str, detail: str = "") -> None:
-    if event_type not in _INTERACTION_TYPES:
-        print(f"[INTERACTION] WARNING unknown event_type='{event_type}' (still logged)")
-    if modality not in _INTERACTION_MODALITIES:
-        print(f"[INTERACTION] WARNING unknown modality='{modality}' (still logged)")
-    try:
-        _log_event(session_id, event_type, {"modality": modality, "detail": detail})
-        print(f"[INTERACTION] {event_type}/{modality} logged for session={session_id}")
-    except Exception as e:
-        print(f"[INTERACTION] failed to log: {e}")
-
-# Thin named helpers — keep the taxonomy strings in one place across all agents.
-def log_question(session_id, modality, detail=""):       log_interaction_event(session_id, "question", modality, detail)
-def log_add_pillar(session_id, name, modality):          log_interaction_event(session_id, "add_pillar", modality, name)
-def log_add_sub_bullet(session_id, text, modality):      log_interaction_event(session_id, "add_sub_bullet", modality, text)
-def log_delete(session_id, name, modality):              log_interaction_event(session_id, "delete", modality, name)
-def log_swap_questioned(session_id, modality, detail=""): log_interaction_event(session_id, "swap_questioned", modality, detail)
-
-# Change log: 2026-05-30 — added log_interaction_event().
-# Records each user agency act as a separate, modality-tagged event AND
-# increments its own counter via _COUNTER_MAP (same mechanism as
-# count_memory_overrides). count_memory_overrides is kept and untouched —
-# an add still bumps both the legacy override count and the new counter.
-_INTERACTION_TYPES = frozenset({
-    "question", "add_pillar", "add_sub_bullet", "delete", "update", "swap_questioned",
-})
-_INTERACTION_MODALITIES = frozenset({"button", "text"})
-
-def log_interaction_event(session_id: str, event_type: str, modality: str, detail: str = "") -> None:
-    if event_type not in _INTERACTION_TYPES:
-        print(f"[INTERACTION] WARNING unknown event_type='{event_type}' (still logged)")
-    if modality not in _INTERACTION_MODALITIES:
-        print(f"[INTERACTION] WARNING unknown modality='{modality}' (still logged)")
-    try:
-        _log_event(session_id, event_type, {
-            "modality": modality,
-            "detail":   detail,
-        })
-        print(f"[INTERACTION] {event_type}/{modality} logged for session={session_id}")
-    except Exception as e:
-        print(f"[INTERACTION] failed to log: {e}")
+# ── Agency interaction events: RETIRED in Step 5 ─────────────────────────────
+# log_memory_override, log_interaction_event and the thin helpers
+# (log_question / log_add_pillar / log_add_sub_bullet / log_delete /
+# log_swap_questioned) are gone. Their job — turning a user agency act into a
+# §3.6 event + thin-rollup counter — now belongs to the ONE shared firing point
+# backend.logging.events.record(outcome, ctx, sink), driven by the Step-4
+# handler Outcome. This is the I-1 relocation: an event can no longer originate
+# in per-agent code, so it can no longer differ by arm.

@@ -253,18 +253,17 @@ class ConceptSwap:
         return False
 
     def log_presented(self) -> None:
-        """Call after first framework response to stamp Firestore."""
+        """Call after first framework response to stamp Firestore. Step 5: routed
+        through the shared §3.6 layer (swap_presented) so the swap vocabulary is
+        unified; the injection/detection MECHANISM below is untouched (§0 #4)."""
         try:
-            from firebase_admin import firestore as fs
-            from backend.logger import _log_event
-            db = fs.client()
-            db.collection("sessions").document(self.session_id).update({
-                "concept_swap_presented": True,
-            })
-            _log_event(self.session_id, "concept_swap_presented", {
-                "wrong_concept": self.config["wrong_concept"],
-                "agent_type":    self.agent_type,
-            })
+            from backend.logging import events as ev
+            from backend.logging.sink import firestore_sink as sink
+            ev.swap_presented(
+                ev.EventContext(self.session_id, agent_type=self.agent_type,
+                                wrong_concept=self.config["wrong_concept"]),
+                sink,
+            )
             print(f"[SWAP PRESENTED] session={self.session_id}")
         except Exception as e:
             print(f"[SWAP LOG] failed to log presentation: {e}")
@@ -382,18 +381,17 @@ class ConceptSwap:
     # ── Firestore logging ──────────────────────────────────────────────────
 
     def _log_detected(self) -> None:
-        """Log swap detection event to Firestore."""
+        """Log swap detection event. Step 5: routed through the shared §3.6 layer
+        (swap_detected). The Direction B/C detection MECHANISM that CALLS this is
+        untouched (§0 #4) — only the logging vocabulary is unified."""
         try:
-            from backend.logger import _log_event
-            from firebase_admin import firestore as fs
-            db = fs.client()
-            db.collection("sessions").document(self.session_id).update({
-                "concept_swap_detected": True,
-            })
-            _log_event(self.session_id, "concept_swap_detected", {
-                "wrong_concept": self.config["wrong_concept"],
-                "agent_type":    self.agent_type,
-            })
+            from backend.logging import events as ev
+            from backend.logging.sink import firestore_sink as sink
+            ev.swap_detected(
+                ev.EventContext(self.session_id, agent_type=self.agent_type,
+                                wrong_concept=self.config["wrong_concept"]),
+                sink,
+            )
         except Exception as e:
             print(f"[SWAP LOG] failed to log detection: {e}")
 

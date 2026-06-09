@@ -10,10 +10,10 @@ from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
-    log_interruption, log_memory_override, update_answer,
-    log_concept_added,
-    log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned
+    log_interruption, update_answer,
 )
+from backend.logging import events as ev
+from backend.logging.sink import firestore_sink as _sink
 from backend.rag_explainer import build_citation_header, check_and_append_warning
 from backend.domain import matching, grounding          # Step 2: shared KB matchers + grounding
 from backend.interaction import intents                      # Step 3: unified intent taxonomy (I-2)
@@ -850,9 +850,7 @@ class ExplainableAgent(BlackBoxAgent):
                 wrong = self.concept_swap.config["wrong_concept"]
                 if wrong not in self.excluded_concepts:
                     self.excluded_concepts.append(wrong)            # skip it in the walk
-                log_memory_override(self.session_id,
-                    old_context=f"included: {wrong}",
-                    new_context=f"user rejected: {wrong}")          # detection channel, NO log_delete
+                # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
                 logging.info("[SWAP] caught via semantic backstop")
                 log_user_message(self.session_id, user_input)
                 self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
@@ -1015,12 +1013,21 @@ class ExplainableAgent(BlackBoxAgent):
         return False   # D-H2: Explainable has no justification gate (scope is HITL, Step 6).
 
     # ── outcome renderer ────────────────────────────────────────────────────
+    def _swap_question_signal(self, outcome, user_input: str) -> bool:
+        """Explainable's W9 signal — preserved exactly from _render_question: the handler's
+        is_about_swap OR the walkthrough being on the swap concept right now (deferred F-S
+        instrument). Used by the inherited _fire_turn for the QuestionOutcome path."""
+        on_swap = (self.swap_presented and not self.concept_swap.is_detected
+                   and self._on_swap_now())
+        return bool(getattr(outcome, "is_about_swap", False) or on_swap)
+
     def _render_outcome(self, outcome, user_input, *, intent="none",
                         was_pending=False, pa=None):
         if outcome is None:                      # suggest_handler: nothing left to suggest
             msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "
                    "remove, or question any part of the framework.")
             self._emit(msg); yield msg; return
+        self._fire_turn(outcome, user_input, was_pending)   # §3.6 events (Step 5, I-1)
         if isinstance(outcome, handlers.AddOutcome):
             yield from self._render_add(outcome); return
         if isinstance(outcome, handlers.RemovalOutcome):
@@ -1063,7 +1070,7 @@ class ExplainableAgent(BlackBoxAgent):
                 yield f"Going back to **{target}** — here's where we left off.\n\n"
                 yield from self._stream_concept(is_first=False)
             else:
-                log_question(self.session_id, "text", detail="revisit")
+                ev.question(self._evctx(), _sink)   # revisit -> grounded Q&A (no turn outcome)
                 yield from self._stream_concept_qa()
             return
 
@@ -1079,8 +1086,6 @@ class ExplainableAgent(BlackBoxAgent):
         if o.action == "revealed" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, o.pillar)
-                log_add_pillar(self.session_id, o.pillar, "text")   # withheld reveal (matched id)
                 msg = (f"Good call — **{o.pillar}** is an important area; "
                        f"we'll cover it in the walkthrough." + self._NEXT_AFFORD)
             else:
@@ -1091,8 +1096,6 @@ class ExplainableAgent(BlackBoxAgent):
         if o.action == "added_new" and o.level == "sub_bullet":
             st = self._last_sub_add or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, st.get("raw", o.text or ""))
-                log_add_sub_bullet(self.session_id, st.get("stored", o.text or ""), "text")
                 msg = (f"Good point — I've added it under **{o.pillar}**. "
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(o.pillar)}" + self._NEXT_AFFORD)
@@ -1103,8 +1106,6 @@ class ExplainableAgent(BlackBoxAgent):
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, o.pillar)
-                log_add_pillar(self.session_id, o.pillar, "text")   # novel area (matched id None)
                 msg = f"Noted — I've added **{o.pillar}** as a separate area." + self._NEXT_AFFORD
             else:
                 msg = f"**{o.pillar}** is already part of the framework."
@@ -1116,12 +1117,8 @@ class ExplainableAgent(BlackBoxAgent):
         stage = o.stage
         if stage == "confirmed":
             if o.is_swap:
-                # §0 — swap is DETECTION, never a delete. mark_swap_detected (in dispatch
-                # via _confirm_removal) already force_detected + excluded it from the walk.
-                wrong = pa.target if pa else o.target
-                log_memory_override(self.session_id,
-                    old_context=f"concept in framework: {wrong}",
-                    new_context=f"user confirmed removal: {wrong}")   # detection marker, NO log_delete
+                # §0 — swap is DETECTION, never a delete. swap_detected+swap_removed fired by
+                # _fire_turn(RemovalOutcome is_swap); mark_swap_detected ran in _confirm_removal.
                 yield from self._stream_swap_caught()
                 yield "\n\n"
                 if self.current_pillar() is None:
@@ -1130,19 +1127,11 @@ class ExplainableAgent(BlackBoxAgent):
                     yield from self._stream_concept(is_first=False)
                 return
             if pa and pa.type == "remove_sub_bullet":
-                log_delete(self.session_id, o.target, "text")                  # F-R1: at confirm
-                log_memory_override(self.session_id,
-                    old_context=f"sub-bullet in {pa.pillar}: {o.target}",
-                    new_context="user confirmed removal")
                 msg = (f"Done — I've removed that point from **{pa.pillar}**. "
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(pa.pillar)}" + self._NEXT_AFFORD)
                 self._emit(msg); yield msg; return
             # whole pillar — _confirm_removal already excluded it; the cursor auto-skips.
-            log_delete(self.session_id, o.target, "text")                      # F-R1: at confirm
-            log_memory_override(self.session_id,
-                old_context=f"concept in framework: {o.target}",
-                new_context=f"user confirmed removal: {o.target}")
             yield f"Understood — removing **{o.target}** from the framework. Let's continue.\n\n"
             if self.current_pillar() is None:
                 yield from self._stream_summary()
@@ -1176,9 +1165,7 @@ class ExplainableAgent(BlackBoxAgent):
         if stage == "challenged":
             if was_pending:
                 if self._reply_is_question(user_input):
-                    log_question(self.session_id, "text", detail=user_input[:200])
-                    if o.is_swap:
-                        log_swap_questioned(self.session_id, "text", detail=user_input[:200])  # W9
+                    # §3.6 question (+ swap_questioned W9) already fired by _fire_turn.
                     yield from self._stream_concept_qa(); return
                 msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
                 self._emit(msg); yield msg; return
@@ -1193,11 +1180,7 @@ class ExplainableAgent(BlackBoxAgent):
         self._emit(msg); yield msg                                              # defensive
 
     def _render_question(self, o, user_input):
-        log_question(self.session_id, "text", detail=user_input[:200])
-        on_swap = (self.swap_presented and not self.concept_swap.is_detected
-                   and self._on_swap_now())
-        if getattr(o, "is_about_swap", False) or on_swap:
-            log_swap_questioned(self.session_id, "text", detail=user_input[:200])   # W9
+        # §3.6 question (+ swap_questioned W9) already fired by _fire_turn at the boundary.
         if self.walkthrough_done:
             yield from self._stream_freeform(cs_detected=False)
         else:
@@ -1226,11 +1209,11 @@ class ExplainableAgent(BlackBoxAgent):
         # (W5 convergence: the two-turn 'remove or explain?' clarify dialogue is retired).
         # W9: a doubt voiced on the swap concept still logs swap_questioned.
         if intent == "doubt":
-            log_question(self.session_id, "text", detail=(user_input or "")[:200])
+            ev.question(self._evctx(), _sink)   # doubt-as-question (FallbackOutcome has no map)
             on_swap = (self.swap_presented and not self.concept_swap.is_detected
                        and self._on_swap_now())
             if on_swap:
-                log_swap_questioned(self.session_id, "text", detail=(user_input or "")[:200])
+                ev.swap_questioned(self._evctx(), _sink)
             if self.walkthrough_done:
                 yield from self._stream_freeform(cs_detected=False)
             else:

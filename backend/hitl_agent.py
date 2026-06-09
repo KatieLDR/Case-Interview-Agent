@@ -11,9 +11,10 @@ from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
 from backend.logger import (
     create_session, log_user_message, log_agent_response,
-    log_interruption, log_memory_override, update_answer,
-    log_concept_added, stamp_started_at,log_question, log_add_pillar, log_add_sub_bullet, log_delete, log_swap_questioned,
+    log_interruption, update_answer, stamp_started_at,
 )
+from backend.logging import events as ev
+from backend.logging.sink import firestore_sink as _sink
 from backend import knowledge_base as kb           # JSON KB — static presentation + matching
 from backend.domain import matching, grounding      # Step 2: shared KB matchers + grounding
 from backend.interaction import intents              # Step 3: unified intent taxonomy (I-2)
@@ -454,7 +455,8 @@ class HITLAgent(BlackBoxAgent):
             logging.warning(f"[SUB-POINT FORMAT] error: {e} — keeping raw")
         return item.strip()
 
-    def _store_sub_point(self, pillar: str, item: str, modality: str = "text") -> tuple[str, bool]:
+    def _store_sub_point(self, pillar: str, item: str, modality: str = "text",
+                         source: str = "user_spontaneous") -> tuple[str, bool]:
         """
         Match item to a key question (cleaned, source-free) or keep raw; store under
         pillar in user_sub_points. Returns (stored_text, is_new) — is_new is False if
@@ -480,8 +482,12 @@ class HITLAgent(BlackBoxAgent):
             logging.info(f"[SUB-POINT] duplicate skipped: '{stored}' under '{pillar}'")
             return stored, False
         existing.append(stored)
-        log_concept_added(self.session_id, item)
-        log_add_sub_bullet(self.session_id, stored, modality)
+        # §3.6 add_sub_bullet via the ONE shared mapping. Only reached when genuinely new
+        # (duplicates returned above), so counted=True. source/modality carry HITL's
+        # elicitation + button affordance (I-4).
+        ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
+                               counted=True, text=stored, source=source),
+                  self._evctx(source=source, modality=modality), _sink)
         logging.info(f"[SUB-POINT] '{item}' → '{stored}' under '{pillar}'")
         return stored, True
 
@@ -625,7 +631,10 @@ class HITLAgent(BlackBoxAgent):
                     # Log once per concept. Change log: 2026-06-02
                     if target.lower() not in self.navigated_pillars:
                         self.navigated_pillars.add(target.lower())
-                        log_add_pillar(self.session_id, target, "text")
+                        ev.record(h.AddOutcome(action="added_new", pillar=target,
+                                               level="pillar", counted=True,
+                                               source="user_elicited"),
+                                  self._evctx(source="user_elicited", modality="text"), _sink)
                     logging.info(f"[PROACTIVE] navigate to '{target}' (was idx={idx})")
                     yield f"Sure — let's look at **{target}** now.\n\n"
                     yield from self._stream_concept(is_first=False)
@@ -682,11 +691,7 @@ class HITLAgent(BlackBoxAgent):
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"included: {wrong}",
-                    new_context=f"user rejected via text: {wrong}",
-                )
+                # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
                 if wrong not in self.excluded_concepts:
                     self.excluded_concepts.append(wrong)
                 self.walkthrough_index += 1
@@ -749,10 +754,10 @@ class HITLAgent(BlackBoxAgent):
             _on_swap = (swap_live and current is not None
                         and self._is_wrong_concept(current))
             # Parity with BlackBox/Explainable: a typed turn landing in Q&A IS a
-            # question — log it. swap_questioned is the on-swap subset (W9).
-            log_question(self.session_id, "text", detail=user_input[:200])
+            # question — §3.6 question, with swap_questioned the on-swap subset (W9).
+            ev.question(self._evctx(modality="text"), _sink)
             if _on_swap:
-                log_swap_questioned(self.session_id, "text", detail=user_input[:200])
+                ev.swap_questioned(self._evctx(modality="text"), _sink)
             yield from self._stream_concept_qa(just_added=just_added_concept)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -783,6 +788,12 @@ class HITLAgent(BlackBoxAgent):
         if withheld:
             target = withheld[0]
             why = grounding.ground_pillar(target["name"]).split("\n")[0].strip()
+            # §3.6 ask_agent_suggestion OFFER (accepted=False) — the agent NAMED a withheld
+            # area on user request. Suggesting is not adding (I-4); accepting it later is a
+            # separate ask_agent_suggestion(accepted=True), never an add_pillar.
+            ev.record(h.SuggestOutcome(level="pillar", suggested_item=target["name"],
+                                       accepted=False, revealed=False),
+                      self._evctx(modality="text"), _sink)
             msg = (f"One area we haven't covered yet is **{target['name']}**"
                    + (f" — {why}" if why else "")
                    + "\n\nIf it fits your case, you can add it with the **➕** button.")
@@ -848,8 +859,11 @@ class HITLAgent(BlackBoxAgent):
         if self.walkthrough_index <= self.swap_position:
             self.swap_position += 1
             logging.info(f"[USER CONCEPT] swap_position shifted to {self.swap_position}")
-        log_concept_added(self.session_id, concept)
-        log_add_pillar(self.session_id, concept, "text")
+        # User named their OWN area in response to the proactive prompt -> elicited add_pillar
+        # (a user contribution, NOT an agent suggestion; I-4).
+        ev.record(h.AddOutcome(action="added_new", pillar=concept, level="pillar",
+                               counted=True, source="user_elicited"),
+                  self._evctx(source="user_elicited", modality="text"), _sink)
         logging.info(f"[USER CONCEPT] inserted at index={self.walkthrough_index}: '{concept}'")
 
         # Present as the current concept; Include/Skip/Add buttons handle the rest.
@@ -867,7 +881,8 @@ class HITLAgent(BlackBoxAgent):
         Change log: 2026-05-29 — writes user_sub_points; dedupe-aware
         """
         pillar = self._normalize_pillar(matched_concept)
-        stored, is_new = self._store_sub_point(pillar, sub_point)
+        # Only caller is the proactive (awaiting_user_suggestion) path -> elicited (I-4).
+        stored, is_new = self._store_sub_point(pillar, sub_point, source="user_elicited")
         if is_new:
             yield f"Got it — adding that under **{pillar}**:\n- {stored}\n\n"
         else:
@@ -1245,9 +1260,11 @@ class HITLAgent(BlackBoxAgent):
 
     # ── shared-outcome renderer for the removal buttons + the typed-reason turn ──
     def _render_removal_outcome(self, o, pa):
-        """Render a RemovalOutcome from the shared machine and drive HITL navigation +
-        logging (D-H1: the stage DRIVES the firing). pa is the PendingAction snapshot
-        (resolve_pending may have cleared self.pending)."""
+        """Render a RemovalOutcome from the shared machine and drive HITL navigation.
+        Step 5: §3.6 events fire ONCE here via the shared record (the stage drives the
+        firing — F-R1: delete only at confirmed; swap = detection, never delete). pa is the
+        PendingAction snapshot (resolve_pending may have cleared self.pending)."""
+        ev.record(o, self._evctx(modality="button"), _sink)
         stage = o.stage
 
         if stage == "needs_justification":
@@ -1257,35 +1274,22 @@ class HITLAgent(BlackBoxAgent):
 
         if stage == "confirmed":
             if pa.is_swap:
-                # §0 — swap DETECTED on confirm (mark_swap_detected ran in _confirm_removal:
-                # force_detected + excluded from the walk). NEVER a delete. The
-                # memory_override marks the detection, parity with the old button flow.
-                log_memory_override(
-                    self.session_id,
-                    old_context=f"concept in framework: {pa.target}",
-                    new_context=f"user confirmed rejection via button: {pa.target}",
-                )
+                # §0 — swap DETECTED on confirm (swap_detected+swap_removed fired by record at
+                # top; mark_swap_detected ran in _confirm_removal). NEVER a delete.
                 logging.info(f"[SWAP] detected via Reject button — concept='{pa.target}'")
                 self.walkthrough_index += 1
                 yield f"Got it — removing **{pa.target}** from the framework.\n\n"
                 yield from self._after_removal_continue(pa.target, was_reject=True)
                 return
             if pa.type == "remove_sub_bullet":
-                # _confirm_removal recorded the exclusion in excluded_sub_bullets; mirror
-                # it into HITL's render sources (concept_blocks / user_sub_points) so the
-                # block re-renders without it, then log the delete at CONFIRM (F-R1).
+                # _confirm_removal recorded the exclusion; mirror it into HITL's render
+                # sources so the block re-renders without it. delete_sub_bullet fired by record.
                 self._apply_sub_bullet_removal(pa.pillar, pa.target)
-                log_delete(self.session_id, pa.target, "button")
                 logging.info(f"[REMOVE POINT CONFIRMED] '{pa.target}' from '{pa.pillar}'")
                 yield f"Done — removed that point from **{pa.pillar}**.\n\n"
                 return
             # whole pillar — _confirm_removal already excluded it; the cursor auto-skips.
-            log_memory_override(
-                self.session_id,
-                old_context=f"concept in framework: {pa.target}",
-                new_context=f"user confirmed rejection via button: {pa.target}",
-            )
-            log_delete(self.session_id, pa.target, "button")        # F-R1: at CONFIRM
+            # delete_pillar fired by record at top (F-R1: at CONFIRM).
             logging.info(f"[REJECT CONFIRMED] concept='{pa.target}'")
             self.walkthrough_index += 1
             yield f"Got it — removing **{pa.target}** from the framework.\n\n"

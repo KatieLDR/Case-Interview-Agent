@@ -7,10 +7,11 @@ from dotenv import load_dotenv
 from backend.logger import (
     create_session, end_session, stamp_started_at,
     log_user_message, log_agent_response,
-    log_interruption, log_memory_override,
+    log_interruption,
     update_answer, log_warmup_response,
-    log_concept_added, log_add_pillar, log_add_sub_bullet, log_delete, log_question, log_swap_questioned
 )
+from backend.logging import events as ev
+from backend.logging.sink import firestore_sink as _sink
 from backend.cases import get_case, get_clarification_facts
 from backend.concept_swap import ConceptSwap
 from backend import knowledge_base as kb
@@ -610,10 +611,7 @@ class BlackBoxAgent:
         if (self.pending is None and self.pending_suggestion is None
                 and self.concept_swap.is_injected and intent not in ("add", "remove")):
             if self.concept_swap.check_detection(user_input):
-                wrong = self.concept_swap.config["wrong_concept"]
-                log_memory_override(self.session_id,
-                    old_context=f"included: {wrong}",
-                    new_context=f"user rejected: {wrong}")   # detection channel, NO log_delete
+                # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
                 yield from self._yield_rerender("Understood — I've taken that out.\n\n")
                 return
 
@@ -948,6 +946,36 @@ class BlackBoxAgent:
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
 
+    # ── §3.6 event firing (Step 5) ──────────────────────────────────────────
+    # BlackBox never elicits contributions (no proactive suggestion gate), so its
+    # source is always user_spontaneous; modality is always text. agent_type is read
+    # from concept_swap so the inherited helper resolves correctly in EXP/HITL too.
+    def _evctx(self, *, source="user_spontaneous", modality="text"):
+        return ev.EventContext(self.session_id, source=source, modality=modality,
+                               agent_type=self.concept_swap.agent_type)
+
+    def _swap_question_signal(self, outcome, user_input: str) -> bool:
+        """BlackBox's W9 question-about-swap signal — the deferred F-S instrument,
+        preserved exactly (is_injected & not detected & LLM _classify_swap_question).
+        `outcome` is accepted so EXP/HITL can override using outcome.is_about_swap."""
+        return (self.concept_swap.is_injected and not self.concept_swap.is_detected
+                and self._classify_swap_question(user_input))
+
+    def _fire_turn(self, outcome, user_input, was_pending):
+        """The ONE firing call per turn (I-1). Computes the two turn-flow booleans BlackBox
+        owns and hands them to the shared record_turn; all event/field/counter logic lives
+        in backend.logging.events."""
+        kind = type(outcome).__name__
+        is_q = swap_q = False
+        if kind == "QuestionOutcome":
+            is_q = True
+            swap_q = self._swap_question_signal(outcome, user_input)
+        elif kind == "RemovalOutcome" and outcome.stage == "challenged" and was_pending:
+            is_q = self._reply_is_question(user_input)
+            swap_q = is_q and getattr(outcome, "is_swap", False)   # parked path used o.is_swap
+        ev.record_turn(outcome, self._evctx(), _sink,
+                       was_pending=was_pending, is_question=is_q, swap_question=swap_q)
+
     # ── outcome renderer ────────────────────────────────────────────────────
     def _render_outcome(self, outcome, user_input, *, was_pending=False, pa=None):
         # suggest_handler returns None when nothing is left to suggest.
@@ -955,16 +983,13 @@ class BlackBoxAgent:
             msg = ("You've surfaced the main areas I'd flag — feel free to add, "
                    "remove, or question any part of what's here.")
             self._emit(msg); yield msg; return
+        self._fire_turn(outcome, user_input, was_pending)   # §3.6 events (Step 5, I-1)
         if isinstance(outcome, handlers.AddOutcome):
             yield from self._render_add(outcome); return
         if isinstance(outcome, handlers.RemovalOutcome):
             yield from self._render_removal(outcome, user_input,
                                             was_pending=was_pending, pa=pa); return
         if isinstance(outcome, handlers.QuestionOutcome):
-            log_question(self.session_id, "text", detail=user_input[:200])
-            if (self.concept_swap.is_injected and not self.concept_swap.is_detected
-                    and self._classify_swap_question(user_input)):
-                log_swap_questioned(self.session_id, "text", detail=user_input[:200])   # W9
             yield from self._stream_qa(user_input); return
         if isinstance(outcome, handlers.SuggestOutcome):
             yield from self._render_suggest(outcome); return
@@ -985,8 +1010,6 @@ class BlackBoxAgent:
         if o.action == "revealed" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, o.pillar)
-                log_add_pillar(self.session_id, o.pillar, "text")
                 yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
@@ -994,8 +1017,6 @@ class BlackBoxAgent:
         if o.action == "added_new" and o.level == "sub_bullet":
             st = self._last_sub_add or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, st.get("raw", o.text or ""))
-                log_add_sub_bullet(self.session_id, st.get("stored", o.text or ""), "text")
                 yield from self._yield_rerender(f"Added under **{o.pillar}**.\n\n")
             else:
                 yield from self._yield_rerender(f"That's already under **{o.pillar}**.\n\n")
@@ -1003,8 +1024,6 @@ class BlackBoxAgent:
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                log_concept_added(self.session_id, o.pillar)
-                log_add_pillar(self.session_id, o.pillar, "text")
                 yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
@@ -1016,23 +1035,12 @@ class BlackBoxAgent:
         if stage == "confirmed":
             if o.is_swap:
                 wrong = pa.target if pa else o.target
-                log_memory_override(self.session_id,
-                    old_context=f"concept in framework: {wrong}",
-                    new_context=f"user confirmed removal: {wrong}")   # detection marker, NO log_delete
                 yield from self._yield_rerender(f"Done — I've removed **{wrong}**.\n\n")
                 return
             if pa and pa.type == "remove_sub_bullet":
-                log_delete(self.session_id, o.target, "text")                    # F-R1: at confirm
-                log_memory_override(self.session_id,
-                    old_context=f"sub-bullet in {pa.pillar}: {o.target}",
-                    new_context="user confirmed removal")
                 yield from self._yield_rerender(
                     f"Done — I've removed that point from **{pa.pillar}**.\n\n")
                 return
-            log_delete(self.session_id, o.target, "text")                        # F-R1: at confirm
-            log_memory_override(self.session_id,
-                old_context=f"concept in framework: {o.target}",
-                new_context=f"user confirmed removal: {o.target}")
             yield from self._yield_rerender(f"Done — I've removed **{o.target}**.\n\n")
             return
         if stage == "abandoned":
@@ -1059,9 +1067,7 @@ class BlackBoxAgent:
         if stage == "challenged":
             if was_pending:
                 if self._reply_is_question(user_input):
-                    log_question(self.session_id, "text", detail=user_input[:200])
-                    if o.is_swap:
-                        log_swap_questioned(self.session_id, "text", detail=user_input[:200])  # W9
+                    # §3.6 question (+ swap_questioned W9) already fired by _fire_turn.
                     yield from self._stream_confirm_qa(user_input, o.target); return
                 msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
                 self._emit(msg); yield msg; return

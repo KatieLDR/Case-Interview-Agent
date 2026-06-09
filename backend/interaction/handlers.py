@@ -70,6 +70,9 @@ class RemovalOutcome:
     stage: str
     target: str | None
     level: str                        # pillar | concept | none
+    pillar: str | None = None         # parent pillar of a sub_bullet target — Step 5 §3.6
+                                      # attribution for delete_sub_bullet (additive, behaviour-
+                                      # neutral; set by _confirm_removal from pa.pillar)
     needs_justification: bool = False     # HITL gate is open (reason still required)
     justification: str | None = None      # the reason that passed the gate (HITL)
     consequence_facts: list = field(default_factory=list)   # EXP counterfactual material
@@ -472,6 +475,7 @@ def _confirm_removal(session: HandlerSession, pa: PendingAction) -> RemovalOutco
         if pa.target.lower() not in [e.lower() for e in session.excluded_concepts]:
             session.excluded_concepts.append(pa.target)
     return RemovalOutcome(stage="confirmed", target=pa.target, level=pa.level,
+                          pillar=pa.pillar,
                           justification=pa.justification, post_delete_branch=True,
                           consequence_facts=pa.consequence_facts)
 
