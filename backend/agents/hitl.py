@@ -233,6 +233,7 @@ class HITLAgent(BaseAgent):
         # The shown pillars whose decision requires justification this session.
         # Populated in _build_walkthrough_concepts. Change log: 2026-05-29
         self.justification_pillars = set()
+        self._justified_concepts   = set()   # 6f D3: concepts justified (accept or reject)
 
         # ── Pending confirmation state ─────────────────────────────────────
         # Step 4d: the per-arm pending_excl / pending_sub_excl (a concept string /
@@ -337,8 +338,9 @@ class HITLAgent(BaseAgent):
         # this session. Arms from the first concept (no proactive-prompt dependency).
         # Swap + user-added concepts never require justification. Change log: 2026-05-29
         shown = [p["name"] for p in kb.get_shown_pillars()]
-        k = min(2, len(shown))
-        self.justification_pillars = set(random.sample(shown, k)) if shown else set()
+        self.justification_pillars = set(shown)   # 6f D2: every shown pillar requires a
+        #                                           reason (random 2-of-3 retired; swap excluded
+        #                                           by requires_justification/before_advance)
 
         logging.info(
             f"[WALKTHROUGH] built={base}, swap_position={position}, "
@@ -557,7 +559,7 @@ class HITLAgent(BaseAgent):
 
         # ── 1. Justification collection (min-substance gate) ───────────────
         if self.awaiting_justification:
-            if not self._is_substantive_justification(user_input):
+            if not h.is_meaningful_justification(user_input):   # 6f: shared effort gate
                 log_user_message(self.session_id, f"[JUSTIFICATION:retry] {user_input}")
                 yield "Could you say a bit more about your reasoning? A sentence is plenty.\n\n"
                 return  # stay in awaiting_justification
@@ -1222,10 +1224,11 @@ class HITLAgent(BaseAgent):
         if concept is None:
             return
         is_swap = self._is_wrong_concept(concept)
-        # D-H2 SCOPE preserved at baseline: HITL's random 2-of-3 shown pillars; the swap
-        # never requires justification (it is detection, not a graded removal). Scope
-        # reconciliation (all non-user-added incl. swap, + accept side) stays Step 6.
-        req = (concept in self.justification_pillars) and not is_swap
+        # 6f decision: every concept asks for a reason on skip, INCLUDING the swap, so the
+        # swap is not the lone concept skipped without justification (removes a UI tell;
+        # the reason also separates genuine detection from incidental skipping). The swap
+        # still resolves as DETECTION on confirm (is_swap), never a delete.
+        req = (concept in self.justification_pillars) or is_swap
         self.pending = h.PendingAction(
             type="remove_pillar", target=concept, level="pillar",
             is_swap=is_swap, requires_justification=req)
@@ -1439,14 +1442,29 @@ class HITLAgent(BaseAgent):
         if wrong not in self.excluded_concepts:
             self.excluded_concepts.append(wrong)
 
+    def before_advance(self, session) -> bool:
+        """6f: advance allowed unless the current concept still needs a reason. Every
+        shown pillar AND the swap gate on justification (uniform). _justified_concepts
+        records concepts justified on accept/reject. INERT until on_approve_concept
+        consults this in the accept-flow build (its swap gate is verified there)."""
+        cur = self._current_concept()
+        if cur is None:
+            return True
+        if self._is_wrong_concept(cur):
+            return cur in self._justified_concepts
+        if cur not in self.justification_pillars:
+            return True
+        return cur in self._justified_concepts
+
     def requires_justification(self, km) -> bool:
-        """D-H2 SCOPE (baseline-preserved): HITL's deterministic 2-of-3 of the SHOWN
-        pillars require a reason; the swap never does (detection, not a graded removal).
-        Scope reconciliation (all non-user-added incl. swap; the accept/advance side) is
-        the Step-6 work (line 118)."""
+        """6f: every shown pillar requires a reason (D2), and so does the swap — uniform
+        treatment so the swap is not singled out by the UI. The swap still resolves as
+        DETECTION on confirm, never a delete."""
         name = getattr(km, "pillar", None)
-        if not name or self._is_wrong_concept(name):
+        if not name:
             return False
+        if self._is_wrong_concept(name):
+            return True
         return name in self.justification_pillars
 
     # ── read queries ──

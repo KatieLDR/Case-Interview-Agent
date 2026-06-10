@@ -224,9 +224,15 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement presented_sub_bullets (BaseAgent seam)")
 
-    def requires_justification(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement requires_justification (BaseAgent seam)")
+    def before_advance(self, session) -> bool:
+        """Original §3.7 hook (6f). True = advance allowed. Default True — BB/EXP never
+        gate. HITL overrides to hold a shown concept until its decision is justified."""
+        return True
+
+    def requires_justification(self, km) -> bool:
+        """Reject-side justification gate (effort test = handlers.is_meaningful_justification).
+        Default False (BB/EXP); HITL overrides for its shown pillars (swap excluded)."""
+        return False
 
     def surface_pillar(self, *args, **kwargs):
         raise NotImplementedError(

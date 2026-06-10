@@ -970,8 +970,6 @@ class ExplainableAgent(BaseAgent):
         if wrong not in self.excluded_concepts:
             self.excluded_concepts.append(wrong)
 
-    def requires_justification(self, km) -> bool:
-        return False   # D-H2: Explainable has no justification gate (scope is HITL, Step 6).
 
     # ── outcome renderer ────────────────────────────────────────────────────
     def _swap_question_signal(self, outcome, user_input: str) -> bool:

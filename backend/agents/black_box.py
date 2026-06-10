@@ -531,8 +531,6 @@ class BlackBoxAgent(BaseAgent):
 
 
 
-    def requires_justification(self, km) -> bool:
-        return False   # D-H2: BlackBox has no justification gate (scope is HITL, Step 6).
 
     # ── gate-reply question check (W9 / _stream_confirm_qa render) ──────────
 
