@@ -1423,21 +1423,13 @@ class HITLAgent(BaseAgent):
     # ══════════════════════════════════════════════════════════════════════
 
     # ── swap channel (PRESERVED per-arm, §0 #4) ──
-    def swap_name(self):
-        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
-            return self.concept_swap.config["wrong_concept"]
-        return None
 
-    def is_swap_target(self, km, user_text: str) -> bool:
-        if not self.swap_name():
-            return False
-        if self.concept_swap.matches(user_text):
-            return True
-        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
-            if cand and self.concept_swap.matches(cand):
-                return True
+
+    def _extra_swap_signal(self, km, user_text: str) -> bool:
+        """6e: walkthrough arms also fire when the CURRENT concept is the swap."""
         cur = self.current_pillar()
         return bool(cur and self._is_wrong_concept(cur))
+
 
     def mark_swap_detected(self) -> None:
         """Swap DETECTED on confirm — force_detected + ensure it is excluded from the

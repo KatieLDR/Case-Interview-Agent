@@ -950,29 +950,17 @@ class ExplainableAgent(BaseAgent):
         self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
 
     # ── swap channel (PRESERVED per-arm, §0 #4) ─────────────────────────────
-    def swap_name(self):
-        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
-            return self.concept_swap.config["wrong_concept"]
-        return None
 
     def _on_swap_now(self) -> bool:
         cur = self.current_pillar()
         return cur is not None and self._is_wrong_concept(cur)
 
-    def is_swap_target(self, km, user_text: str) -> bool:
-        """Does this turn target the swap concept? Deterministic match (concept_swap.matches)
-        on the user text, the resolved KB text/pillar, or the current concept being the swap."""
-        if not self.swap_name():
-            return False
-        if self.concept_swap.matches(user_text):
-            return True
-        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
-            if cand and self.concept_swap.matches(cand):
-                return True
+
+    def _extra_swap_signal(self, km, user_text: str) -> bool:
+        """6e: walkthrough arms also fire when the CURRENT concept is the swap."""
         cur = self.current_pillar()
-        if cur and self._is_wrong_concept(cur):
-            return True
-        return False
+        return bool(cur and self._is_wrong_concept(cur))
+
 
     def mark_swap_detected(self) -> None:
         """Swap DETECTED on confirm — force_detected + exclude it from the walk so the

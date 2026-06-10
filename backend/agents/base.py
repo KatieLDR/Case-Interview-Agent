@@ -191,13 +191,30 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement get_summary (BaseAgent seam)")
 
-    def is_swap_target(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement is_swap_target (BaseAgent seam)")
+    def is_swap_target(self, km, user_text: str) -> bool:
+        """Step 6e: shared swap-target skeleton (was triplicated). The persona
+        'current concept IS the swap' signal is the _extra_swap_signal hook (default
+        False; walkthrough arms override). Behavior-preserving move."""
+        if not self.swap_name():
+            return False
+        if self.concept_swap.matches(user_text):
+            return True
+        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
+            if cand and self.concept_swap.matches(cand):
+                return True
+        if self._extra_swap_signal(km, user_text):
+            return True
+        return False
 
-    def mark_swap_detected(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement mark_swap_detected (BaseAgent seam)")
+    def _extra_swap_signal(self, km, user_text: str) -> bool:
+        """Proposed 6e hook (name not in original): a persona swap signal beyond the
+        shared text/term match. Default off; EXP/HITL override (current == swap)."""
+        return False
+
+    def mark_swap_detected(self) -> None:
+        """Step 6e: shared base — swap DETECTED on confirm, never a delete (§0).
+        Walkthrough arms override to also exclude it from the cursor."""
+        self.concept_swap.force_detected()
 
     def presented_pillars(self, *args, **kwargs):
         raise NotImplementedError(
@@ -219,9 +236,10 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement surfaced_pillar_names (BaseAgent seam)")
 
-    def swap_name(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement swap_name (BaseAgent seam)")
+    def swap_name(self):
+        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
+            return self.concept_swap.config["wrong_concept"]
+        return None
 
     # ââ CONCRETE shared engine (+ 3 concrete-default seams) ââ
     def _fetch_kg_context(self, case_type: str) -> dict:

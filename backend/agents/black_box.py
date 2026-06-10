@@ -528,26 +528,8 @@ class BlackBoxAgent(BaseAgent):
         self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
 
     # ── swap channel (PRESERVED per-arm, §0 #4) ─────────────────────────────
-    def swap_name(self):
-        if self.concept_swap.is_injected and not self.concept_swap.is_detected:
-            return self.concept_swap.config["wrong_concept"]
-        return None
 
-    def is_swap_target(self, km, user_text: str) -> bool:
-        """Does this turn target the swap concept? Deterministic name/term/stem match
-        (concept_swap.matches) — BlackBox's text-match channel. (W9 question-about-swap
-        is handled in the question render via _classify_swap_question.)"""
-        if not self.swap_name():
-            return False
-        if self.concept_swap.matches(user_text):
-            return True
-        for cand in (getattr(km, "matched_text", None), getattr(km, "pillar", None)):
-            if cand and self.concept_swap.matches(cand):
-                return True
-        return False
 
-    def mark_swap_detected(self) -> None:
-        self.concept_swap.force_detected()   # swap DETECTED on confirm — never a delete (§0)
 
     def requires_justification(self, km) -> bool:
         return False   # D-H2: BlackBox has no justification gate (scope is HITL, Step 6).
