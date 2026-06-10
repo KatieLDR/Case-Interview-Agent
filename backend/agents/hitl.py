@@ -190,13 +190,11 @@ class HITLAgent(BaseAgent):
 
     def __init__(self, user_id: str = "anonymous"):
         self.user_id       = user_id
+        self._init_flow_state()
         self.session_id    = create_session(user_id, agent_type="hitl")
         self.original_case = get_case("hitl")
-        self._pending      = False
-        self.turn_count    = 0
 
         # ── Phase sequence: warmup → clarification → main ──────────────────
-        self.phase               = "warmup"
         self.clarification_facts = get_clarification_facts("hitl")
 
         # ── Concept Swap ───────────────────────────────────────────────────
@@ -218,7 +216,6 @@ class HITLAgent(BaseAgent):
         self.walkthrough_index    = 0
         self.walkthrough_active   = False
         self.walkthrough_done     = False
-        self.excluded_concepts    = []
         self.approved_concepts    = []
         self.swap_presented       = False
         self.swap_position        = 0
@@ -231,7 +228,6 @@ class HITLAgent(BaseAgent):
         # ── User-added sub-points — concept_name → [point, ...] ────────────
         # Source-free (HITL suppresses sources). Rendered inline + in summary.
         # Change log: 2026-05-29
-        self.user_sub_points = {}
 
         # ── Deterministic 2-of-3 justification ─────────────────────────────
         # The shown pillars whose decision requires justification this session.
@@ -244,13 +240,6 @@ class HITLAgent(BaseAgent):
         # removal buttons park and interaction/handlers.resolve_pending resolves.
         # The shared confirmation machine fires the delete ONLY at stage="confirmed"
         # (F-R1), so on_reject_concept no longer logs a delete at intent (F-R4).
-        self.pending            = None   # h.PendingAction parked by the removal buttons
-        self.pending_suggestion = None   # HandlerSession surface (D-H3 conformance)
-        self.last_discussed     = None   # Fork-A focus (unused on HITL's button path)
-        self.shown_bullets      = []     # positional-removal context (unused: HITL is button-driven)
-        self.excluded_sub_bullets = {}   # {pillar -> [excluded bullet texts]} (shared record)
-        self._last_surface      = None   # stash: surface_pillar result (D-H3 conformance)
-        self._last_sub_add      = None   # stash: add_sub_point result (D-H3 conformance)
 
         # ── Interaction-mode flags ─────────────────────────────────────────
         self.awaiting_user_suggestion  = False

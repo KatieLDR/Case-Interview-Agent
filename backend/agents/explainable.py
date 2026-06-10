@@ -505,13 +505,11 @@ class ExplainableAgent(BaseAgent):
 
     def __init__(self, user_id: str = "anonymous"):
         self.user_id       = user_id
+        self._init_flow_state()
         self.session_id    = create_session(user_id, agent_type="explainable")
         self.original_case = get_case("explainable")
-        self._pending      = False
-        self.turn_count    = 0
         self.has_main_contribution = False   # gates End Session button (app.py reads this)
 
-        self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("explainable")
 
         self.concept_swap = ConceptSwap(
@@ -529,7 +527,6 @@ class ExplainableAgent(BaseAgent):
         self.walkthrough_index    = 0
         self.walkthrough_active   = False
         self.walkthrough_done     = False
-        self.excluded_concepts    = []
         self.swap_presented       = False
         self.swap_position        = 0
 
@@ -537,21 +534,13 @@ class ExplainableAgent(BaseAgent):
         #    pending_add / pending_clarify / pending_sub_excl). interaction/handlers.py
         #    owns add/remove/suggest/question + the two-turn removal loop now. The
         #    walkthrough cursor stays EXP persona state, driven by the renderers. ──
-        self.pending = None             # PendingAction parked by removal_handler
-        self.pending_suggestion = None  # {level,item,origin} — D7 suggest / B6 remove-offer
-        self.last_discussed = None      # Fork-A focus (current pillar/concept)
-        self.shown_bullets = []         # positional-removal context
-        self._last_surface = None       # stash: surface_pillar result (render reads is_new)
-        self._last_sub_add = None       # stash: add_sub_point result (render reads stored/is_new)
 
         # ── User sub-points — populated by duplicate guard path ───────────
         # Change log: 2026-05-12
-        self.user_sub_points = {}
 
         # ── Removed sub-bullets — pillar name → list of removed bullet texts.
         # Render + summary omit any bullet whose normalised text is in here.
         # Change log: 2026-06-04
-        self.excluded_sub_bullets = {}
 
         # ── User-added pillars — explicit tracking for summary ─────────────
         # Change log: 2026-05-28 — separate from walkthrough_concepts so summary

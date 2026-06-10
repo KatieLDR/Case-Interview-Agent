@@ -194,27 +194,16 @@ Output ONLY the reformatted phrase, nothing else.
 class BlackBoxAgent(BaseAgent):
     def __init__(self, user_id: str = "anonymous"):
         self.user_id       = user_id
+        self._init_flow_state()
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
-        self._pending      = False
-        self.turn_count    = 0
         self.has_main_contribution = False   # gates End Session button (app.py reads this)
         # ── Deterministic framework state — Change log: 2026-06-01 ─────────
-        self.user_sub_points    = {}    # pillar name -> [sub-bullet, ...]
         self.user_added_pillars = []    # user-added pillar names (order preserved)
-        self.excluded_concepts  = []    # confirmed-removed pillar names
-        self.excluded_sub_bullets = {}  # pillar name -> [removed bullet texts]
         # ── Step 4b: shared HandlerSession flow state (replaces pending_excl /
         #    pending_sub_excl / awaiting_removal_target). interaction/handlers.py
         #    owns the two-turn removal loop (PendingAction) now. ─────────────
-        self.pending = None             # PendingAction parked by removal_handler
-        self.pending_suggestion = None  # {level,item,origin} — D7 suggest / B6 remove-offer
-        self.last_discussed = None      # Fork-A focus; BlackBox full-render -> stays None
-        self.shown_bullets = []         # positional-removal context (unused in BB full-render)
-        self._last_surface = None       # stash: surface_pillar result (render reads is_new)
-        self._last_sub_add = None       # stash: add_sub_point result (render reads stored/is_new)
         self._ack_index         = 0     # rotates the no-reprint acknowledgements
-        self.phase = "warmup"
         self.clarification_facts = get_clarification_facts("black_box")
 
         self.concept_swap = ConceptSwap(

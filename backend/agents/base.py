@@ -149,6 +149,24 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement add_sub_point (BaseAgent seam)")
 
+    def _init_flow_state(self):
+        """Step 6d: the cross-arm-IDENTICAL flow/handler state — one canonical home.
+        Lifecycle (session/case/swap/kg/history) and persona extras stay per-arm; they
+        diverge by agent_type/persona. These 12 init to the same value in every arm."""
+        self._pending           = False
+        self.turn_count         = 0
+        self.phase              = "warmup"
+        self.pending            = None   # PendingAction parked by removal_handler
+        self.pending_suggestion = None   # {level,item,origin} — D7 suggest / B6 remove-offer
+        self.last_discussed     = None   # Fork-A focus
+        self.shown_bullets      = []     # positional-removal context
+        self._last_surface      = None   # stash: surface_pillar result
+        self._last_sub_add      = None   # stash: add_sub_point result
+        self.user_sub_points    = {}
+        self.excluded_concepts  = []
+        self.excluded_sub_bullets = {}
+
+
     def begin_analysis(self, *args, **kwargs):
         raise NotImplementedError(
             f"{type(self).__name__} must implement begin_analysis (BaseAgent seam)")
