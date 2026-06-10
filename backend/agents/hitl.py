@@ -438,20 +438,7 @@ class HITLAgent(BaseAgent):
             logging.warning(f"[DUPLICATE] check failed: {e} — defaulting to not duplicate")
             return {"is_duplicate": False, "matched_concept": None}
 
-    def _match_pillar(self, item: str) -> str | None:
-        """→ shared domain matcher (Step 2). Returns the matched AREA name (any pillar,
-        shown or withheld) or None — contract unchanged. Resolution is now identical
-        across all three arms: see the module-top note for the deliberate convergence
-        (description-enriched + area-vs-point guard) this adopts for HITL."""
-        name, _score = matching.match_pillar(item)
-        return name
-
-    def _match_key_question(self, item: str, pillar_name: str) -> str | None:
-        """→ shared domain matcher (Step 2). Returns the matched key-question text with
-        inline [a] refs STRIPPED (HITL suppresses sources), or None — contract unchanged.
-        The shared matcher already strips refs, so this is a direct passthrough."""
-        text, _score = matching.match_key_question(item, pillar_name)
-        return text
+    # _match_* wrappers collapsed (Step 6c): call domain.matching.* directly (I-3).
 
     def _format_sub_bullet(self, item: str) -> str:
         """
@@ -482,7 +469,7 @@ class HITLAgent(BaseAgent):
         key question), so callers can avoid duplicates. Change log: 2026-05-29
         """
         pillar  = self._normalize_pillar(pillar)
-        matched = self._match_key_question(item, pillar)
+        matched, _ = matching.match_key_question(item, pillar)
         # Matched → canonical key-question wording (source-free). No match →
         # reformat the user's words into framework-bullet style (no new content).
         stored  = matched if matched else self._format_sub_bullet(item)
@@ -634,7 +621,7 @@ class HITLAgent(BaseAgent):
                 target           = dup["matched_concept"]
                 matched_withheld = None
             else:
-                matched_withheld = self._match_pillar(concept)
+                matched_withheld, _ = matching.match_pillar(concept)
                 target           = matched_withheld or concept
 
             idx = self._locate_concept(target)

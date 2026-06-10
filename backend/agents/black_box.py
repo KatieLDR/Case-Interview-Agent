@@ -405,7 +405,7 @@ class BlackBoxAgent(BaseAgent):
 
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
         pillar  = self._normalize_pillar(pillar)
-        matched = self._match_key_question(item, pillar)
+        matched, _ = matching.match_key_question(item, pillar)
         stored  = matched if matched else self._format_sub_bullet(item)
         # Already a shown static bullet on this pillar (incl. KB-backed user pillars)
         # → already in the framework, don't duplicate. Change log: 2026-06-02
@@ -438,27 +438,7 @@ class BlackBoxAgent(BaseAgent):
                 return p
         return name
 
-    def _match_pillar(self, item: str):
-        """Stage-1 matcher → shared domain matcher (Step 2). Returns the matched AREA
-        name or None (contract unchanged)."""
-        name, _score = matching.match_pillar(item)
-        return name
-
-    def _match_concept(self, item: str):
-        """Stage-2 matcher → shared domain matcher (Step 2). Returns the matched concept's
-        PARENT pillar name (contract unchanged; concept_id is exposed by locate() and
-        adopted by the Step-4 handlers — see F-M1)."""
-        concept, _score = matching.match_concept(item)
-        if not concept:
-            return None
-        pillar = kb.get_pillar_by_id(concept["pillar_id"])
-        return pillar["name"] if pillar else None
-
-    def _match_key_question(self, item: str, pillar_name: str):
-        """→ shared domain matcher (Step 2). Returns the matched key-question text
-        (source refs stripped) or None (contract unchanged)."""
-        text, _score = matching.match_key_question(item, pillar_name)
-        return text
+    # _match_* wrappers collapsed (Step 6c): call domain.matching.* directly (I-3).
 
     def _format_sub_bullet(self, item: str) -> str:
         try:

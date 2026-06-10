@@ -46,7 +46,7 @@ from backend.llm import (
 from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
 from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
 from backend.interaction import handlers  # Step 4: shared handlers + PendingAction (I-1)
-from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
+from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
 
 # ââ Shared module-level prompts/constants (moved from black_box_agent.py, Step 6a) ââ
 CLARIFICATION_SYSTEM_PROMPT = """
@@ -66,7 +66,7 @@ candidate's questions based strictly on that sheet.
 - Never reveal the framework or hint at the structure the candidate should use
 - Never evaluate or coach the candidate during this phase
 - Do not ask questions back to the candidate
-"""
+"""
 
 ANSWER_CLASSIFIER_PROMPT = """
 You are a classifier for a case interview tool.
@@ -78,7 +78,7 @@ Short replies, clarifications, questions, or discussion do NOT qualify.
 
 Respond ONLY with valid JSON, no explanation, no markdown:
 {"is_answer": true or false, "confidence": float between 0.0 and 1.0}
-"""
+"""
 
 WARMUP_PROMPT = (
     "✏️ **Here is the practice task exercise:**\n\n"
@@ -94,7 +94,7 @@ WARMUP_PROMPT = (
     "- Should we register at the new city hall?\n"
     "- Do we need a local bank account?\n\n"
     "*What else would you add, or is there anything you'd remove or change?*"
-)
+)
 
 WARMUP_MERGE_PROMPT = """You are helping a user build a moving-to-a-new-city plan.
 
@@ -117,9 +117,9 @@ Your task: produce an updated plan that incorporates the user's ideas.
 - If the user adds a new section (e.g. "Location"), generate 2 relevant sub-bullet questions for it
 - If the user's intent is ambiguous, make a reasonable interpretation and proceed
 - Keep it concise — bullet points only, no extra explanation
-- Do NOT add any intro or closing sentence — return the plan only"""
+- Do NOT add any intro or closing sentence — return the plan only"""
 
-MAX_TURNS_PER_SESSION = 50
+MAX_TURNS_PER_SESSION = 50
 
 
 class BaseAgent:
@@ -142,13 +142,8 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement _format_sub_bullet (BaseAgent seam)")
 
-    def _match_key_question(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _match_key_question (BaseAgent seam)")
-
-    def _match_pillar(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _match_pillar (BaseAgent seam)")
+    # _match_pillar / _match_key_question stubs removed (Step 6c): matching is
+    # shared (domain.matching, I-3); arms no longer implement matcher seams.
 
     def add_sub_point(self, *args, **kwargs):
         raise NotImplementedError(
@@ -219,7 +214,7 @@ class BaseAgent:
         from backend.knowledge import knowledge_base as kb
         framework = kb.get_framework_name()
         concepts  = [p["name"] for p in kb.get_shown_pillars()]
-        return {"case_type": case_type, "framework": framework, "concepts": concepts}
+        return {"case_type": case_type, "framework": framework, "concepts": concepts}
 
     def _build_clarification_system_prompt(self) -> str:
         if self.clarification_facts:
@@ -240,7 +235,7 @@ class BaseAgent:
                 f"\"I'm afraid I don't have that information for this case.\"\n"
                 f"──────────────────────────────────────────────────────────────────────\n\n"
             )
-        return facts_block + CLARIFICATION_SYSTEM_PROMPT
+        return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_tree_overview(self) -> str:
         from backend.knowledge import knowledge_base as kb
@@ -248,13 +243,13 @@ class BaseAgent:
         lines = ["**Framework Overview**\n"]
         for pillar in shown:
             lines.append(f"- {pillar['name']}")
-        return "\n".join(lines)
+        return "\n".join(lines)
 
     def show_tree(self) -> str:
-        return self._build_tree_overview()
+        return self._build_tree_overview()
 
     def get_warmup_message(self) -> str:
-        return WARMUP_PROMPT
+        return WARMUP_PROMPT
 
     def merge_warmup_additions(self, additions: list[str]) -> str:
         """
@@ -291,7 +286,7 @@ class BaseAgent:
                 "- Do we need a local bank account?\n\n"
                 "**Your additions:**\n"
                 + additions_block
-            )
+            )
 
     def _start_main_phase_setup(self):
         if self.phase == "main":
@@ -321,7 +316,7 @@ class BaseAgent:
             )
         )
 
-        print(f"[PHASE] clarification → main for session={self.session_id}")
+        print(f"[PHASE] clarification → main for session={self.session_id}")
 
     def stream_message(self, user_input: str):
         if self._pending:
@@ -333,7 +328,7 @@ class BaseAgent:
             self.turn_count += 1
             if self.turn_count > MAX_TURNS_PER_SESSION:
                 return
-            yield from self._stream_main(user_input)
+            yield from self._stream_main(user_input)
 
     def _stream_clarification(self, user_input: str):
         log_user_message(self.session_id, f"[CLARIFICATION] {user_input}")
@@ -364,7 +359,7 @@ class BaseAgent:
         except Exception as e:
             yield f"Sorry, I encountered an error: {str(e)}"
         finally:
-            self._pending = False
+            self._pending = False
 
     def _stream_framework_presentation(self):
         """Static first render of the full framework — no LLM. Change log: 2026-06-01"""
@@ -376,14 +371,14 @@ class BaseAgent:
         self.concept_swap.log_presented()
         update_answer(self.session_id, reply)
         log_agent_response(self.session_id, reply)
-        yield reply
+        yield reply
 
     def _last_agent_text(self) -> str:
         """Last model message (router context). BlackBox has no walkthrough cursor."""
         for c in reversed(self.history):
             if c.role == "model" and c.parts:
                 return (c.parts[0].text or "")[:500]
-        return ""
+        return ""
 
     def _render_full_framework(self, is_first: bool = False, closing: bool = True) -> str:
         from backend.knowledge import knowledge_base as kb
@@ -429,18 +424,18 @@ class BaseAgent:
 
         if closing:
             lines.append("*Feel free to add, remove, or question any part of this — let's build this together.*")
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines).rstrip() + "\n"
 
     def _yield_rerender(self, preamble: str = ""):
         reply = preamble + self._render_full_framework(is_first=False)
         self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         update_answer(self.session_id, reply)
         log_agent_response(self.session_id, reply)
-        yield reply
+        yield reply
 
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
         """→ shared pure predicate (Step 2); session excluded-map passed by value."""
-        return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
+        return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
 
     def _stream_qa(self, user_input: str):
         framework    = self.kg_context["framework"]
@@ -460,7 +455,7 @@ class BaseAgent:
             "Ask at most one short follow-up question.\n"
             "──────────────────────────────────────────────────────────────────────\n"
         )
-        yield from self._stream_with_instruction(instruction=instruction)
+        yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_confirm_qa(self, user_input: str, concept: str):
         """Answer a question raised AT the removal-confirmation prompt, then re-offer the
@@ -487,7 +482,7 @@ class BaseAgent:
             f"Still want to remove **{concept}**? Reply **yes** to remove it, or **no** to keep it.\n"
             "──────────────────────────────────────────────────────────────────────\n"
         )
-        yield from self._stream_with_instruction(instruction=instruction)
+        yield from self._stream_with_instruction(instruction=instruction)
 
     def _ack_no_reprint(self):
         acks = ["Sure — I'm here if you'd like to revisit anything.",
@@ -497,7 +492,7 @@ class BaseAgent:
         self._ack_index += 1
         self.history.append(types.Content(role="model", parts=[types.Part(text=ack)]))
         log_agent_response(self.session_id, ack)
-        yield ack
+        yield ack
 
     def _reply_is_question(self, text: str) -> bool:
         """At a removal-confirm gate, an 'other' reply may be a question. Baseline got
@@ -514,23 +509,23 @@ class BaseAgent:
             return bool(classify_json(prompt).get("is_question", False))
         except Exception as e:
             print(f"[GATE QUESTION] error: {e}")
-            return False
+            return False
 
     def _emit(self, msg: str):
         """Append a plain (non-rerender) agent message + log it."""
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
-        log_agent_response(self.session_id, msg)
+        log_agent_response(self.session_id, msg)
 
     def _evctx(self, *, source="user_spontaneous", modality="text"):
         return ev.EventContext(self.session_id, source=source, modality=modality,
-                               agent_type=self.concept_swap.agent_type)
+                               agent_type=self.concept_swap.agent_type)
 
     def _swap_question_signal(self, outcome, user_input: str) -> bool:
         """BlackBox's W9 question-about-swap signal — the deferred F-S instrument,
         preserved exactly (is_injected & not detected & LLM _classify_swap_question).
         `outcome` is accepted so EXP/HITL can override using outcome.is_about_swap."""
         return (self.concept_swap.is_injected and not self.concept_swap.is_detected
-                and self._classify_swap_question(user_input))
+                and self._classify_swap_question(user_input))
 
     def _fire_turn(self, outcome, user_input, was_pending):
         """The ONE firing call per turn (I-1). Computes the two turn-flow booleans BlackBox
@@ -545,7 +540,7 @@ class BaseAgent:
             is_q = self._reply_is_question(user_input)
             swap_q = is_q and getattr(outcome, "is_swap", False)   # parked path used o.is_swap
         ev.record_turn(outcome, self._evctx(), _sink,
-                       was_pending=was_pending, is_question=is_q, swap_question=swap_q)
+                       was_pending=was_pending, is_question=is_q, swap_question=swap_q)
 
     def send_message(self, user_input: str) -> str:
         log_user_message(self.session_id, user_input)
@@ -580,7 +575,7 @@ class BaseAgent:
         except Exception as e:
             reply = f"Sorry, I encountered an error: {str(e)}"
         log_agent_response(self.session_id, reply)
-        return reply
+        return reply
 
     def _is_answer(self, text: str) -> bool:
         try:
@@ -596,7 +591,7 @@ class BaseAgent:
             return result
         except Exception as e:
             print(f"[ANSWER] error: {e}")
-            return False
+            return False
 
     def _classify_swap_question(self, user_input: str) -> bool:
         """Swap-question check (W9): is this question specifically ABOUT the swap
@@ -618,7 +613,7 @@ class BaseAgent:
             return bool(classify_json(prompt).get("is_about_swap", False))
         except Exception as e:
             print(f"[SWAP-Q] classifier error: {e}")
-            return False
+            return False
 
     def _check_duplicate(self, concept: str, existing_concepts: list) -> dict:
         """
@@ -652,7 +647,7 @@ class BaseAgent:
             return parsed
         except Exception as e:
             print(f"[DUPLICATE] fuzzy check failed: {e} — defaulting to duplicate (safe)")
-            return {"is_duplicate": True, "matched_concept": None}
+            return {"is_duplicate": True, "matched_concept": None}
 
     def _strip_concept_swap_from_history(self) -> list:
         note_marker = "---\n💡"
@@ -673,7 +668,7 @@ class BaseAgent:
             cleaned.append(msg)
 
         print(f"[STRIP] concept swap removed from history ({len(cleaned)} messages)")
-        return cleaned
+        return cleaned
 
     def _summarize_history(self) -> str:
         lines = []
@@ -681,7 +676,7 @@ class BaseAgent:
             role = msg.role.upper()
             text = msg.parts[0].text if msg.parts else ""
             lines.append(f"[{role}]: {text[:100]}")
-        return "\n".join(lines)
+        return "\n".join(lines)
 
     def _stream_with_instruction(
         self,
@@ -735,10 +730,10 @@ class BaseAgent:
         except Exception as e:
             yield f"Sorry, I encountered an error: {str(e)}"
         finally:
-            self._pending = False
+            self._pending = False
 
     @staticmethod
     def _strip_fences(text: str) -> str:
         # Single definition lives in backend.llm; thin wrapper kept so inherited
         # self._strip_fences call sites (explainable/hitl) still resolve. (§S Step 1)
-        return strip_fences(text)
+        return strip_fences(text)

@@ -399,7 +399,7 @@ Respond ONLY with valid JSON, no explanation, no markdown:
 # ADD_MATCH_PROMPT / ADD_PILLAR_MATCH_PROMPT / ADD_CONCEPT_MATCH_PROMPT and the
 # ADD_MATCH_THRESHOLD / CONCEPT_MATCH_THRESHOLD thresholds are now single-sourced:
 # the prompts live in backend.domain.matching, the thresholds in backend.llm.
-# _match_pillar / _match_concept / _match_key_question below delegate to
+# _match_key_question below delegates to
 # matching.*; ADD_PILLAR_MATCH_PROMPT + ADD_MATCH_THRESHOLD are imported at the
 # top of this module solely so the Explainable-only _match_withheld_pillar (a
 # withheld-candidate variant, not one of the shared matchers) keeps the canonical
@@ -675,25 +675,9 @@ class ExplainableAgent(BaseAgent):
         )
         return {"question": raw, "sources": pillar.get("key_questions_sources", "")}
 
-    def _match_pillar(self, item: str) -> str | None:
-        """→ shared domain matcher (Step 2). Returns the matched AREA name or None
-        (contract unchanged). Identical resolution across all three arms by construction."""
-        name, _score = matching.match_pillar(item)
-        return name
-
-    def _match_concept(self, item: str) -> str | None:
-        """Whole-KB concept search → shared domain matcher (Step 2). Returns the matched
-        concept's PARENT pillar name or None (contract unchanged; lets a sub-concept of a
-        withheld pillar resolve to its parent — concept_id is exposed by locate() and
-        consumed by the Step-4 handlers, F-M1)."""
-        concept, _score = matching.match_concept(item)
-        if not concept:
-            return None
-        from backend.knowledge import knowledge_base as kb
-        pillar = kb.get_pillar_by_id(concept["pillar_id"])
-        return pillar["name"] if pillar else None
-
-    # ── Sub-bullet removal helpers — Change log: 2026-06-04 ─────────────────
+    # _match_pillar / _match_concept collapsed (Step 6c, I-3). _match_key_question
+    # is kept above: EXP citation recovery (persona); its decision still delegates
+    # to matching.match_key_question.
 
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
         """→ shared domain predicate (Step 2; excluded-map passed by value). The local
