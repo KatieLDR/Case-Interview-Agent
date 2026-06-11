@@ -513,7 +513,7 @@ class HITLAgent(BaseAgent):
                                                 justification=user_input)
             else:
                 outcome = h.resolve_pending(self, user_input)      # free-text yes/no
-            yield from self._render_removal_outcome(outcome, pa)
+            yield from self.render_removal(outcome, pa=pa)
             return
 
         # ── 0a. ➕ Add mode — collect sub-points, re-render, stay open ──────
@@ -1220,7 +1220,7 @@ class HITLAgent(BaseAgent):
         if pa is None:
             return
         outcome = h.resolve_pending(self, "", decision="confirm")
-        yield from self._render_removal_outcome(outcome, pa)
+        yield from self.render_removal(outcome, pa=pa)
 
     def on_cancel_reject(self):
         """❌ cancel button (D-Q1): abandon the parked removal -> keep the concept. NO
@@ -1231,10 +1231,10 @@ class HITLAgent(BaseAgent):
         if pa is None:
             return
         outcome = h.resolve_pending(self, "", decision="decline")
-        yield from self._render_removal_outcome(outcome, pa)
+        yield from self.render_removal(outcome, pa=pa)
 
     # ── shared-outcome renderer for the removal buttons + the typed-reason turn ──
-    def _render_removal_outcome(self, o, pa):
+    def render_removal(self, o, user_input=None, *, was_pending=False, pa=None):
         """Render a RemovalOutcome from the shared machine and drive HITL navigation.
         Step 5: §3.6 events fire ONCE here via the shared record (the stage drives the
         firing — F-R1: delete only at confirmed; swap = detection, never delete). pa is the
@@ -1320,6 +1320,50 @@ class HITLAgent(BaseAgent):
         pts = self.user_sub_points.get(concept, [])
         self.user_sub_points[concept] = [p for p in pts if p.strip().lower() != target]
 
+    # ══════════════════════════════════════════════════════════════════════
+    # 6h-3 — public render seams (BaseAgent contract, §3.7).
+    # HITL is the button arm: it renders via its button/stream flow and does NOT
+    # use the shared `_render_outcome` router. render_removal (above) is the one
+    # real outcome-renderer. render_summary/render_framework are contract-symmetry
+    # delegators. render_add/question/next_steps/fallback are loud-guard contract
+    # seams (decision (i)): present so load-time enforcement holds and no silent
+    # 4th behavior can appear; if ever reached off-path they fail loudly.
+    # ══════════════════════════════════════════════════════════════════════
+    def render_summary(self):
+        # contract seam — HITL's terminal I-6 summary (shared 6g walked-subset).
+        yield from self._stream_summary()
+
+    def render_framework(self, preamble=""):
+        # contract seam (7-seam symmetry; not invoked by the base router for the
+        # button arm). Faithful 'show current state': current concept, else summary.
+        if preamble:
+            yield preamble
+        if self._current_concept() is None:
+            yield from self._stream_summary()
+        else:
+            yield from self._stream_concept(is_first=False)
+
+    def render_add(self, *args, **kwargs):
+        raise NotImplementedError(
+            "HITL renders adds via its button/stream flow (➕ Add → _store_sub_point / "
+            "re-render in _stream_main), not the outcome router (6h-3, decision (i)).")
+
+    def render_question(self, *args, **kwargs):
+        raise NotImplementedError(
+            "HITL renders questions via _stream_concept_qa in its button/stream flow, "
+            "not the outcome router (6h-3, decision (i)).")
+
+    def render_next_steps(self, *args, **kwargs):
+        raise NotImplementedError(
+            "HITL renders suggestions via _handle_suggest in its button/stream flow, "
+            "not the outcome router (6h-3, decision (i)).")
+
+    def render_fallback(self, *args, **kwargs):
+        raise NotImplementedError(
+            "HITL renders advance/affordance via _stream_proactive_prompt / "
+            "_nudge_to_button in its button/stream flow, not the outcome router "
+            "(6h-3, decision (i)).")
+
     def on_add_to_concept(self):
         """➕ Add — open add-mode for the current concept. Change log: 2026-05-29"""
         concept = self._current_concept()
@@ -1365,7 +1409,7 @@ class HITLAgent(BaseAgent):
         if pa is None:
             return
         outcome = h.resolve_pending(self, "", decision="confirm")
-        yield from self._render_removal_outcome(outcome, pa)
+        yield from self.render_removal(outcome, pa=pa)
 
     def on_cancel_remove_point(self):
         """➖ cancel button (D-Q1): abandon -> keep the point. NO delete."""
@@ -1373,7 +1417,7 @@ class HITLAgent(BaseAgent):
         if pa is None:
             return
         outcome = h.resolve_pending(self, "", decision="decline")
-        yield from self._render_removal_outcome(outcome, pa)
+        yield from self.render_removal(outcome, pa=pa)
 
     # ── ↩️ Revisit a past pillar ───────────────────────────────────────────
     def on_revisit_pillar(self, pillar: str):
