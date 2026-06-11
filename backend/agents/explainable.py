@@ -844,8 +844,9 @@ class ExplainableAgent(BaseAgent):
         #      pillar/type after the PendingAction machine clears it. ──
         was_pending = self.pending is not None
         pa_snapshot = self.pending
+        self._last_intent = intent          # 6h-2: render_fallback reads this (intent dropped from the public seam)
         outcome = handlers.dispatch(res, self, user_text=user_input)
-        yield from self._render_outcome(outcome, user_input, intent=intent,
+        yield from self._render_outcome(outcome, user_input,
                                         was_pending=was_pending, pa=pa_snapshot)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -980,42 +981,11 @@ class ExplainableAgent(BaseAgent):
                    and self._on_swap_now())
         return bool(getattr(outcome, "is_about_swap", False) or on_swap)
 
-    def _render_outcome(self, outcome, user_input, *, intent="none",
-                        was_pending=False, pa=None):
-        if outcome is None:                      # suggest_handler: nothing left to suggest
-            msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "
-                   "remove, or question any part of the framework.")
-            self._emit(msg); yield msg; return
-        self._fire_turn(outcome, user_input, was_pending)   # §3.6 events (Step 5, I-1)
-        if isinstance(outcome, handlers.AddOutcome):
-            yield from self._render_add(outcome); return
-        if isinstance(outcome, handlers.RemovalOutcome):
-            yield from self._render_removal(outcome, user_input,
-                                            was_pending=was_pending, pa=pa); return
-        if isinstance(outcome, handlers.QuestionOutcome):
-            yield from self._render_question(outcome, user_input); return
-        if isinstance(outcome, handlers.SuggestOutcome):
-            yield from self._render_suggest(outcome); return
-        if isinstance(outcome, handlers.AdvanceOutcome):
-            yield from self._render_advance(outcome); return
-        yield from self._render_fallback(outcome, intent, user_input)   # FallbackOutcome
-
     _NEXT_AFFORD = ("\n\n*Would you like to add, change, or question anything here? "
                     "Or shall we move on to the next pillar? Feel free to raise any "
                     "pillar you think is important.*")
 
-    def _render_advance(self, o):
-        if self.walkthrough_done:
-            yield from self._render_fallback(handlers.FallbackOutcome(reason="unclear"),
-                                             "advance", "")
-            return
-        self.walkthrough_index += 1
-        if self.current_pillar() is None:
-            yield from self._stream_summary()
-        else:
-            yield from self._stream_concept(is_first=False)
-
-    def _render_add(self, o):
+    def render_add(self, o):
         # revisit -> navigation to a PASSED pillar (the router never lets revisit carry
         # new content). Jump the cursor if it's a passed, non-excluded concept; else
         # non-destructive grounded Q&A.
@@ -1072,7 +1042,7 @@ class ExplainableAgent(BaseAgent):
 
         msg = "Noted."; self._emit(msg); yield msg          # defensive
 
-    def _render_removal(self, o, user_input, *, was_pending=False, pa=None):
+    def render_removal(self, o, user_input, *, was_pending=False, pa=None):
         stage = o.stage
         if stage == "confirmed":
             if o.is_swap:
@@ -1138,14 +1108,14 @@ class ExplainableAgent(BaseAgent):
         msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
         self._emit(msg); yield msg                                              # defensive
 
-    def _render_question(self, o, user_input):
+    def render_question(self, user_input):
         # §3.6 question (+ swap_questioned W9) already fired by _fire_turn at the boundary.
         if self.walkthrough_done:
             yield from self._stream_freeform(cs_detected=False)
         else:
             yield from self._stream_concept_qa()
 
-    def _render_suggest(self, o):
+    def render_next_steps(self, o):
         if getattr(o, "revealed", False):
             # D7 accept: the withheld pillar is now surfaced (dispatch -> surface_pillar
             # appended it to the walk). No DV (ask_agent_suggestion is Step 5).
@@ -1163,11 +1133,25 @@ class ExplainableAgent(BaseAgent):
                  "Shall I bring it in?")
         self._emit(msg); yield msg
 
-    def _render_fallback(self, o, intent, user_input):
-        # doubt -> non-destructive grounded explanation inviting a clear remove/keep
-        # (W5 convergence: the two-turn 'remove or explain?' clarify dialogue is retired).
-        # W9: a doubt voiced on the swap concept still logs swap_questioned.
-        if intent == "doubt":
+    def render_fallback(self, outcome=None):
+        # 6h-2: unified public seam (replaces private _render_advance + _render_fallback).
+        # None -> suggest-exhausted line; AdvanceOutcome -> advance the walk; Fallback (or
+        # advance-past-end) -> doubt-as-question / non-destructive affordance. Intent is read
+        # from self._last_intent (the seam no longer receives it). Behavior-preserving.
+        if outcome is None:                      # suggest_handler: nothing left to suggest
+            msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "
+                   "remove, or question any part of the framework.")
+            self._emit(msg); yield msg; return
+        if isinstance(outcome, handlers.AdvanceOutcome) and not self.walkthrough_done:
+            self.walkthrough_index += 1
+            if self.current_pillar() is None:
+                yield from self._stream_summary()
+            else:
+                yield from self._stream_concept(is_first=False)
+            return
+        # Fallback, or AdvanceOutcome past the end of the walk (intent != "doubt"):
+        # doubt -> non-destructive grounded explanation (W5); W9: doubt on swap logs questioned.
+        if getattr(self, "_last_intent", "none") == "doubt":
             ev.question(self._evctx(), _sink)   # doubt-as-question (FallbackOutcome has no map)
             on_swap = (self.swap_presented and not self.concept_swap.is_detected
                        and self._on_swap_now())
@@ -1178,11 +1162,25 @@ class ExplainableAgent(BaseAgent):
             else:
                 yield from self._stream_concept_qa()
             return
-        # none / 'start over' / unclear -> non-destructive affordance (§0: no session wipe).
+        # none / 'start over' / unclear / advance-past-end -> affordance (§0: no session wipe).
         msg = ("I want to make sure I help with the right thing. You can **add** a point, "
                "**remove** something, **question** any part of the framework, ask me to "
                "**suggest** what else to consider, or say **move on** to continue.")
         self._emit(msg); yield msg
+
+    def render_summary(self):
+        # 6h-2 contract seam — EXP's terminal I-6 summary (delegates to the existing streamer).
+        yield from self._stream_summary()
+
+    def render_framework(self, preamble=""):
+        # 6h-2 contract seam (7-seam symmetry; not invoked by the base router for walkthrough
+        # arms). Faithful 'show current state': current concept, else the summary.
+        if preamble:
+            yield preamble
+        if self.current_pillar() is None:
+            yield from self._stream_summary()
+        else:
+            yield from self._stream_concept(is_first=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # Pending resolution + pushback
