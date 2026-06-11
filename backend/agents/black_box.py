@@ -543,26 +543,25 @@ class BlackBoxAgent(BaseAgent):
 
 
     # ── outcome renderer ────────────────────────────────────────────────────
-    def _render_outcome(self, outcome, user_input, *, was_pending=False, pa=None):
-        # suggest_handler returns None when nothing is left to suggest.
+    def render_question(self, user_input):
+        yield from self._stream_qa(user_input)
+
+    def render_framework(self, preamble=""):
+        yield from self._yield_rerender(preamble)
+
+    def render_summary(self):
+        yield from self._stream_summary()
+
+    def render_fallback(self, outcome=None):
+        """6h: None (nothing left to suggest) -> the terse 'surfaced main areas' line;
+        AdvanceOutcome / FallbackOutcome -> ack with no reprint (W5). Persona-preserving."""
         if outcome is None:
             msg = ("You've surfaced the main areas I'd flag — feel free to add, "
                    "remove, or question any part of what's here.")
             self._emit(msg); yield msg; return
-        self._fire_turn(outcome, user_input, was_pending)   # §3.6 events (Step 5, I-1)
-        if isinstance(outcome, handlers.AddOutcome):
-            yield from self._render_add(outcome); return
-        if isinstance(outcome, handlers.RemovalOutcome):
-            yield from self._render_removal(outcome, user_input,
-                                            was_pending=was_pending, pa=pa); return
-        if isinstance(outcome, handlers.QuestionOutcome):
-            yield from self._stream_qa(user_input); return
-        if isinstance(outcome, handlers.SuggestOutcome):
-            yield from self._render_suggest(outcome); return
-        # AdvanceOutcome / FallbackOutcome -> terse ack, no reprint (W5).
         yield from self._ack_no_reprint()
 
-    def _render_add(self, o):
+    def render_add(self, o):
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
                 pre = f"**{o.pillar}** is already in the framework.\n\n"
@@ -596,7 +595,7 @@ class BlackBoxAgent(BaseAgent):
             return
         yield from self._ack_no_reprint()   # defensive
 
-    def _render_removal(self, o, user_input, *, was_pending=False, pa=None):
+    def render_removal(self, o, user_input, *, was_pending=False, pa=None):
         stage = o.stage
         if stage == "confirmed":
             if o.is_swap:
@@ -649,7 +648,7 @@ class BlackBoxAgent(BaseAgent):
         msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
         self._emit(msg); yield msg
 
-    def _render_suggest(self, o):
+    def render_next_steps(self, o):
         if getattr(o, "revealed", False):
             # D7 accept: the withheld pillar is now surfaced -> re-render. No DV
             # (the ask_agent_suggestion event is Step 5); suggesting is not adding.

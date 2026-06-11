@@ -615,6 +615,52 @@ class BaseAgent:
         ev.record_turn(outcome, self._evctx(), _sink,
                        was_pending=was_pending, is_question=is_q, swap_question=swap_q)
 
+    def render_add(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_add (BaseAgent render seam)")
+
+    def render_removal(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_removal (BaseAgent render seam)")
+
+    def render_question(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_question (BaseAgent render seam)")
+
+    def render_next_steps(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_next_steps (BaseAgent render seam)")
+
+    def render_framework(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_framework (BaseAgent render seam)")
+
+    def render_summary(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_summary (BaseAgent render seam)")
+
+    def render_fallback(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement render_fallback (BaseAgent render seam)")
+
+    def _render_outcome(self, outcome, user_input, *, was_pending=False, pa=None):
+        """6h: shared dispatch: handler returns a structured Outcome; the persona renders it via
+        the public render_* seam (the ONLY persona seam). Fires §3.6 once per turn (I-1)."""
+        if outcome is None:
+            yield from self.render_fallback(); return
+        self._fire_turn(outcome, user_input, was_pending)
+        if isinstance(outcome, handlers.AddOutcome):
+            yield from self.render_add(outcome); return
+        if isinstance(outcome, handlers.RemovalOutcome):
+            yield from self.render_removal(outcome, user_input,
+                                           was_pending=was_pending, pa=pa); return
+        if isinstance(outcome, handlers.QuestionOutcome):
+            yield from self.render_question(user_input); return
+        if isinstance(outcome, handlers.SuggestOutcome):
+            yield from self.render_next_steps(outcome); return
+        yield from self.render_fallback(outcome)
+
+
     def send_message(self, user_input: str) -> str:
         log_user_message(self.session_id, user_input)
 
