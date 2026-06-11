@@ -827,36 +827,6 @@ async def _send_summary():
         ).send()
         return
 
-    # ── BlackBox / Explainable — use send_message() ───────────────────
-    if agent_type == "black_box":
-        prompt = (
-            "Please summarise the cases we explored in this session, "
-            "the key frameworks used, and any notable follow-up questions asked."
-        )
-    else:
-        prompt = (
-            "Please provide a comprehensive performance summary covering: "
-            "overall structure, hypothesis-driven thinking, depth of analysis, "
-            "communication clarity, and 2-3 specific areas for improvement."
-        )
-
-    async with cl.Step(name="Generating your summary..."):
-        summary = agent.send_message(prompt)
-
-    cl.user_session.set("ended", True)
-    agent.end_session()
-
-    await cl.Message(
-        content=(
-            f"📊 **Your Session Summary:**\n\n{summary}\n\n"
-            f"---\n"
-            f"✅ **Session Ended**\n"
-            f"🪪 **Session ID:** `{agent.session_id}`\n"
-            f"*Keep this ID for your records. Refresh the page to start a new session.*"
-        )
-    ).send()
-
-
 # ── Shared session closing logic ───────────────────────────────────────────
 async def _close_session():
     agent  = cl.user_session.get("agent")
@@ -875,7 +845,7 @@ async def _close_session():
     await cl.Message(
         content=(
             f"---\n"
-            f"✅ **Session Ended**\n\n"
+            f"✅ **Session Ended**\n"
             f"🪪 **Session ID:** `{agent.session_id}`\n"
             f"*Keep this ID for your records. Refresh the page to start a new session.*"
         )
