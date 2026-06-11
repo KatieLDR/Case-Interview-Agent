@@ -568,6 +568,13 @@ class HITLAgent(BaseAgent):
             logging.info(f"[JUSTIFICATION] collected for={self.justification_for}: '{user_input}'")
             self.awaiting_justification = False
             self.justification_for      = None
+            # 6f accept-flow (item B): record the held concept as justified, then
+            # release the advance on_approve_concept / cancel-keep parked pending this
+            # reason. Index still points at the held concept (neither path advanced).
+            cur = self._current_concept()
+            if cur is not None:
+                self._justified_concepts.add(cur)
+            self.walkthrough_index += 1
             yield from self._stream_justification_ack()
             return
 
@@ -1203,16 +1210,22 @@ class HITLAgent(BaseAgent):
             self.approved_concepts.append(concept)
 
         logging.info(f"[APPROVE] concept='{concept}', index={self.walkthrough_index}")
-        self.walkthrough_index += 1
 
-        if concept in self.justification_pillars:
+        # 6f accept-flow (item B): HOLD the advance until the concept is justified
+        # (mirror of the reject side). before_advance() consults _justified_concepts —
+        # incl. the swap (item A) and every shown pillar (D2). Not yet justified -> ask
+        # and do NOT advance; the typed reason populates _justified_concepts and releases
+        # the advance (success tail in _stream_main).
+        if not self.before_advance(self):
             yield from self._stream_justification_prompt("accept", concept=concept)
+            return
+
+        self.walkthrough_index += 1
+        next_concept = self._current_concept()
+        if next_concept is None:
+            yield from self._walkthrough_complete_message()
         else:
-            next_concept = self._current_concept()
-            if next_concept is None:
-                yield from self._walkthrough_complete_message()
-            else:
-                yield from self._stream_proactive_prompt()
+            yield from self._stream_proactive_prompt()
 
     def on_reject_concept(self):
         """❌ Skip (first removal turn) — PARK a PendingAction; NOTHING is deleted here
@@ -1313,6 +1326,12 @@ class HITLAgent(BaseAgent):
             if pa.target and pa.target not in self.approved_concepts:
                 self.approved_concepts.append(pa.target)
             logging.info(f"[REJECT CANCELLED] concept='{pa.target}' kept in framework")
+            # 6f accept-flow (item B): keeping = accept side -> hold the advance
+            # until justified, exactly like on_approve_concept (before_advance is the
+            # gate; index still points at the kept concept here).
+            if not self.before_advance(self):
+                yield from self._stream_justification_prompt("accept", concept=pa.target)
+                return
             self.walkthrough_index += 1
             yield f"Keeping **{pa.target}** — let's continue.\n\n"
             yield from self._after_removal_continue(pa.target, was_reject=False)
@@ -1322,13 +1341,12 @@ class HITLAgent(BaseAgent):
         yield "Reply **yes** to remove, or **no** to keep it.\n\n"
 
     def _after_removal_continue(self, concept, *, was_reject):
-        """Post-removal navigation. Keeping a justification pillar still triggers the
-        accept-side justification reflection (the accept/advance-side gate is the Step-6
-        reconciliation, line 118 — left at baseline). Reject-side justification is now the
-        PRE-confirm gate, so there is no post-reject reflection prompt."""
-        if (not was_reject) and concept in self.justification_pillars:
-            yield from self._stream_justification_prompt("accept", concept=concept)
-            return
+        """Post-removal navigation only. 6f accept-flow (item B): the accept/keep-side
+        justification gate now lives UPSTREAM in before_advance (consulted by
+        on_approve_concept and the abandoned/pillar-kept branch). The old
+        `in justification_pillars` reflection trigger was REMOVED here — leaving it would
+        re-fire the prompt for an already-justified concept. Reject-side justification is
+        the PRE-confirm gate; there is no post-reject reflection prompt."""
         next_concept = self._current_concept()
         if next_concept is None:
             yield from self._walkthrough_complete_message()
