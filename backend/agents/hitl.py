@@ -605,6 +605,14 @@ class HITLAgent(BaseAgent):
             # Anything that is NOT the user naming their own concept = 'guide me'
             # (advance / ask_agent_to_suggest / question / doubt / none): proceed with
             # the planned next concept, exactly as the old `guidance` branch did.
+            # C2-D2 (F-Sug2): an explicit ask_agent_to_suggest in the proactive state
+            # routes to the SUGGEST path (offer a withheld pillar), not lumped with
+            # advance/guidance. Agent-initiated elicitation stays HITL's treatment.
+            if pres.intent == "ask_agent_to_suggest":
+                logging.info("[PROACTIVE] ask_agent_to_suggest -> suggest path")
+                yield from self._handle_suggest(user_input)
+                return
+
             if not (pres.intent == "add" and pres.detail):
                 logging.info(f"[PROACTIVE] guidance/continue (intent={pres.intent})")
                 yield from self._stream_concept(is_first=False)
@@ -676,6 +684,24 @@ class HITLAgent(BaseAgent):
             last_agent=self._last_agent_text() or "(nothing yet)",
         )
         intent = res.intent
+
+        # ── 3a. C2-D1 accept-interception — a parked AGENT suggestion (D7) owns an
+        #      affirmation: resolve to an agent-led REVEAL before generic routing,
+        #      mirroring handlers.dispatch §0b. HITL bypasses dispatch, so the shared
+        #      accept predicates are reused here for cross-arm event identity (I-1).
+        if self.pending_suggestion is not None:
+            _ps = self.pending_suggestion
+            _accepting = (h._accepts_offer(user_input)
+                          or h._add_accepts_suggestion(_ps, intent, res.detail,
+                                                       res.parent, user_input))
+            self.pending_suggestion = None
+            if _accepting and _ps.get("origin") == "agent_suggest":
+                log_user_message(self.session_id, user_input)
+                self.history.append(
+                    types.Content(role="user", parts=[types.Part(text=user_input)]))
+                yield from self._reveal_suggested_pillar(_ps["item"])
+                return
+            # not accepting -> offer dismissed; fall through to normal routing.
 
         # ── 3b. Swap removal is the SAME button path as any pillar (Katie's instrument
         #      decision 2026-06-09; resolves F-S3 for HITL). A free-text "remove [swap]"
@@ -794,12 +820,17 @@ class HITLAgent(BaseAgent):
             # §3.6 ask_agent_suggestion OFFER (accepted=False) — the agent NAMED a withheld
             # area on user request. Suggesting is not adding (I-4); accepting it later is a
             # separate ask_agent_suggestion(accepted=True), never an add_pillar.
+            # C2-D1: park the offer so a following affirmation resolves as ACCEPTING
+            # THE AGENT's idea (agent-led reveal), not a user add. HITL has no add-new-
+            # pillar button, so acceptance is free-text only -> resolve in the normal turn.
+            self.pending_suggestion = {"level": "pillar", "item": target["name"],
+                                       "origin": "agent_suggest"}
             ev.record(h.SuggestOutcome(level="pillar", suggested_item=target["name"],
                                        accepted=False, revealed=False),
                       self._evctx(modality="text"), _sink)
             msg = (f"One area we haven't covered yet is **{target['name']}**"
                    + (f" — {why}" if why else "")
-                   + "\n\nIf it fits your case, you can add it with the **➕** button.")
+                   + "\n\nWant me to bring it into your framework? Just say **yes**.")
         else:
             msg = ("You've surfaced the main areas I'd flag — use the buttons to add, "
                    "skip, or revisit any part of the framework.")
@@ -871,6 +902,24 @@ class HITLAgent(BaseAgent):
 
         # Present as the current concept; Include/Skip/Add buttons handle the rest.
         # (Not added to user_contributed_concepts, so should_show_buttons() is True.)
+        yield from self._stream_concept(is_first=False)
+
+    def _reveal_suggested_pillar(self, concept: str):
+        """C2-D1 agent-led reveal: the user ACCEPTED the agent's suggested withheld
+        pillar (free-text; HITL has no add-new-pillar button). Insert + present it like
+        a user-contributed concept, but attribute it AGENT-LED — fire
+        ask_agent_suggestion(accepted=True, revealed=True), NOT add_pillar. Render !=
+        count-as-add (MC-0): it shows in framework/summary but is not a user
+        contribution. Same Outcome EXP/BB produce via dispatch §0b (I-1)."""
+        self.walkthrough_concepts.insert(self.walkthrough_index, concept)
+        if self.walkthrough_index <= self.swap_position:
+            self.swap_position += 1
+            logging.info(f"[REVEAL] swap_position shifted to {self.swap_position}")
+        ev.record(h.SuggestOutcome(level="pillar", suggested_item=concept,
+                                   grounding=(grounding.ground_pillar(concept) or None),
+                                   accepted=True, revealed=True),
+                  self._evctx(modality="text"), _sink)
+        logging.info(f"[REVEAL] agent-suggested pillar accepted: '{concept}'")
         yield from self._stream_concept(is_first=False)
 
     # ══════════════════════════════════════════════════════════════════════
