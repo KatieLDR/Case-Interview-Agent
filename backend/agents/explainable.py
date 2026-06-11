@@ -1420,106 +1420,6 @@ class ExplainableAgent(BaseAgent):
         )
         yield from self._stream_with_instruction(instruction=instruction)
 
-    def _stream_summary(self):
-        self.walkthrough_done = True
-
-        from backend.knowledge import knowledge_base as kb
-
-        wrong          = self.concept_swap.config["wrong_concept"].lower()
-        excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong] \
-                         if self.concept_swap.is_detected else \
-                         [e.lower() for e in self.excluded_concepts]
-
-        added_lower = [p.lower() for p in self.user_added_pillars]
-
-        # ── Group 1: original pillars SHOWN to the user (incl. the one on
-        #    screen at End Session). [:index+1] includes the current concept,
-        #    fixing blank summaries when ending mid-walkthrough. No-op on the
-        #    natural-end path (index already == len). Change log: 2026-06-02
-        completed_originals = [
-            c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
-            if c.lower() not in excluded_lower
-            and c.lower() not in added_lower
-        ]
-
-        # ── Group 2: user-added pillars (heading only) ─────────────────────
-        added_pillars = [
-            p for p in self.user_added_pillars
-            if p.lower() not in excluded_lower
-        ]
-
-        logging.info(f"[SUMMARY] completed_originals={completed_originals}, "
-                     f"added_pillars={added_pillars}")
-
-        # ── Build the summary string DETERMINISTICALLY (no LLM) ───────────
-        # Python owns rendering: the matching already happened during the
-        # conversation and is stored in user_sub_points. Rendering known
-        # state must be exact — an LLM would paraphrase. (Change log: 2026-05-28)
-        lines = [
-            "**Final Framework Summary**",
-            "",
-        ]
-
-        for c in completed_originals:
-            pillar = next(
-                (p for p in kb.get_all_pillars() if p["name"].lower() == c.lower()),
-                None
-            )
-            if pillar:
-                lines.append(self._render_pillar_block_no_sources(c))
-                lines.append("")
-            else:
-                lines.append(f"**{c}**")
-                if c.lower() == wrong:
-                    swap = kb.get_swap_concept()
-                    for b in (swap.get("sub_bullets", []) if swap else []):
-                        if not self._is_excluded_bullet(c, b):
-                            lines.append(f"- {_INLINE_REF_RE.sub('', b).strip()}")
-                for sp in self.user_sub_points.get(c, []):
-                    if not self._is_excluded_bullet(c, sp):
-                        lines.append(f"- {_INLINE_REF_RE.sub('', sp).strip()}")
-                lines.append("")
-
-        # User-added areas — render KB sub-bullets if it's a KB pillar (empty-summary
-        # fix), else heading + the user's own points. Change log: 2026-06-03
-        for p in added_pillars:
-            pillar = next(
-                (x for x in kb.get_all_pillars() if x["name"].lower() == p.lower()),
-                None
-            )
-            if pillar:
-                lines.append(self._render_pillar_block_no_sources(p))
-                lines.append("")
-            else:
-                lines.append(f"**{p}**")
-                for sp in self.user_sub_points.get(p, []):
-                    if not self._is_excluded_bullet(p, sp):
-                        lines.append(f"- {_INLINE_REF_RE.sub('', sp).strip()}")
-                lines.append("")
-
-        summary_text = "\n".join(lines).rstrip()
-
-        # Append to history + log + store answer, mirroring _stream_with_instruction
-        self.history.append(
-            types.Content(role="model", parts=[types.Part(text=summary_text)])
-        )
-        update_answer(self.session_id, summary_text)
-        log_agent_response(self.session_id, summary_text)
-
-        yield summary_text
-
-        closing = (
-            "\n\n---\n\n"
-            "Is there anything you'd like to revisit, add to, or discuss further? "
-            "You can name any pillar and I'll take you back to it — "
-            "or click **‼️End Session** whenever you're ready to finish."
-        )
-        self.history.append(
-            types.Content(role="model", parts=[types.Part(text=closing)])
-        )
-        log_agent_response(self.session_id, closing)
-        yield closing
-
     def _stream_freeform(self, cs_detected: bool):
         concepts_str = " → ".join(self.kg_context["concepts"])
         instruction  = (
@@ -1538,16 +1438,6 @@ class ExplainableAgent(BaseAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Session + system prompt
     # ══════════════════════════════════════════════════════════════════════
-
-    def get_summary(self):
-        """
-        Public wrapper for app.py to stream the summary on End Session.
-        Routes through _stream_summary() so the summary is built from explicit
-        session state (completed originals + added pillars), identical to the
-        natural walkthrough-end summary. Replaces inherited send_message().
-        Change log: 2026-05-28
-        """
-        yield from self._stream_summary()
 
     def end_session(self) -> None:
         from backend.logger import end_session as _end_session

@@ -1097,52 +1097,6 @@ class HITLAgent(BaseAgent):
 
         yield from self._stream_with_instruction(instruction=instruction)
 
-    def _stream_summary(self):
-        """
-        Deterministic summary (no LLM). Renders from explicit session state:
-        concepts the user advanced PAST, minus excluded (and the swap if detected),
-        each shown with its stored bullets + user-added sub-points. No sources.
-        Change log: 2026-05-29 — deterministic; renders concept_blocks + user_sub_points
-        """
-        self.walkthrough_done = True
-
-        wrong = self.concept_swap.config["wrong_concept"].lower()
-        if self.concept_swap.is_detected:
-            excluded_lower = [e.lower() for e in self.excluded_concepts] + [wrong]
-        else:
-            excluded_lower = [e.lower() for e in self.excluded_concepts]
-
-        # Only concepts the user advanced PAST (deliberately decided), de-duplicated
-        included = []
-        seen = set()
-        for c in self.walkthrough_concepts[:self.walkthrough_index]:
-            cl = c.lower()
-            if cl in excluded_lower or cl in seen:
-                continue
-            seen.add(cl)
-            included.append(c)
-        logging.info(f"[SUMMARY] included={included}")
-
-        lines = ["**Final Framework Summary**", ""]
-        for c in included:
-            lines.append(f"**{c}**")
-            block = self.concept_blocks.get(c, "").strip()
-            if block:
-                lines.append(block)
-            for sp in self.user_sub_points.get(c, []):
-                lines.append(f"- {sp}")
-            lines.append("")
-
-        summary_text = "\n".join(lines).rstrip()
-
-        self.history.append(
-            types.Content(role="model", parts=[types.Part(text=summary_text)])
-        )
-        update_answer(self.session_id, summary_text)
-        log_agent_response(self.session_id, summary_text)
-
-        yield summary_text
-
     def _stream_freeform(self):
         concepts_str = " → ".join(self.kg_context["concepts"])
         instruction  = (
@@ -1601,9 +1555,6 @@ class HITLAgent(BaseAgent):
     # ══════════════════════════════════════════════════════════════════════
     # Summary + session
     # ══════════════════════════════════════════════════════════════════════
-
-    def get_summary(self):
-        yield from self._stream_summary()
 
     def end_session(self) -> None:
         from backend.logger import end_session as _end_session

@@ -134,9 +134,40 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement _stream_main (BaseAgent seam)")
 
-    def _stream_summary(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _stream_summary (BaseAgent seam)")
+    def _stream_summary(self):
+        """6g (I-6 carve-out): shared WALKED-SUBSET End-Session summary for EXP + HITL — byte-identical
+        across those two arms (reads ONLY shared state: presented_pillars + user_sub_points +
+        excluded). BlackBox overrides this with the full shown-framework (walkthrough_enabled=
+        False -> no walked subset; its scope difference traces to the manipulation, not a
+        confound). No sources, no buttons, no affordance: the §3.8 terminal artifact."""
+        from backend.knowledge import knowledge_base as kb
+        self.walkthrough_done = True
+        wrong    = self.concept_swap.config["wrong_concept"]
+        detected = self.concept_swap.is_detected
+        lines = ["**Final Framework Summary**", ""]
+        for c in self.presented_pillars():
+            if c.lower() == wrong.lower() and detected:
+                continue
+            lines.append(f"**{c}**")
+            if c.lower() == wrong.lower():
+                sw = kb.get_swap_concept()
+                kb_bullets = sw.get("sub_bullets", []) if sw else []
+            else:
+                kbp = next((p for p in kb.get_all_pillars()
+                            if p["name"].lower() == c.lower()), None)
+                kb_bullets = kbp.get("sub_bullets", []) if kbp else []
+            for b in kb_bullets:
+                if not self._is_excluded_bullet(c, b):
+                    lines.append(f"- {grounding._strip_source_refs(b)}")
+            for sp in self.user_sub_points.get(c, []):
+                if not self._is_excluded_bullet(c, sp):
+                    lines.append(f"- {grounding._strip_source_refs(sp)}")
+            lines.append("")
+        summary = "\n".join(lines).rstrip()
+        self.history.append(types.Content(role="model", parts=[types.Part(text=summary)]))
+        update_answer(self.session_id, summary)
+        log_agent_response(self.session_id, summary)
+        yield summary
 
     def _format_sub_bullet(self, *args, **kwargs):
         raise NotImplementedError(
@@ -187,9 +218,9 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement get_pre_analysis_instruction (BaseAgent seam)")
 
-    def get_summary(self, *args, **kwargs):
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement get_summary (BaseAgent seam)")
+    def get_summary(self):
+        """6g (I-6 carve-out): shared public entry — app.py streams this on End Session."""
+        yield from self._stream_summary()
 
     def is_swap_target(self, km, user_text: str) -> bool:
         """Step 6e: shared swap-target skeleton (was triplicated). The persona
