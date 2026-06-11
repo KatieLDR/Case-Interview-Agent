@@ -246,6 +246,7 @@ class HITLAgent(BaseAgent):
         self.awaiting_user_suggestion  = False
         self.awaiting_justification    = False
         self.justification_for         = None
+        self.holding_after_justification = False   # A1: HOLD after an accepted justification
         self.awaiting_sub_point        = False   # ➕ Add mode. Change log: 2026-05-29
         self.awaiting_revisit_add      = False   # ↩️ revisit add-mode
         self.revisit_target            = None    # pillar being revisited
@@ -568,14 +569,16 @@ class HITLAgent(BaseAgent):
             logging.info(f"[JUSTIFICATION] collected for={self.justification_for}: '{user_input}'")
             self.awaiting_justification = False
             self.justification_for      = None
-            # 6f accept-flow (item B): record the held concept as justified, then
-            # release the advance on_approve_concept / cancel-keep parked pending this
-            # reason. Index still points at the held concept (neither path advanced).
+            # A1 (Decision 4 / MC-1): record the justified concept, then HOLD on it —
+            # do NOT auto-advance. Supersedes 6f item B (which released the advance here).
+            # Advance happens only on an explicit free-text move-on (the routing branch
+            # below), which fires a passive_advance. Reject timing is unchanged — reject
+            # reasons resolve via the PendingAction machine, not this accept-only branch.
             cur = self._current_concept()
             if cur is not None:
                 self._justified_concepts.add(cur)
-            self.walkthrough_index += 1
-            yield from self._stream_justification_ack()
+            self.holding_after_justification = True
+            yield from self._stream_justification_hold_ack(cur)
             return
 
         # ── 2. Proactive suggestion handling ───────────────────────────────
@@ -766,6 +769,20 @@ class HITLAgent(BaseAgent):
             else:
                 yield from self._stream_proactive_prompt()
 
+        elif self.holding_after_justification and intent == "advance":
+            # A1 (Decision 4 / MC-1): after an accepted justification HITL HELD on the
+            # pillar; an explicit free-text move-on now ADVANCES and fires passive_advance
+            # (a no-engagement advance this turn, §3.6). This is the move-on that 6f item
+            # B used to do silently — it now carries a counted passive_advance.
+            self.holding_after_justification = False
+            ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
+            self.walkthrough_index += 1
+            next_concept = self._current_concept()
+            if next_concept is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_proactive_prompt()
+
         elif intent in _BUTTON_ACTION_INTENTS:
             # D-Q1: HITL exposes add/remove/revisit/advance as buttons, so a FREE-TEXT
             # action is NUDGED to its button instead of executed (intended HITL change,
@@ -851,6 +868,7 @@ class HITLAgent(BaseAgent):
         yield msg
 
     def _stream_proactive_prompt(self):
+        self.holding_after_justification = False   # A1: landing on the next concept clears the hold
         self.awaiting_user_suggestion = True
         prompt = self._get_proactive_prompt()
         logging.info(f"[PROACTIVE] prompt_index={self.prompt_index - 1}")
@@ -881,6 +899,18 @@ class HITLAgent(BaseAgent):
             yield from self._walkthrough_complete_message()
         else:
             yield from self._stream_proactive_prompt()
+
+    def _stream_justification_hold_ack(self, concept: str):
+        """A1 (Decision 4): after an accepted justification, ACK but HOLD on the current
+        pillar — do not advance. Invite either more detail or an explicit move-on (which
+        fires passive_advance and advances the walkthrough, MC-1). The proactive prompt is
+        deliberately NOT shown here: it would set awaiting_user_suggestion and read as
+        moving on."""
+        ack = JUSTIFICATION_ACKS[self.ack_index % len(JUSTIFICATION_ACKS)]
+        self.ack_index += 1
+        yield ack + "\n\n"
+        yield (f"Anything else you'd add to **{concept}**? "
+               f"Say **move on** when you're ready for the next area.")
 
     def _stream_user_contributed_concept(self, concept: str):
         """
