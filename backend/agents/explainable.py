@@ -973,13 +973,11 @@ class ExplainableAgent(BaseAgent):
 
 
     # ── outcome renderer ────────────────────────────────────────────────────
-    def _swap_question_signal(self, outcome, user_input: str) -> bool:
-        """Explainable's W9 signal — preserved exactly from _render_question: the handler's
-        is_about_swap OR the walkthrough being on the swap concept right now (deferred F-S
-        instrument). Used by the inherited _fire_turn for the QuestionOutcome path."""
-        on_swap = (self.swap_presented and not self.concept_swap.is_detected
-                   and self._on_swap_now())
-        return bool(getattr(outcome, "is_about_swap", False) or on_swap)
+    # C4 (Decision 6 / F5): _swap_question_signal override REMOVED — EXP now inherits the
+    # ONE shared base signal (is_injected & not detected & _classify_swap_question), so the
+    # questioned-vs-detected line is drawn by one classifier across all arms and
+    # count_swap_questioned is cross-arm comparable. The old EXP-only `on_swap` positional
+    # term is retired. (_on_swap_now stays — still used by the doubt/consequence paths.)
 
     _NEXT_AFFORD = ("\n\n*Would you like to add, change, or question anything here? "
                     "Or shall we move on to the next pillar? Feel free to raise any "

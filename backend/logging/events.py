@@ -83,6 +83,7 @@ COUNTER_FOR = {
     DELETE_SUB_BULLET:    "count_delete_sub_bullet",
     PASSIVE_ADVANCE:      "count_passive_advance",
     INTERRUPTION:         "count_interruptions",
+    SWAP_QUESTIONED:      "count_swap_questioned",
 }
 
 # The full set of session-document rollups Step 5 maintains (sink.create_session seeds
@@ -335,10 +336,12 @@ def swap_detected(ctx: EventContext, sink: EventSink) -> None:
 
 
 def swap_questioned(ctx: EventContext, sink: EventSink) -> None:
-    """W9 — a question that lands on the swap. Fired by the ARM with its own
-    swap-question signal (the instrument choice is deferred, F-S), routed through here
-    only to unify the §3.6 event vocabulary. No counter (swap is event-derived)."""
-    sink.write_event(ctx.session_id, SWAP_QUESTIONED, {})
+    """W9 — a question that lands on the swap. Drawn by the ONE shared classifier
+    (C4: base _classify_swap_question, no per-arm override), routed here to unify the
+    §3.6 event vocabulary. C4 (Decision 6a): increments count_swap_questioned so
+    questioned_kept is a headline rollup, consistent with the §3.6 counter rule."""
+    sink.write_event(ctx.session_id, SWAP_QUESTIONED, {},
+                     counter=COUNTER_FOR[SWAP_QUESTIONED])
 
 
 def question(ctx: EventContext, sink: EventSink, *,
