@@ -528,10 +528,7 @@ class ExplainableAgent(BaseAgent):
         self.walkthrough_active   = False
         self.walkthrough_done     = False
         self.swap_presented       = False
-        self.swap_position        = -1     # C3: set at dynamic injection, not build
-        self.swap_after           = 0      # C3: # genuine concepts before the swap step
-        self._genuine_set         = set()  # C3: original genuine concept names (lower)
-        self._genuine_shown       = set()  # C3: genuine concepts shown so far
+        self.swap_position        = 0
 
         # ── Step 4c: shared HandlerSession flow state (replaces pending_excl /
         #    pending_add / pending_clarify / pending_sub_excl). interaction/handlers.py
@@ -619,14 +616,11 @@ class ExplainableAgent(BaseAgent):
 
     def _build_walkthrough_concepts(self) -> list:
         base     = list(self.kg_context["concepts"])
-        # C3 (F-S4): genuine concepts ONLY. The swap is NOT a fixed list member; it is
-        # injected as a dedicated step after swap_after genuine concepts have been shown
-        # (reorder-immune — inserts do not count). swap_position is set at injection time.
-        self.swap_after    = len(base) // 2
-        self._genuine_set  = {c.lower() for c in base}
-        self._genuine_shown = set()
-        self.swap_position = -1
-        logging.info(f"[WALKTHROUGH] built={base}, swap_after={self.swap_after}, "
+        wrong    = self.concept_swap.config["wrong_concept"]
+        position = min(1, len(base))   # C3: fixed EARLY 2nd slot (dropout-safe); EXP appends adds (no shift needed)
+        base.insert(position, wrong)
+        self.swap_position = position
+        logging.info(f"[WALKTHROUGH] built={base}, swap_position={position}, "
                      f"framework={self.kg_context['framework']}")
         return base
 
@@ -1279,20 +1273,6 @@ class ExplainableAgent(BaseAgent):
         if concept is None:
             yield from self._stream_summary()
             return
-
-        # C3 (F-S4): dedicated, reorder-immune swap encounter — inject the swap at the
-        # cursor for exactly this one turn once swap_after GENUINE concepts have been
-        # shown (inserts do not count). Decoupled from a fixed list slot; it still IS the
-        # current concept during its own turn, so detection / QA / removal flows are
-        # unchanged.
-        if (not self.swap_presented
-                and len(self._genuine_shown) >= self.swap_after
-                and not self._is_wrong_concept(concept)):
-            concept = self.concept_swap.config["wrong_concept"]
-            self.walkthrough_concepts.insert(self.walkthrough_index, concept)
-            self.swap_position = self.walkthrough_index
-        elif concept.lower() in self._genuine_set:
-            self._genuine_shown.add(concept.lower())
 
         is_wrong   = self._is_wrong_concept(concept)
         swap_block = self.concept_swap.get_system_prompt_block() if is_wrong else ""

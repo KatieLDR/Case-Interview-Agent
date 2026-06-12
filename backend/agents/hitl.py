@@ -218,10 +218,7 @@ class HITLAgent(BaseAgent):
         self.walkthrough_done     = False
         self.approved_concepts    = []
         self.swap_presented       = False
-        self.swap_position        = -1     # C3: set at dynamic injection, not build
-        self.swap_after           = 0      # C3: # genuine concepts before the swap step
-        self._genuine_set         = set()  # C3: original genuine concept names (lower)
-        self._genuine_shown       = set()  # C3: genuine concepts shown so far
+        self.swap_position        = 0
 
         # ── Presented bullets — concept_name → bullet-lines string ─────────
         # Stored at present-time (JSON for KB pillars/swap, LLM for non-KB).
@@ -333,13 +330,10 @@ class HITLAgent(BaseAgent):
 
     def _build_walkthrough_concepts(self) -> list:
         base     = list(self.kg_context["concepts"])
-        # C3 (F-S4): genuine concepts ONLY. The swap is NOT a fixed list member; it is
-        # injected as a dedicated step after swap_after genuine concepts have been shown
-        # (reorder-immune — inserts do not count). swap_position is set at injection time.
-        self.swap_after    = len(base) // 2
-        self._genuine_set  = {c.lower() for c in base}
-        self._genuine_shown = set()
-        self.swap_position = -1
+        wrong    = self.concept_swap.config["wrong_concept"]
+        position = min(1, len(base))   # C3: fixed EARLY 2nd slot (dropout-safe); +1-shifted by preceding user adds
+        base.insert(position, wrong)
+        self.swap_position = position
 
         # Deterministic 2-of-3: pick which shown pillars require a justification
         # this session. Arms from the first concept (no proactive-prompt dependency).
@@ -350,7 +344,7 @@ class HITLAgent(BaseAgent):
         #                                           by requires_justification/before_advance)
 
         logging.info(
-            f"[WALKTHROUGH] built={base}, swap_after={self.swap_after}, "
+            f"[WALKTHROUGH] built={base}, swap_position={position}, "
             f"justification_pillars={sorted(self.justification_pillars)}, "
             f"framework={self.kg_context['framework']}"
         )
@@ -735,8 +729,12 @@ class HITLAgent(BaseAgent):
                 self.walkthrough_index += 1
                 logging.info(f"[SWAP] caught via text — index→{self.walkthrough_index}")
 
-        # ── 4b. Invariant check — REMOVED (C3): the swap is no longer a fixed list slot;
-        #       the dynamic-injection trigger in _stream_concept owns the encounter point.
+        # ── 4b. Invariant check ────────────────────────────────────────────
+        if (self.walkthrough_active
+                and self.walkthrough_index > self.swap_position
+                and not self.swap_presented):
+            logging.error(f"[INVARIANT] rewinding to swap_position={self.swap_position}")
+            self.walkthrough_index = self.swap_position
 
         # ── 5. Log and append user message ─────────────────────────────────
         log_user_message(self.session_id, user_input)
@@ -922,7 +920,9 @@ class HITLAgent(BaseAgent):
         any other concept. Change log: 2026-05-29 (revised — was auto-approve)
         """
         self.walkthrough_concepts.insert(self.walkthrough_index, concept)
-        # C3: no swap_position shift (user-contributed) — swap injected dynamically.
+        if self.walkthrough_index <= self.swap_position:
+            self.swap_position += 1
+            logging.info(f"[USER CONCEPT] swap_position shifted to {self.swap_position}")
         # User named their OWN area in response to the proactive prompt -> elicited add_pillar
         # (a user contribution, NOT an agent suggestion; I-4).
         ev.record(h.AddOutcome(action="added_new", pillar=concept, level="pillar",
@@ -942,7 +942,9 @@ class HITLAgent(BaseAgent):
         count-as-add (MC-0): it shows in framework/summary but is not a user
         contribution. Same Outcome EXP/BB produce via dispatch §0b (I-1)."""
         self.walkthrough_concepts.insert(self.walkthrough_index, concept)
-        # C3: no swap_position shift (agent reveal) — swap injected dynamically.
+        if self.walkthrough_index <= self.swap_position:
+            self.swap_position += 1
+            logging.info(f"[REVEAL] swap_position shifted to {self.swap_position}")
         ev.record(h.SuggestOutcome(level="pillar", suggested_item=concept,
                                    grounding=(grounding.ground_pillar(concept) or None),
                                    accepted=True, revealed=True),
@@ -984,20 +986,6 @@ class HITLAgent(BaseAgent):
         if concept is None:
             yield from self._walkthrough_complete_message()
             return
-
-        # C3 (F-S4): dedicated, reorder-immune swap encounter — inject the swap at the
-        # cursor for exactly this one turn once swap_after GENUINE concepts have been
-        # shown (inserts do not count). Decoupled from a fixed list slot; it still IS the
-        # current concept during its own turn, so detection / QA / removal flows are
-        # unchanged.
-        if (not self.swap_presented
-                and len(self._genuine_shown) >= self.swap_after
-                and not self._is_wrong_concept(concept)):
-            concept = self.concept_swap.config["wrong_concept"]
-            self.walkthrough_concepts.insert(self.walkthrough_index, concept)
-            self.swap_position = self.walkthrough_index
-        elif concept.lower() in self._genuine_set:
-            self._genuine_shown.add(concept.lower())
 
         is_wrong = self._is_wrong_concept(concept)
 
