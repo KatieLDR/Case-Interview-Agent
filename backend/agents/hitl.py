@@ -577,8 +577,12 @@ class HITLAgent(BaseAgent):
             cur = self._current_concept()
             if cur is not None:
                 self._justified_concepts.add(cur)
-            self.holding_after_justification = True
-            yield from self._stream_justification_hold_ack(cur)
+            # A1 (revised per K; supersedes the C2 hold-ack): HOLD by entering the proactive
+            # state — ack, then the "take the lead?" prompt. This hides the buttons
+            # (should_show_buttons gates on awaiting_user_suggestion), so there's no stale button;
+            # the next free-text turn routes through the proactive branch: "you lead"->
+            # ask_agent_to_suggest, "move on"->passive_advance, a named pillar->add. No auto-advance.
+            yield from self._stream_justification_ack()
             return
 
         # ── 2. Proactive suggestion handling ───────────────────────────────
@@ -617,6 +621,17 @@ class HITLAgent(BaseAgent):
                 return
 
             if not (pres.intent == "add" and pres.detail):
+                # K-model: "move on / whatever" in the proactive state IS the passive
+                # advance — fire passive_advance, advance, present the next concept.
+                if pres.intent == "advance":
+                    logging.info("[PROACTIVE] move-on -> passive_advance + advance")
+                    ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
+                    self.walkthrough_index += 1
+                    if self._current_concept() is None:
+                        yield from self._walkthrough_complete_message()
+                    else:
+                        yield from self._stream_concept(is_first=False)
+                    return
                 logging.info(f"[PROACTIVE] guidance/continue (intent={pres.intent})")
                 yield from self._stream_concept(is_first=False)
                 return
@@ -763,20 +778,6 @@ class HITLAgent(BaseAgent):
         elif cs_detected:
             yield from self._stream_swap_caught()
             yield "\n\n"
-            next_concept = self._current_concept()
-            if next_concept is None:
-                yield from self._walkthrough_complete_message()
-            else:
-                yield from self._stream_proactive_prompt()
-
-        elif self.holding_after_justification and intent == "advance":
-            # A1 (Decision 4 / MC-1): after an accepted justification HITL HELD on the
-            # pillar; an explicit free-text move-on now ADVANCES and fires passive_advance
-            # (a no-engagement advance this turn, §3.6). This is the move-on that 6f item
-            # B used to do silently — it now carries a counted passive_advance.
-            self.holding_after_justification = False
-            ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
-            self.walkthrough_index += 1
             next_concept = self._current_concept()
             if next_concept is None:
                 yield from self._walkthrough_complete_message()
