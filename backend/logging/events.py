@@ -178,12 +178,14 @@ def record_turn(outcome, ctx: EventContext, sink: EventSink, *,
             fired.append(_fire(sink, ctx, QUESTION,
                                {"target_level": None, "target": getattr(outcome, "target", None)}))
             if swap_question:
-                sink.write_event(ctx.session_id, SWAP_QUESTIONED, {})
+                sink.write_event(ctx.session_id, SWAP_QUESTIONED, {},
+                                 counter=COUNTER_FOR[SWAP_QUESTIONED])
                 fired.append(SWAP_QUESTIONED)
         return fired                            # NOT a second removal_challenged
     fired = record(outcome, ctx, sink)
     if kind == "QuestionOutcome" and swap_question:
-        sink.write_event(ctx.session_id, SWAP_QUESTIONED, {})
+        sink.write_event(ctx.session_id, SWAP_QUESTIONED, {},
+                         counter=COUNTER_FOR[SWAP_QUESTIONED])
         fired.append(SWAP_QUESTIONED)
     return fired
 
