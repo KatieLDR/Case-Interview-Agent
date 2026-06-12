@@ -600,7 +600,8 @@ class BaseAgent:
         not the fuzzy LLM. `outcome` is accepted so the cursor arms (EXP/HITL) override
         to POSITIONAL (any question while the swap is the current concept)."""
         return (self.concept_swap.is_injected and not self.concept_swap.is_detected
-                and self.concept_swap.matches(user_input))
+                and (self.concept_swap.matches(user_input)
+                     or bool(getattr(outcome, "is_about_swap", False))))
 
     def _fire_turn(self, outcome, user_input, was_pending):
         """The ONE firing call per turn (I-1). Computes the two turn-flow booleans BlackBox

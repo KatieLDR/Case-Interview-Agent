@@ -571,18 +571,29 @@ def dispatch(intent_result, session: HandlerSession, *, user_text: str,
         # not accepting -> fall through and dispatch this turn normally.
 
     if intent in ("add", "revisit"):
-        km = m.locate(parent or detail or user_text)
+        # B3: for an ADD, resolve WHAT is being added (detail), not the destination
+        # (parent). "add X under Y" must look up X, not Y — else it false-matches the
+        # Y pillar and blocks the add. revisit carries no content -> resolve its target.
+        probe = (detail or user_text) if intent == "add" else (parent or detail or user_text)
+        km = m.locate(probe)
         return add_handler(intent, km, source, session, text=detail or user_text, parent=parent)
 
     if intent == "remove":
-        km = m.resolve_removal_target(detail or user_text,
+        # B4: thread the EXTRACTED target through to swap-detection. "I think we
+        # should not consider this" -> detail names the swap though the raw text does
+        # not; the swap is excluded from locate() so km never carries it.
+        target_text = detail or user_text
+        km = m.resolve_removal_target(target_text,
                                       last_discussed=session.last_discussed,
                                       shown_bullets=session.shown_bullets)
-        return removal_handler(km, session, user_text=user_text)
+        return removal_handler(km, session, user_text=target_text)
 
     if intent == "question":
         km = m.locate(detail or user_text)
-        return question_handler(km, session, user_text=user_text)
+        # swap recognition keys on the LLM-EXTRACTED target too, not just the raw
+        # sentence: "why walked per day relevant?" -> detail names the swap though the
+        # raw text lacks a "step" token (mirror of the B4 removal fix).
+        return question_handler(km, session, user_text=detail or user_text)
 
     if intent == "ask_agent_to_suggest":
         return suggest_handler(session)
