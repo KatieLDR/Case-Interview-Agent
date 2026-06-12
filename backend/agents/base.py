@@ -595,10 +595,12 @@ class BaseAgent:
 
     def _swap_question_signal(self, outcome, user_input: str) -> bool:
         """BlackBox's W9 question-about-swap signal — the deferred F-S instrument,
-        preserved exactly (is_injected & not detected & LLM _classify_swap_question).
-        `outcome` is accepted so EXP/HITL can override using outcome.is_about_swap."""
+        BB definition (locked): swap_questioned fires when the text NAMES the swap —
+        deterministic concept_swap.matches (canonical substring + match_terms + stems),
+        not the fuzzy LLM. `outcome` is accepted so the cursor arms (EXP/HITL) override
+        to POSITIONAL (any question while the swap is the current concept)."""
         return (self.concept_swap.is_injected and not self.concept_swap.is_detected
-                and self._classify_swap_question(user_input))
+                and self.concept_swap.matches(user_input))
 
     def _fire_turn(self, outcome, user_input, was_pending):
         """The ONE firing call per turn (I-1). Computes the two turn-flow booleans BlackBox

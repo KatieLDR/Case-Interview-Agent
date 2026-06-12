@@ -978,6 +978,14 @@ class ExplainableAgent(BaseAgent):
     # questioned-vs-detected line is drawn by one classifier across all arms and
     # count_swap_questioned is cross-arm comparable. The old EXP-only `on_swap` positional
     # term is retired. (_on_swap_now stays — still used by the doubt/consequence paths.)
+    #
+    # REVISED (locked swap_questioned definition): the cursor arms are POSITIONAL —
+    # swap_questioned fires on ANY question while the swap is the CURRENT concept,
+    # regardless of wording (matches the doubt path + HITL). C4's removal of this
+    # override was the wrong call; restored. BB stays content-based (base.matches).
+    def _swap_question_signal(self, outcome, user_input: str) -> bool:
+        return (self.swap_presented and not self.concept_swap.is_detected
+                and self._on_swap_now())
 
     _NEXT_AFFORD = ("\n\n*Would you like to add, change, or question anything here? "
                     "Or shall we move on to the next pillar? Feel free to raise any "
