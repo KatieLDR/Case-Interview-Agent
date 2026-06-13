@@ -366,7 +366,7 @@ class BlackBoxAgent(BaseAgent):
         #      `not override` gate. A NAMED swap removal is intent==remove and is
         #      detected inside removal_handler, so it is correctly excluded here.
         if (self.pending is None and self.pending_suggestion is None
-                and self.concept_swap.is_injected and intent not in ("add", "remove")):
+                and self.concept_swap.is_injected and intent not in ("add", "remove", "question")):
             if self.concept_swap.check_detection(user_input):
                 # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
                 yield from self._yield_rerender("Understood — I've taken that out.\n\n")

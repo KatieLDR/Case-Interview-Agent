@@ -818,7 +818,7 @@ class ExplainableAgent(BaseAgent):
         #      so it is correctly excluded here. ──
         if (self.pending is None and self.pending_suggestion is None
                 and self.swap_presented and not self.concept_swap.is_detected
-                and intent not in ("add", "remove")):
+                and intent not in ("add", "remove", "question")):
             if self.concept_swap.check_detection(user_input):       # sets is_detected
                 wrong = self.concept_swap.config["wrong_concept"]
                 if wrong not in self.excluded_concepts:

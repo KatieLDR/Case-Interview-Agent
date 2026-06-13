@@ -734,7 +734,7 @@ class HITLAgent(BaseAgent):
 
         # ── 4. Swap detection — semantic backstop, NON-STEERING only
         #      (W2: intent not in (add, remove) ≡ the old `not override` gate).
-        if swap_live and intent not in ("add", "remove"):
+        if swap_live and intent not in ("add", "remove", "question"):
             cs_detected = self.concept_swap.check_detection(user_input)
             if cs_detected:
                 wrong = self.concept_swap.config["wrong_concept"]
