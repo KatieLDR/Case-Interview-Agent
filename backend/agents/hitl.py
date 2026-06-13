@@ -366,8 +366,9 @@ class HITLAgent(BaseAgent):
     def _walkthrough_complete_message(self):
         self.walkthrough_done = True
         yield (
-            "✅ We've covered all the concepts. "
-            "Click **‼️End Session** to see your final framework. "
+            "✅ We've covered all the concepts. That's the full framework as it stands — "
+            "want to revisit any area to add, change, or question something? "
+            "Otherwise, click **‼️End Session** to see your final framework. "
             "**Note: this cannot be undone**.\n\n"
         )
 
@@ -462,6 +463,10 @@ class HITLAgent(BaseAgent):
         """
         pillar  = self._normalize_pillar(pillar)
         matched, _ = matching.match_key_question(item, pillar)
+        if not matched:
+            # (ii): a KB concept whose canonical bullet lives in another pillar — ground it
+            # from the KB (refs stripped; HITL shows no sources), else keep user wording.
+            matched = matching.canonical_add_bullet(item, refs=False)
         # Matched → canonical key-question wording (source-free). No match →
         # reformat the user's words into framework-bullet style (no new content).
         stored  = matched if matched else self._format_sub_bullet(item)

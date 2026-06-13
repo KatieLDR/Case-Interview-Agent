@@ -146,6 +146,16 @@ def _pillar_is_withheld(pillar_name: str | None) -> bool:
     return bool(p) and not p.get("shown", True)
 
 
+def _pillar_id_for_name(pillar_name: str | None) -> str | None:
+    """The KB id for a pillar NAME (PASS 2 returns a name; the scoped concept re-probe needs
+    the id). None if unknown — the re-route then falls through to the plain pillar result."""
+    if not pillar_name:
+        return None
+    p = next((p for p in kb.get_all_pillars()
+              if p["name"].lower() == pillar_name.lower()), None)
+    return p["id"] if p else None
+
+
 # ── the three matching passes (one shared copy; was triplicated) ────────────
 def match_pillar(item: str) -> tuple[str | None, float]:
     """Does the text name one of the framework AREAS (shown or withheld)? Description-
@@ -196,12 +206,22 @@ def _only_generic_overlap(item: str, concept: dict) -> bool:
     return len((item_toks & cand_toks) - _generic_tokens()) == 0
 
 
-def match_concept(item: str) -> tuple[dict | None, float]:
-    """Search every analytical concept (name + explanation) across all pillars, SWAP
-    EXCLUDED. Returns the matched concept dict (keeps id + pillar_id) — not just the
-    parent name — so locate() can mark level=concept (the F-M1 fix)."""
+def match_concept(item: str, *, pillar_id: str | None = None,
+                  apply_generic_floor: bool = True) -> tuple[dict | None, float]:
+    """Search analytical concepts (name + explanation), SWAP EXCLUDED. Returns the matched
+    concept dict (keeps id + pillar_id) — not just the parent name — so locate() can mark
+    level=concept (the F-M1 fix).
+
+    `pillar_id` (None = all pillars, the PASS-1 behaviour) restricts the candidate set to one
+    area's concepts. `apply_generic_floor` (default True = the PASS-1 B2(c) guard) can be
+    turned OFF by the locate() PASS-2->concept re-route: once the AREA matcher has already
+    established the term belongs to a specific area, a within-area concept hit resting on a
+    shared term ("data privacy" vs the area's PII concept) is no longer shallow overlap, so the
+    higher generic bar — which is exactly what blocked the legitimate concept — does not apply.
+    Both knobs are additive; the global PASS-1 call is unchanged."""
     concepts = [c for c in kb.get_all_concepts()
-                if not c.get("swap", False) and c.get("pillar_id")]
+                if not c.get("swap", False) and c.get("pillar_id")
+                and (pillar_id is None or c.get("pillar_id") == pillar_id)]
     if not concepts:
         return None, 0.0
     block = "\n".join(f"{i}. {c['name']}: {(c.get('explanation') or '').strip()}"
@@ -216,8 +236,11 @@ def match_concept(item: str) -> tuple[dict | None, float]:
                 # B2(c): a match resting only on a generic everywhere-token must clear a
                 # higher bar than one anchored by a distinguishing word — this rejects shallow
                 # keyword overlap while genuine high-confidence semantic matches still pass.
-                floor = (CONCEPT_GENERIC_FLOOR
-                         if _only_generic_overlap(item, cand) else CONCEPT_MATCH_THRESHOLD)
+                # The re-route disables this (see docstring): the area match already supplied
+                # the discriminating evidence the generic-floor stands in for.
+                floor = CONCEPT_MATCH_THRESHOLD
+                if apply_generic_floor and _only_generic_overlap(item, cand):
+                    floor = CONCEPT_GENERIC_FLOOR
                 if conf >= floor:
                     return cand, conf
     except Exception as e:
@@ -314,6 +337,52 @@ def pillar_gist(name: str) -> str:
     return first + "." if first else ""
 
 
+def normalize_name(name: str) -> str:
+    """Capitalize the first letter of a USER-supplied area/point name so it matches the
+    KB presentation style (KB pillars are Title Case). First-letter-only by design (D6):
+    upper-casing just the leading character avoids mangling acronyms or proper terms that
+    sit inside the name ("data privacy" -> "Data privacy", not "Data Privacy"). Idempotent;
+    leaves an already-capitalised or empty string unchanged."""
+    s = (name or "").strip()
+    if not s:
+        return s
+    return s[0].upper() + s[1:]
+
+
+def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
+    """The canonical KB text for a matched concept — the (ii) shared add wording across arms.
+    Prefers the concept's KB key-question bullet (the pillar sub_bullet whose lead phrase is
+    the concept name); falls back to the concept NAME when the concept is not surfaced as a
+    bullet (most of the 31 concepts). `refs=True` keeps inline [a] citation refs (EXP); False
+    strips them (BlackBox / HITL render no sources). None if the id is unknown."""
+    c = kb.get_concept_by_id(concept_id)
+    if not c:
+        return None
+    name = (c.get("name") or "").strip()
+    bullet = name or None
+    pillar = kb.get_pillar_by_id(c.get("pillar_id"))
+    if pillar and name:
+        nlow = name.lower()
+        for b in pillar.get("sub_bullets", []):
+            if _strip_source_refs(b).split(":", 1)[0].strip().lower() == nlow:
+                bullet = b
+                break
+    if bullet is None:
+        return None
+    return bullet if refs else _strip_source_refs(bullet)
+
+
+def canonical_add_bullet(text: str, *, refs: bool = True) -> str | None:
+    """If `text` confidently matches a KB concept (the matcher gate), return that concept's
+    canonical KB bullet (the (ii) shared add wording) — else None, so the caller keeps the
+    user's own wording. The cross-pillar companion to match_key_question (which is scoped to
+    one pillar): this recognises a concept wherever it lives in the KB."""
+    km = locate(text)
+    if km.level == "concept" and km.concept_id:
+        return concept_bullet(km.concept_id, refs=refs)
+    return None
+
+
 def locate(user_text: str) -> KBMatch:
     """Resolve user text against the WHOLE KB hierarchy, most-specific-first (§3.2):
         PASS 1  CONCEPT  (name + explanation)                 -> level=concept (+id)
@@ -355,6 +424,27 @@ def locate(user_text: str) -> KBMatch:
     # PASS 2 — area, enriched with its concrete concerns (key_questions + sub_bullets)
     pillar_name, ascore = _match_area(probe)
     if pillar_name:
+        # §3.2 re-route: PASS 2's enrichment lists each area's CONCEPT NAMES, so the area
+        # matcher fires when the term is really one of those concepts ("data privacy" matched
+        # Solution Design only because that area lists the PII concept). Per §3.2 a concept
+        # phrasing is "not a separate level" — it IS the concept. So before returning a pillar,
+        # re-probe the concepts SCOPED TO THIS AREA: the area match has already established
+        # topical relevance, so the generic-floor (which blocked the legitimate within-area
+        # concept on shared-token grounds) is dropped here. A within-area concept hit returns
+        # level=concept (the specific element, I-3); only a genuine whole-area term stays
+        # level=pillar. This is the matcher-granularity fix — it never widens what matches the
+        # AREA, it only re-labels an area hit that is actually a concept.
+        pidf = _pillar_id_for_name(pillar_name)
+        if pidf:
+            sub, sscore = match_concept(probe, pillar_id=pidf, apply_generic_floor=False)
+            if sub:
+                cwithheld = _pillar_is_withheld(pillar_name)
+                return KBMatch(
+                    pillar=pillar_name, pillar_is_withheld=cwithheld, level="concept",
+                    concept_id=sub["id"], matched_text=sub.get("name"),
+                    match_type="revealed_withheld" if cwithheld else "surfaced_unreached_shown",
+                    score=sscore,
+                )
         withheld = _pillar_is_withheld(pillar_name)
         return KBMatch(
             pillar=pillar_name, pillar_is_withheld=withheld, level="pillar",

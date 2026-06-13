@@ -63,6 +63,12 @@ class AddOutcome:
     text: str | None = None           # raw user text for add_sub_bullet (F-M6: NOT model output)
     also_covered: str | None = None   # B1.1: a presented pillar where this also lives (note only)
     matched_text: str | None = None   # exact KB text of the matched concept (duplicate messages)
+    navigate_bullet: str | None = None   # §2a: canonical bullet (refs stripped) of a recognised
+                                         # concept, carried through navigate so a COUNTED concept
+                                         # that is not itself a shown sub_bullet still renders on
+                                         # arrival (else the agency act leaves no artifact).
+    navigate_concept_id: str | None = None   # §2a: the concept id, so an arm can re-derive the
+                                             # bullet at its own ref level (EXP keeps refs).
 
 
 @dataclass
@@ -152,6 +158,9 @@ class HandlerSession(Protocol):
     # --- parked flow state (shared; replaces per-arm pending_*) ---
     pending: PendingAction | None
     pending_suggestion: dict | None            # {level, item, origin} — D7 / B6 memory
+    # pending_placement: {kind, item, target?, level?} — the #4 ask-flow / #1#3 navigate
+    #   offer. Read via getattr(...) so it needs no __init__ slot in BaseAgent; set/cleared
+    #   by add_handler/resolve_placement. Walkthrough arms (EXP) only; BB renders + clears.
     last_discussed: m.KBMatch | None           # Fork-A deictic target (current focus)
     shown_bullets: list[str]                   # currently-shown bullets (positional removal)
     # --- shared contribution state (both arms have these) ---
@@ -261,6 +270,117 @@ def _add_accepts_suggestion(ps: dict, intent: str, detail, parent, user_text: st
     return False
 
 
+# ── #4 placement-choice detection (D2: deterministic phrasing first, locate last) ──────
+_OWN_AREA = ("own area", "separate area", "new area", "its own", "on its own", "own pillar",
+             "separate pillar", "new pillar", "new section", "standalone", "by itself",
+             "separate", "new topic", "different area", "own thing")
+_HERE = ("keep it here", "under this", "this area", "this pillar", "right here", "under it",
+         "where we are", "current area", "under current", "keep here", "here", "current")
+
+
+def _placement_choice(text: str):
+    """Resolve a reply to the #4 ask ("own area / under current / under a named area").
+    Deterministic phrasing first (D2); a named destination resolves via locate(); anything
+    unrecognised returns ('unclear', None) so dispatch clears the offer and routes normally.
+    Returns ('own',None) | ('current',None) | ('named',<pillar>) | ('unclear',None)."""
+    n = _norm(text)
+    if any(p in n for p in _OWN_AREA):
+        return ("own", None)
+    # explicit "under/in/to <X>" where X resolves to a real area -> named (checked before the
+    # generic 'here' words so "under feasibility" is a named area, not the current one).
+    mobj = re.search(r"\b(?:under|in|to|put it in|add it to)\s+(.+)$", n)
+    if mobj:
+        km = m.locate(mobj.group(1).strip())
+        if km.level in ("pillar", "concept") and km.pillar:
+            return ("named", km.pillar)
+    if any(p in n for p in _HERE):
+        return ("current", None)
+    # NOTE (bug-A fix): no bare-name fallback. A reply must use explicit placement language
+    # (own-area phrasing, "under <X>", or a current-pillar deictic) to count as an answer. A
+    # fresh command like "consider data quality" must NOT be read as "put the parked item
+    # under data-quality's pillar" — it returns 'unclear' so dispatch clears the offer and
+    # routes the new turn normally.
+    return ("unclear", None)
+
+
+def _wants_navigate(text: str) -> bool:
+    """A reply that ACCEPTS a navigate offer ("yes" / "go there" / "let's go")."""
+    if _affirms(text):
+        return True
+    n = _norm(text)
+    return n.startswith(("go ", "go", "navigate", "take me", "lets go", "let us go", "jump"))
+
+
+def _parent_is_explicit(parent: str | None, user_text: str) -> bool:
+    """Point-1 guard: did the USER actually place the add under `parent`, or did the
+    classifier infer the current pillar? True only when the user named the destination
+    (a content word of the pillar appears in the raw text) or used a current-pillar deictic
+    ("here" / "this pillar"). Prevents "what about data quality" (parent inferred as the
+    current pillar) from being dumped there instead of routed through recognition."""
+    if not parent:
+        return False
+    t = _norm(user_text)
+    if any(d in t for d in ("here", "this pillar", "this area", "this section", "this one")):
+        return True
+    ptoks = [w for w in re.findall(r"[a-z]+", _norm(parent)) if len(w) >= 4]
+    return any(w in t for w in ptoks)
+
+
+def resolve_placement(session: HandlerSession, user_text: str) -> Outcome | None:
+    """Resolve a parked pending_placement. Returns an Outcome the persona renders, or None
+    when the reply does not answer the offer (dispatch then clears it and routes the turn
+    normally — "anything else -> dispatch normally"). The pending_placement is cleared here
+    in every branch; only the resolved PLACEMENT counts (D-count), never the ask itself."""
+    pp = getattr(session, "pending_placement", None) or {}
+    session.pending_placement = None
+    kind = pp.get("kind")
+    item = pp.get("item", "")
+
+    if kind == "navigate":
+        if _wants_navigate(user_text):
+            return AddOutcome(action="navigated", pillar=pp.get("target"), level="pillar",
+                              counted=False, source="user_spontaneous",
+                              navigate_bullet=pp.get("navigate_bullet"),
+                              navigate_concept_id=pp.get("concept_id"))  # §2a
+        # declined: for a CONCEPT offer, an explicit "keep it here" records it under the
+        # current area. If the surfacing was already credited at the offer (D-a, unreached
+        # concept), the placement does NOT count again — counted_here guards the double.
+        if (pp.get("level") == "concept" and session.current_pillar()
+                and any(k in _norm(user_text) for k in ("keep", "here", "stay", "leave it"))):
+            dest = session.current_pillar()
+            slot = m.place_sub_point(item, dest)
+            session.add_sub_point(slot.pillar, item)
+            return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
+                              counted=not pp.get("counted_here", False), text=item,
+                              source="user_spontaneous")
+        return None
+
+    if kind == "novel":
+        choice, named = _placement_choice(user_text)
+        if choice == "own":
+            name = m.normalize_name(item)            # D6 style: "culture" -> "Culture"
+            session.surface_pillar(name)
+            return AddOutcome(action="added_new", pillar=name, level="pillar", counted=True,
+                              matched_pillar_id=None, text=name, source="user_spontaneous")
+        if choice == "current" and session.current_pillar():
+            dest = session.current_pillar()
+            slot = m.place_sub_point(item, dest)
+            session.add_sub_point(slot.pillar, item)
+            return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
+                              counted=True, text=item, source="user_spontaneous")
+        if choice == "named" and named:
+            presented = {n.lower() for n in session.presented_pillars()}
+            dest = named if named.lower() in presented else m.normalize_name(named)
+            if dest.lower() not in presented:
+                session.surface_pillar(dest)
+            slot = m.place_sub_point(item, dest)
+            session.add_sub_point(slot.pillar, item)
+            return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
+                              counted=True, text=item, source="user_spontaneous")
+        return None                                  # unclear -> clear + dispatch normally
+    return None
+
+
 # ── small KB helper ──────────────────────────────────────────────────────────
 def _pillar_id(name: str | None) -> str | None:
     if not name:
@@ -274,14 +394,18 @@ def _pillar_id(name: str | None) -> str | None:
 # ════════════════════════════════════════════════════════════════════════════
 def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession,
                 *, text: str, parent: str | None = None) -> AddOutcome:
-    """add / revisit. Consumes locate()'s KBMatch (the F-M1/F-M2 convergence point):
-        level==concept  -> the user named an existing criterion -> DUPLICATE (no count)
-        level==pillar   -> a whole area:
-                             already presented      -> DUPLICATE
-                             not yet presented       -> REVEAL (add_pillar + matched id)
-        level==none     -> NOVEL: under a destination pillar -> sub_bullet; else new area
-    `revisit` is pure navigation to a PASSED pillar (the router never lets revisit carry
-    new content — that is an `add` with `parent`), so it returns action='navigated'."""
+    """add / revisit. Consumes locate()'s KBMatch (the F-M1/F-M2 convergence point).
+    With an explicit parent ("add X under Y") X is placed under Y (B1.1). With NO parent:
+        level==concept  -> known criterion living under Z -> navigate_offer (#1/#3): offer
+                           to go to Z or keep it here; park pending_placement.
+        level==pillar   -> withheld  -> REVEAL (add_pillar; the user's agency signal, #5)
+                           shown      -> navigate_offer: presented = go back & edit, unreached
+                                          = go there now; park pending_placement (no count).
+        level==none     -> NOVEL -> ask_placement (#4): never auto-placed; ask own-area /
+                           under-current / under-named and resolve the choice next turn.
+    `revisit` is pure navigation to an existing pillar (D5: keyed off the router's revisit
+    intent, not a literal word; the router never lets revisit carry new content — that is an
+    `add` with `parent`), so it returns action='navigated'."""
     if intent == "revisit":
         # Navigate to the named (passed) area + re-render; no contribution counted.
         return AddOutcome(action="navigated", pillar=km.pillar, level="pillar",
@@ -299,6 +423,7 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
                               counted=False, text=text, matched_text=km.matched_text,
                               source=source)
         if parent.lower() not in presented:
+            parent = m.normalize_name(parent)   # D6 style: "culture" -> "Culture"
             session.surface_pillar(parent)   # register a NOVEL destination so it renders (F-A fix)
         slot = m.place_sub_point(text, parent)
         session.add_sub_point(slot.pillar, text)
@@ -311,34 +436,61 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
                           counted=True, text=text, also_covered=also,
                           explanation=(m.pillar_gist(also) if also else None), source=source)
 
-    # 2 — named existing criterion (no placement) -> duplicate (F-M1). No count, no artifact.
+    # 2 — named existing CRITERION (no placement). The user raised a known concept that
+    #     lives under pillar Z -> offer to navigate there (#1/#3), parking the offer. When Z
+    #     is NOT yet presented, surfacing it is an agency act -> count add_sub_bullet ONCE
+    #     (D-a). The offer is grounded with the concept's KB explanation (D-c).
     if km.level == "concept":
-        return AddOutcome(action="duplicate", pillar=km.pillar, level="concept",
-                          counted=False, matched_text=km.matched_text, source=source)
+        presented = {n.lower() for n in session.presented_pillars()}
+        unreached = bool(km.pillar) and km.pillar.lower() not in presented
+        key = (km.concept_id or km.matched_text or text or "").lower()
+        seen = getattr(session, "_agency_concepts", None)
+        if seen is None:
+            seen = set()
+            session._agency_concepts = seen
+        counted = bool(unreached and key and key not in seen)   # D-a: once, unreached only
+        if counted:
+            seen.add(key)
+        expl = ((g.ground_concept(km.concept_id) if km.concept_id else None)
+                or m.pillar_gist(km.pillar) or None)            # D-c grounding
+        # §2a: capture the concept's canonical KB bullet so a later "go there" can RENDER it.
+        # refs=False here is the arm-neutral store; EXP re-derives with refs on its own render
+        # path. None when the concept has no bullet form — the navigate then just re-renders
+        # the pillar as before (no regression).
+        nav_bullet = m.concept_bullet(km.concept_id, refs=False) if km.concept_id else None
+        session.pending_placement = {"kind": "navigate", "target": km.pillar,
+                                     "level": "concept", "item": text,
+                                     "counted_here": counted,
+                                     "concept_id": km.concept_id,
+                                     "navigate_bullet": nav_bullet}
+        return AddOutcome(action="navigate_offer", pillar=km.pillar, level="sub_bullet",
+                          counted=counted, matched_text=km.matched_text,
+                          explanation=expl, text=text, source="user_spontaneous")
 
     # 3 — resolved to a whole AREA.
     if km.level == "pillar":
-        if km.pillar and km.pillar.lower() in presented:
-            return AddOutcome(action="duplicate", pillar=km.pillar, level="pillar",
-                              counted=False, source=source)
-        # not yet presented -> reveal it (withheld reveal OR shown-but-unreached) [F-M2]
-        session.surface_pillar(km.pillar)
-        return AddOutcome(action="revealed", pillar=km.pillar, level="pillar",
-                          counted=True, matched_pillar_id=_pillar_id(km.pillar),
-                          explanation=g.ground_pillar(km.pillar) or None, source=source)
+        # 3a — WITHHELD pillar named by the user -> reveal-on-match (the agency signal,
+        #      #5 sibling). The agent never offers these; surfacing one is the user's act.
+        if km.pillar_is_withheld and not (km.pillar and km.pillar.lower() in presented):
+            session.surface_pillar(km.pillar)
+            return AddOutcome(action="revealed", pillar=km.pillar, level="pillar",
+                              counted=True, matched_pillar_id=_pillar_id(km.pillar),
+                              explanation=g.ground_pillar(km.pillar) or None, source=source)
+        # 3b — a SHOWN pillar (presented or not-yet-reached) -> offer to navigate to it
+        #      (presented: "go back and edit"; unreached: "go there now"). Naming a planned
+        #      shown pillar is navigation, never a counted contribution. Park the offer.
+        session.pending_placement = {"kind": "navigate", "target": km.pillar,
+                                     "level": "pillar", "item": text}
+        return AddOutcome(action="navigate_offer", pillar=km.pillar, level="pillar",
+                          counted=False, explanation=m.pillar_gist(km.pillar) or None,
+                          source=source)
 
-    # 4 — NOVEL (level==none, no explicit parent). Under the walk cursor -> sub-point;
-    #     otherwise a brand-new area (BlackBox / end-of-walk): create it now, then the
-    #     render invites the points one at a time (B1.2 two-step).
-    dest = session.current_pillar()
-    if dest:
-        slot = m.place_sub_point(text, dest)
-        session.add_sub_point(slot.pillar, text)
-        return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
-                          counted=True, text=text, source=source)
-    session.surface_pillar(text)                 # BlackBox: no walkthrough focus -> new area
-    return AddOutcome(action="added_new", pillar=text, level="pillar",
-                      counted=True, matched_pillar_id=None, text=text, source=source)
+    # 4 — NOVEL (level==none, no explicit parent). D7: never auto-place. ASK the user where
+    #     it goes (own area / under the current area / under a named area); park the question
+    #     and resolve their choice next turn in resolve_placement (count follows the choice).
+    session.pending_placement = {"kind": "novel", "item": text}
+    return AddOutcome(action="ask_placement", pillar=None, level="none",
+                      counted=False, text=text, source=source)
 
 
 
@@ -578,6 +730,14 @@ def dispatch(intent_result, session: HandlerSession, *, user_text: str,
     detail = intent_result.detail
     parent = intent_result.parent
 
+    # 0a — a parked placement offer (#4 ask-flow / #1#3 navigate) owns this turn IF the
+    #      reply answers it; a non-answer clears it (inside resolve_placement) and the turn
+    #      routes normally below.
+    if getattr(session, "pending_placement", None) is not None:
+        placed = resolve_placement(session, user_text)
+        if placed is not None:
+            return placed
+
     # 0b — a pending agent suggestion (D7) or removal-offer (B6) owns an affirmation.
     if session.pending_suggestion is not None:
         ps = session.pending_suggestion
@@ -599,6 +759,13 @@ def dispatch(intent_result, session: HandlerSession, *, user_text: str,
         # B3: for an ADD, resolve WHAT is being added (detail), not the destination
         # (parent). "add X under Y" must look up X, not Y — else it false-matches the
         # Y pillar and blocks the add. revisit carries no content -> resolve its target.
+        # Point-1 guard: the classifier sometimes INFERS parent=current_pillar even when the
+        # user named no destination ("what about data quality" -> parent="Strategic Fit").
+        # Honor parent ONLY when the user actually placed it (named it, or a current-pillar
+        # deictic); otherwise drop it so the add goes through concept recognition / the ask-
+        # flow instead of being dumped under the current pillar.
+        if intent == "add" and parent and not _parent_is_explicit(parent, user_text):
+            parent = None
         probe = (detail or user_text) if intent == "add" else (parent or detail or user_text)
         km = m.locate(probe)
         return add_handler(intent, km, source, session, text=detail or user_text, parent=parent)

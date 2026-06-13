@@ -529,6 +529,11 @@ class ExplainableAgent(BaseAgent):
         self.walkthrough_done     = False
         self.swap_presented       = False
         self.swap_position        = 0
+        # Seen-tracking (Issue 3): concepts already PRESENTED as a live stop. advance
+        # skips these so navigating back to edit a pillar never re-walks seen ones; the
+        # frontier resumes at the first unseen concept. A withheld reveal marks its pillar
+        # seen too (it is shown in full once, as a one-off block).
+        self._seen_concepts       = set()
 
         # ── Step 4c: shared HandlerSession flow state (replaces pending_excl /
         #    pending_add / pending_clarify / pending_sub_excl). interaction/handlers.py
@@ -636,6 +641,27 @@ class ExplainableAgent(BaseAgent):
 
     def _is_wrong_concept(self, concept: str) -> bool:
         return concept.lower() == self.concept_swap.config["wrong_concept"].lower()
+
+    def _advance_to_next_unseen(self) -> bool:
+        """Issue 3: move the cursor to the first UNSEEN, non-excluded concept — forward from
+        the cursor first, then any unseen left behind (e.g. skipped by a forward navigate),
+        so every concept (incl. the swap at its fixed slot) is presented exactly once before
+        the summary. Returns False when all are seen/excluded, leaving the cursor past the end
+        so current_pillar()/_current_concept() report the walk as exhausted (None)."""
+        excl = [e.lower() for e in self.excluded_concepts]
+        n = len(self.walkthrough_concepts)
+        for i in range(self.walkthrough_index + 1, n):
+            c = self.walkthrough_concepts[i].lower()
+            if c not in excl and c not in self._seen_concepts:
+                self.walkthrough_index = i
+                return True
+        for i in range(0, n):
+            c = self.walkthrough_concepts[i].lower()
+            if c not in excl and c not in self._seen_concepts:
+                self.walkthrough_index = i
+                return True
+        self.walkthrough_index = n          # exhausted -> current_pillar() == None
+        return False
 
     # ══════════════════════════════════════════════════════════════════════
     # Addition flow helpers — Change log: 2026-05-28
@@ -817,6 +843,7 @@ class ExplainableAgent(BaseAgent):
         #      inside removal_handler (challenge → confirm → detection, §0 — no delete),
         #      so it is correctly excluded here. ──
         if (self.pending is None and self.pending_suggestion is None
+                and getattr(self, "pending_placement", None) is None
                 and self.swap_presented and not self.concept_swap.is_detected
                 and intent not in ("add", "remove", "question")):
             if self.concept_swap.check_detection(user_input):       # sets is_detected
@@ -934,21 +961,32 @@ class ExplainableAgent(BaseAgent):
         if match:
             stored = match["question"]
         else:
-            stored = self._format_sub_bullet(text)
+            # D-c / (ii): if the text matches a KB CONCEPT anywhere, store that concept's
+            # canonical KB bullet (refs KEPT for EXP -> the render moves them to the Sources
+            # line). No match -> keep the user's wording (no sources).
+            cb = matching.canonical_add_bullet(text, refs=True)
+            stored = cb if cb else self._format_sub_bullet(text)
         kbp = next((p for p in kb.get_all_pillars()
                     if p["name"].lower() == pillar.lower()), None)
-        already_static = any(
-            _INLINE_REF_RE.sub("", stored).strip().lower()
-            == _INLINE_REF_RE.sub("", b).strip().lower()
-            for b in (kbp.get("sub_bullets", []) if kbp else [])
-        )
+        _norm_ref = lambda b: _INLINE_REF_RE.sub("", b).strip().lower()
+        static_hit = next((b for b in (kbp.get("sub_bullets", []) if kbp else [])
+                           if _norm_ref(b) == _norm_ref(stored)), None)
+        already_static = static_hit is not None
         self.user_sub_points.setdefault(pillar, [])
         is_new = (not already_static
                   and stored not in self.user_sub_points[pillar]
                   and not self._is_excluded_bullet(pillar, stored))
         if is_new:
             self.user_sub_points[pillar].append(stored)
-        self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
+        # Issue 2: when it is NOT new, record WHICH existing bullet it duplicates so the
+        # render can name it ("already covered as <bullet>").
+        matched = None
+        if not is_new:
+            matched = static_hit or next((p for p in self.user_sub_points[pillar]
+                                          if p == stored), stored)
+            matched = _INLINE_REF_RE.sub("", matched).strip()
+        self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text,
+                              "is_new": is_new, "matched": matched}
 
     # ── swap channel (PRESERVED per-arm, §0 #4) ─────────────────────────────
 
@@ -991,22 +1029,72 @@ class ExplainableAgent(BaseAgent):
                     "or say \"next\" to move on.*")
 
     def render_add(self, o):
-        # revisit -> navigation to a PASSED pillar (the router never lets revisit carry
-        # new content). Jump the cursor if it's a passed, non-excluded concept; else
-        # non-destructive grounded Q&A.
+        # revisit / navigate -> move the cursor to the named pillar and re-render it (the
+        # user can add/change/question there). PASSED pillar -> jump back; UNREACHED shown
+        # pillar -> bring it to the front of the remaining walk (HITL-consistent: nothing is
+        # skipped). Not in the walk at all -> non-destructive grounded Q&A.
         if o.action == "navigated":
             target = o.pillar
-            past = [c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
-                    if c.lower() not in [e.lower() for e in self.excluded_concepts]]
-            if target and target in past:
-                self.walkthrough_index = self.walkthrough_concepts.index(target)
+            if target and target in self.walkthrough_concepts:
+                idx = self.walkthrough_concepts.index(target)
+                back = idx <= self.walkthrough_index
+                if not back:
+                    self.walkthrough_concepts.pop(idx)
+                    self.walkthrough_concepts.insert(self.walkthrough_index, target)
+                else:
+                    self.walkthrough_index = idx
                 self.walkthrough_done = False
-                yield f"Going back to **{target}** — here's where we left off.\n\n"
+                lead = "Going back to" if back else "Let's look at"
+                yield f"{lead} **{target}** — here's where we are.\n\n"
                 yield from self._stream_concept(is_first=False)
+                # §2a: a recognised concept that is NOT one of the pillar's shown bullets would
+                # otherwise be invisible on arrival, leaving the counted agency act with no
+                # artifact. Surface its canonical bullet. EXP keeps refs (re-derived from the
+                # concept id); falls back to the arm-neutral stripped text the handler carried.
+                # GUARD: when the concept IS already a shown sub-bullet of the destination
+                # (e.g. "data quality" navigating to Feasibility, where it is a shown bullet),
+                # _stream_concept already printed it — rendering again duplicates it. Only
+                # surface a concept the destination does not already show.
+                cid = getattr(o, "navigate_concept_id", None)
+                nb = (matching.concept_bullet(cid, refs=True) if cid else None) \
+                    or getattr(o, "navigate_bullet", None)
+                if nb:
+                    already = {matching._strip_source_refs(b).strip().lower()
+                               for b in (self.presented_sub_bullets().get(target, []))}
+                    nb_key = matching._strip_source_refs(nb).strip().lower()
+                    if nb_key not in already:
+                        yield f"\nYou raised this — adding it here:\n- {nb}\n"
             else:
                 ev.question(self._evctx(), _sink)   # revisit -> grounded Q&A (no turn outcome)
                 yield from self._stream_concept_qa()
             return
+
+        # #4 ask-flow: a novel add -> ask where it goes (never auto-placed, D7).
+        if o.action == "ask_placement":
+            cur = self.current_pillar()
+            if cur:
+                msg = (f"Where should **{o.text}** go — its own area, or a point under "
+                       f"**{cur}**? *(Or name another area.)*")
+            else:
+                msg = (f"Where should **{o.text}** go — its own area, or a point under one "
+                       f"of the existing areas? *(If under one, which?)*")
+            self._emit(msg); yield msg; return
+
+        # #1/#3 navigate offer: the raised term lives elsewhere (a known concept, or a
+        # shown pillar) -> offer to go there (or, for a concept, keep it here).
+        if o.action == "navigate_offer":
+            gist = f" — {o.explanation}" if o.explanation else ""
+            presented = {n.lower() for n in self.presented_pillars()}
+            if o.matched_text:                       # a known concept living under o.pillar
+                msg = (f"That's already covered under **{o.pillar}** as *{o.matched_text}*"
+                       f"{gist} Want to go there, or keep it here?")
+            elif o.pillar and o.pillar.lower() in presented:
+                msg = (f"**{o.pillar}** is already in the framework{gist} "
+                       f"Want to go back and add, change, or question anything there?")
+            else:
+                msg = (f"**{o.pillar}** is an area I'll cover{gist} "
+                       f"Want to go there now, or keep going?")
+            self._emit(msg); yield msg; return
 
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
@@ -1023,8 +1111,21 @@ class ExplainableAgent(BaseAgent):
         if o.action == "revealed" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                msg = (f"Good call — **{o.pillar}** is an important area; "
-                       f"we'll cover it in the walkthrough." + self._NEXT_AFFORD)
+                # Issue 1: the user surfaced a withheld pillar -> show it IN FULL once
+                # (description + bullets + sources), as a one-off block that does not move
+                # the walk cursor, and invite them to work on it. Mark it seen so advance
+                # never re-presents it.
+                from backend.knowledge import knowledge_base as kb
+                self._seen_concepts.add((o.pillar or "").lower())
+                kbp = next((p for p in kb.get_all_pillars()
+                            if p["name"].lower() == (o.pillar or "").lower()), None)
+                desc = (kbp.get("description", "").strip() if kbp else "")
+                parts = [f"Good call — **{o.pillar}** is an important area."]
+                if desc:
+                    parts.append(desc)
+                parts.append(self._render_pillar_block(o.pillar))
+                parts.append('Want to add a point under it, or move on?')
+                msg = "\n\n".join(parts)
             else:
                 msg = (f"**{o.pillar}** is already part of the framework — we'll get to it."
                        + self._NEXT_AFFORD)
@@ -1043,7 +1144,13 @@ class ExplainableAgent(BaseAgent):
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(o.pillar)}" + self._NEXT_AFFORD)
             else:
-                msg = f"That's already noted under **{o.pillar}**." + self._NEXT_AFFORD
+                matched = (self._last_sub_add or {}).get("matched")
+                if matched:
+                    msg = (f"That looks like it's already covered under **{o.pillar}** as "
+                           f"*{matched}*. Want to add it as a separate point anyway, or "
+                           f"leave it as is?" + self._NEXT_AFFORD)
+                else:
+                    msg = (f"That's already noted under **{o.pillar}**." + self._NEXT_AFFORD)
             self._emit(msg); yield msg; return
 
         if o.action == "added_new" and o.level == "pillar":
@@ -1159,11 +1266,17 @@ class ExplainableAgent(BaseAgent):
                    "remove, or question any part of the framework.")
             self._emit(msg); yield msg; return
         if isinstance(outcome, handlers.AdvanceOutcome) and not self.walkthrough_done:
-            self.walkthrough_index += 1
-            if self.current_pillar() is None:
-                yield from self._stream_summary()
-            else:
+            if self._advance_to_next_unseen():       # Issue 3: skip already-presented
                 yield from self._stream_concept(is_first=False)
+            else:
+                # Walk complete. The summary itself is the §3.8 terminal artifact (no
+                # affordance, 6g EXP≡HITL byte-identical) — so the edit-invite rides as a
+                # SEPARATE trailing message, never folded into the logged summary (Point 1).
+                yield from self._stream_summary()
+                invite = ("\n\nThat's the full framework as it stands. Want to revisit any "
+                          "area to add, change, or question something? Otherwise, click "
+                          "**‼️End Session** above to finish.")
+                self._emit(invite); yield invite
             return
         # Fallback, or AdvanceOutcome past the end of the walk (intent != "doubt"):
         # doubt -> non-destructive grounded explanation (W5); W9: doubt on swap logs questioned.
@@ -1178,6 +1291,18 @@ class ExplainableAgent(BaseAgent):
             else:
                 yield from self._stream_concept_qa()
             return
+        # D: post-walk satisfaction. Once the walk is done and the summary has shown, an
+        # `advance` ("I'm happy", "move on", "next") is the user signalling they are finished —
+        # the generic add/remove/question menu below is the wrong reply (it reads as if the
+        # walk is still going). Point them at the close affordance instead. This NEVER ends the
+        # session or emits the protected "Session Ended" string (the ‼️End Session button owns
+        # that, per §0); it only tells the user the button is how they finish.
+        if (self.walkthrough_done
+                and isinstance(outcome, handlers.AdvanceOutcome)):
+            msg = ("Sounds like you're happy with the framework. When you're ready to finish, "
+                   "click **‼️End Session** above. Or if there's still something you'd like to "
+                   "**add**, **remove**, or **question**, go ahead.")
+            self._emit(msg); yield msg; return
         # none / 'start over' / unclear / advance-past-end -> affordance (§0: no session wipe).
         msg = ("I want to make sure I help with the right thing. You can **add** a point, "
                "**remove** something, **question** any part of the framework, ask me to "
@@ -1291,7 +1416,7 @@ class ExplainableAgent(BaseAgent):
         if concept is None:
             yield from self._stream_summary()
             return
-
+        self._seen_concepts.add(concept.lower())   # Issue 3: presented as a live stop
         is_wrong   = self._is_wrong_concept(concept)
         swap_block = self.concept_swap.get_system_prompt_block() if is_wrong else ""
 

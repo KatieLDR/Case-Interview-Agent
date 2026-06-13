@@ -366,6 +366,7 @@ class BlackBoxAgent(BaseAgent):
         #      `not override` gate. A NAMED swap removal is intent==remove and is
         #      detected inside removal_handler, so it is correctly excluded here.
         if (self.pending is None and self.pending_suggestion is None
+                and getattr(self, "pending_placement", None) is None
                 and self.concept_swap.is_injected and intent not in ("add", "remove", "question")):
             if self.concept_swap.check_detection(user_input):
                 # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
@@ -395,6 +396,11 @@ class BlackBoxAgent(BaseAgent):
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
         pillar  = self._normalize_pillar(pillar)
         matched, _ = matching.match_key_question(item, pillar)
+        if not matched:
+            # (ii): the item may match a KB concept whose canonical bullet lives in ANOTHER
+            # pillar (match_key_question is scoped to `pillar`). Ground it from the KB, refs
+            # stripped (BlackBox shows no sources); else keep the user's wording.
+            matched = matching.canonical_add_bullet(item, refs=False)
         stored  = matched if matched else self._format_sub_bullet(item)
         # Already a shown static bullet on this pillar (incl. KB-backed user pillars)
         # → already in the framework, don't duplicate. Change log: 2026-06-02
@@ -562,6 +568,26 @@ class BlackBoxAgent(BaseAgent):
         yield from self._ack_no_reprint()
 
     def render_add(self, o):
+        # #4 ask-flow: a novel add -> ask where it goes. BlackBox has no walkthrough cursor,
+        # so there is no "current area" option — own area, or under a named existing area.
+        if o.action == "ask_placement":
+            msg = (f"Should **{o.text}** be its own area, or a point under one of the "
+                   f"existing areas? *(If under one, which?)*")
+            self._emit(msg); yield msg; return
+
+        # #1/#3 navigate offer: BlackBox already shows the whole framework, so there is
+        # nowhere to navigate — just point at where it lives and re-render. Clear the parked
+        # offer (a navigate is not a BlackBox behaviour; nothing should resolve against it).
+        if o.action == "navigate_offer":
+            self.pending_placement = None
+            gist = f" {o.explanation}" if o.explanation else ""
+            if o.level == "concept" and o.matched_text:
+                pre = (f"That's already covered under **{o.pillar}** as "
+                       f"*{o.matched_text}*.{gist}\n\n")
+            else:
+                pre = f"**{o.pillar}** is already in the framework.{gist}\n\n"
+            yield from self._yield_rerender(pre); return
+
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
                 pre = f"**{o.pillar}** is already in the framework.\n\n"
