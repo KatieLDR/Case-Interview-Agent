@@ -724,10 +724,14 @@ class BaseAgent:
         The §3.6 single shared questioned-vs-detected prompt is Step 5."""
         swap_concept = self.concept_swap.config["wrong_concept"]
         prompt = (
-            "You are a classifier for a case interview tool.\n"
-            "Determine whether the user's message is a QUESTION or request for explanation "
-            "specifically ABOUT this concept:\n"
+            "You are a classifier for a case-interview framework tool.\n"
+            "The user is reviewing a framework that currently lists this concept among its items:\n"
             f'"{swap_concept}"\n\n'
+            "Decide whether the user's message questions, probes, or refers to THIS concept. "
+            "Treat it as about this concept if it refers to the metric in any way \u2014 including "
+            "indirect references such as 'steps', 'walking', 'movement', 'physical activity', "
+            "'the metric', 'per day', or 'well-being'. Answer false ONLY if the message is "
+            "clearly about a different, unrelated topic.\n\n"
             'Respond ONLY with valid JSON, no markdown:\n'
             '{"is_about_swap": true or false}\n\n'
             f'User message: "{user_input}"'
