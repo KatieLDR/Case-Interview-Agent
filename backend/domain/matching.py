@@ -77,15 +77,19 @@ You are a classifier for a case interview framework tool.
 The user wrote: "{item}".
 
 Below is a numbered list of analytical concepts, each as "Name: explanation".
-Decide whether the user's text clearly refers to ONE of these concepts — i.e.
-it is essentially that concept, or a specific instance of it, possibly worded
-differently.
+Decide whether the user's text refers to the SAME underlying concern as ONE of
+these concepts — the same analytical point, possibly worded differently.
 
 ─── CONCEPTS ────────────────────────────────────────────────────────────────
 {concepts}
 ────────────────────────────────────────────────────────────────────────────
-Match ONLY if you are confident it is essentially that concept. If the user's
-text is only loosely or topically related, set matched=false.
+Judge by MEANING, not shared words. Two phrases that share only a generic term
+(e.g. both contain "data") are NOT a match unless they address the same concern.
+For example "data privacy / protection" is about confidentiality and PII — it is
+NOT the same concern as data QUALITY or AVAILABILITY, even though both say "data".
+Match only if the user's text is essentially that concept; reward a confident,
+meaning-level match with high confidence and a loose/topical one with low. If it
+is only loosely or topically related, set matched=false.
 
 Respond ONLY with valid JSON, no markdown:
 {{"matched": true or false, "matched_index": integer or null, "confidence": float}}
@@ -160,6 +164,38 @@ def match_pillar(item: str) -> tuple[str | None, float]:
     return None, 0.0
 
 
+CONCEPT_GENERIC_FLOOR = 0.92   # B2(c): a generic-token-only match must clear this higher bar
+
+
+def _content_tokens(text: str) -> set:
+    return {t for t in re.findall(r"[a-z0-9]+", _norm(text or "")) if t not in _GLUE}
+
+
+_GENERIC_CACHE = None
+def _generic_tokens() -> set:
+    """Content tokens appearing in >=2 concept NAMES — too common to anchor a match alone."""
+    global _GENERIC_CACHE
+    if _GENERIC_CACHE is None:
+        counts: dict = {}
+        for c in kb.get_all_concepts():
+            if c.get("swap"):
+                continue
+            for t in _content_tokens(c.get("name", "")):
+                counts[t] = counts.get(t, 0) + 1
+        _GENERIC_CACHE = {t for t, n in counts.items() if n >= 2}
+    return _GENERIC_CACHE
+
+
+def _only_generic_overlap(item: str, concept: dict) -> bool:
+    """True when the user item shares NO distinguishing (non-generic) content token with the
+    matched concept's name+explanation — the match rests only on a generic everywhere-word
+    (e.g. "data privacy" vs "Data quality and availability", which share only "data")."""
+    item_toks = _content_tokens(item)
+    cand_toks = (_content_tokens(concept.get("name", ""))
+                 | _content_tokens(concept.get("explanation", "")))
+    return len((item_toks & cand_toks) - _generic_tokens()) == 0
+
+
 def match_concept(item: str) -> tuple[dict | None, float]:
     """Search every analytical concept (name + explanation) across all pillars, SWAP
     EXCLUDED. Returns the matched concept dict (keeps id + pillar_id) — not just the
@@ -173,10 +209,17 @@ def match_concept(item: str) -> tuple[dict | None, float]:
     try:
         parsed = classify_json(ADD_CONCEPT_MATCH_PROMPT.format(item=item, concepts=block))
         conf = parsed.get("confidence", 0.0)
-        if parsed.get("matched") and conf >= CONCEPT_MATCH_THRESHOLD:
+        if parsed.get("matched"):
             idx = parsed.get("matched_index")
             if idx is not None and 0 <= idx < len(concepts):
-                return concepts[idx], conf
+                cand = concepts[idx]
+                # B2(c): a match resting only on a generic everywhere-token must clear a
+                # higher bar than one anchored by a distinguishing word — this rejects shallow
+                # keyword overlap while genuine high-confidence semantic matches still pass.
+                floor = (CONCEPT_GENERIC_FLOOR
+                         if _only_generic_overlap(item, cand) else CONCEPT_MATCH_THRESHOLD)
+                if conf >= floor:
+                    return cand, conf
     except Exception as e:
         print(f"[matching._match_concept] {e}")
     return None, 0.0
