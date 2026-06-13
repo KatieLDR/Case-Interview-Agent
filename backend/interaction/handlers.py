@@ -338,6 +338,18 @@ def resolve_placement(session: HandlerSession, user_text: str) -> Outcome | None
 
     if kind == "navigate":
         if _wants_navigate(user_text):
+            # Withheld-reveal accept: the user confirmed discussing a hidden pillar they
+            # surfaced via one of its concepts (e.g. ROI -> Financial Impact). Reveal it now
+            # — surface_pillar puts it in the walk so the navigate actually lands, and this
+            # is the user's agency act, counted once (mirrors pillar-level 3a). Shared across
+            # all three arms because surface_pillar is each arm's own walk/list append.
+            if pp.get("reveal_on_accept") and pp.get("target"):
+                session.surface_pillar(pp.get("target"))
+                return AddOutcome(action="navigated", pillar=pp.get("target"), level="pillar",
+                                  counted=True, source="user_spontaneous",
+                                  matched_pillar_id=pp.get("matched_pillar_id"),
+                                  navigate_bullet=pp.get("navigate_bullet"),
+                                  navigate_concept_id=pp.get("concept_id"))  # §2a
             return AddOutcome(action="navigated", pillar=pp.get("target"), level="pillar",
                               counted=False, source="user_spontaneous",
                               navigate_bullet=pp.get("navigate_bullet"),
@@ -353,6 +365,18 @@ def resolve_placement(session: HandlerSession, user_text: str) -> Outcome | None
             return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
                               counted=not pp.get("counted_here", False), text=item,
                               source="user_spontaneous")
+        # §2a (fix-2): the reply did not resolve as an explicit navigate/keep here, but the
+        # intent router may still route it to this same target as `revisit`/`advance`
+        # ("yeah go there" misses _wants_navigate yet classifies as revisit). The parked
+        # offer (incl. its carried canonical bullet) is about to be cleared; stash it so the
+        # follow-on navigate to the SAME pillar carries navigate_bullet/_concept_id too —
+        # one shared carry across both the navigate-accept and the revisit/advance paths.
+        if pp.get("level") == "concept" and (pp.get("navigate_bullet") or pp.get("reveal_on_accept")):
+            session._carried_navigate = {"target": pp.get("target"),
+                                         "navigate_bullet": pp.get("navigate_bullet"),
+                                         "concept_id": pp.get("concept_id"),
+                                         "reveal_on_accept": pp.get("reveal_on_accept", False),
+                                         "matched_pillar_id": pp.get("matched_pillar_id")}
         return None
 
     if kind == "novel":
@@ -408,6 +432,24 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
     `add` with `parent`), so it returns action='navigated'."""
     if intent == "revisit":
         # Navigate to the named (passed) area + re-render; no contribution counted.
+        # §2a (fix-2): if a concept-navigate offer to THIS pillar was parked and not
+        # resolved on the navigate-accept path (e.g. "yeah go there" -> revisit), carry its
+        # canonical bullet through so the render seam surfaces the recognised concept on
+        # arrival. Same fields, same carry as the navigate-accept branch — one shared rule.
+        carry = getattr(session, "_carried_navigate", None)
+        session._carried_navigate = None
+        if carry and km.pillar and (carry.get("target") or "").lower() == km.pillar.lower():
+            if carry.get("reveal_on_accept"):
+                session.surface_pillar(km.pillar)
+                return AddOutcome(action="navigated", pillar=km.pillar, level="pillar",
+                                  counted=True, source=source,
+                                  matched_pillar_id=carry.get("matched_pillar_id"),
+                                  navigate_bullet=carry.get("navigate_bullet"),
+                                  navigate_concept_id=carry.get("concept_id"))
+            return AddOutcome(action="navigated", pillar=km.pillar, level="pillar",
+                              counted=False, source=source,
+                              navigate_bullet=carry.get("navigate_bullet"),
+                              navigate_concept_id=carry.get("concept_id"))
         return AddOutcome(action="navigated", pillar=km.pillar, level="pillar",
                           counted=False, source=source)
 
@@ -448,7 +490,11 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
         if seen is None:
             seen = set()
             session._agency_concepts = seen
-        counted = bool(unreached and key and key not in seen)   # D-a: once, unreached only
+        # A withheld-pillar concept defers its agency credit to the reveal on accept (below),
+        # so it must NOT also count at the offer. A SHOWN unreached concept keeps D-a (count
+        # the surfacing once, here).
+        counted = bool(unreached and key and key not in seen
+                       and not km.pillar_is_withheld)   # D-a: once, unreached, shown only
         if counted:
             seen.add(key)
         expl = ((g.ground_concept(km.concept_id) if km.concept_id else None)
@@ -458,14 +504,25 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
         # path. None when the concept has no bullet form — the navigate then just re-renders
         # the pillar as before (no regression).
         nav_bullet = m.concept_bullet(km.concept_id, refs=False) if km.concept_id else None
+        # A user-named concept under a WITHHELD, not-yet-presented pillar (e.g. "ROI" ->
+        # Payback period -> Financial Impact) is the USER's reveal act (#5 sibling), not the
+        # agent volunteering a hidden pillar. The OFFER only names the pillar and asks ("want
+        # to discuss there?"); the actual reveal+surface is deferred to the ACCEPT turn in
+        # resolve_placement, mirroring the pillar-level 3a contract. The agent-suggest path
+        # (suggest_handler) still never names a withheld pillar. counted_here stays False so
+        # the agency credit lands on the reveal at accept, not on the mere offer.
+        reveal_on_accept = bool(km.pillar_is_withheld and unreached)
         session.pending_placement = {"kind": "navigate", "target": km.pillar,
                                      "level": "concept", "item": text,
                                      "counted_here": counted,
                                      "concept_id": km.concept_id,
-                                     "navigate_bullet": nav_bullet}
+                                     "navigate_bullet": nav_bullet,
+                                     "reveal_on_accept": reveal_on_accept,
+                                     "matched_pillar_id": _pillar_id(km.pillar) if reveal_on_accept else None}
         return AddOutcome(action="navigate_offer", pillar=km.pillar, level="sub_bullet",
                           counted=counted, matched_text=km.matched_text,
-                          explanation=expl, text=text, source="user_spontaneous")
+                          explanation=expl, text=text, source="user_spontaneous",
+                          navigate_bullet=nav_bullet, navigate_concept_id=km.concept_id)
 
     # 3 — resolved to a whole AREA.
     if km.level == "pillar":
@@ -725,6 +782,11 @@ def dispatch(intent_result, session: HandlerSession, *, user_text: str,
     # 0 — a parked removal owns this turn: resolve the confirmation machine first.
     if session.pending is not None:
         return resolve_pending(session, user_text)
+
+    # §2a (fix-2): the navigate carry is strictly one-turn — set in resolve_placement (0a,
+    # below) and consumed in add_handler's revisit branch within THIS same call. Clear any
+    # residual from a prior turn here so a set-but-not-consumed carry can never leak forward.
+    session._carried_navigate = None
 
     intent = intent_result.intent
     detail = intent_result.detail

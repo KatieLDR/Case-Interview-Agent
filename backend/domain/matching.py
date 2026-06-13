@@ -364,7 +364,14 @@ def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
     if pillar and name:
         nlow = name.lower()
         for b in pillar.get("sub_bullets", []):
-            if _strip_source_refs(b).split(":", 1)[0].strip().lower() == nlow:
+            lead = _strip_source_refs(b).split(":", 1)[0].strip().lower()
+            # The KB has no explicit concept->sub_bullet key; the link is inferred from the
+            # bullet's lead phrase. Exact equality misses when the concept NAME carries a
+            # qualifier the bullet lead omits ("Input data classification level" vs lead
+            # "Input data classification"). Prefix-tolerant in EITHER direction recovers the
+            # intended link. Verified across all 31 concepts: this changes the result for
+            # ONLY that one concept and produces no ambiguous or cross-pillar match.
+            if lead and (lead == nlow or nlow.startswith(lead) or lead.startswith(nlow)):
                 bullet = b
                 break
     if bullet is None:

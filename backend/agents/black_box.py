@@ -581,7 +581,24 @@ class BlackBoxAgent(BaseAgent):
         if o.action == "navigate_offer":
             self.pending_placement = None
             gist = f" {o.explanation}" if o.explanation else ""
-            if o.level == "concept" and o.matched_text:
+            # §2a (BB fix): a recognised concept that is NOT already a shown bullet of its
+            # pillar must leave a visible artifact — BB has no two-turn navigate, so the
+            # store+show happens here, on the offer turn, under the shared contract. The
+            # carried canonical bullet (refs stripped — BB renders no sources) is stored
+            # under the target pillar. add_sub_point dedups: a concept already on screen
+            # (e.g. "data privacy" == the shown Input data classification bullet) is NOT
+            # re-added, so no duplicate. The re-render then shows the stored point.
+            nb = getattr(o, "navigate_bullet", None)
+            stored_new = False
+            if o.level == "sub_bullet" and o.pillar and nb:
+                already = {grounding._strip_source_refs(b).strip().lower()
+                           for b in self.presented_sub_bullets().get(o.pillar, [])}
+                if grounding._strip_source_refs(nb).strip().lower() not in already:
+                    self.add_sub_point(o.pillar, nb)
+                    stored_new = bool((self._last_sub_add or {}).get("is_new"))
+            if stored_new:
+                pre = f"Added under **{o.pillar}**.{gist}\n\n"
+            elif o.level == "concept" and o.matched_text:
                 pre = (f"That's already covered under **{o.pillar}** as "
                        f"*{o.matched_text}*.{gist}\n\n")
             else:
