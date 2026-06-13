@@ -496,7 +496,7 @@ class BaseAgent:
             emit(name, kbp.get("sub_bullets", []) if kbp else [])
 
         if closing:
-            lines.append("*Feel free to add, remove, or question any part of this — let's build this together.*")
+            lines.append("*You can add a new area, add a point under any area (e.g. \"add data quality under Feasibility\"), or question or remove anything.*")
         return "\n".join(lines).rstrip() + "\n"
 
     def _yield_rerender(self, preamble: str = ""):

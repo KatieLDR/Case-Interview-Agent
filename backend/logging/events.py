@@ -304,6 +304,9 @@ def _record_suggest(o, ctx, sink) -> list[str]:
 
 # ── advance ───────────────────────────────────────────────────────────────────
 def _record_advance(o, ctx, sink) -> list[str]:
+    if getattr(o, "elicited", False):     # #5: ask_agent_to_suggest -> advance, logged as suggest
+        return [_fire(sink, ctx, ASK_AGENT_SUGGESTION,
+                      {"level": "pillar", "suggested_item": None, "accepted": False})]
     if getattr(o, "passive", False):
         return [_fire(sink, ctx, PASSIVE_ADVANCE, {})]
     return []

@@ -820,38 +820,21 @@ class HITLAgent(BaseAgent):
         return "\n".join(lines) or "(none)"
 
     def _handle_suggest(self, user_input: str):
-        """ask_agent_to_suggest (normal turn) — STATE a suggestion drawn
-        DETERMINISTICALLY from the WITHHELD KB (catalog D1), grounded, NEVER free-form
-        -> cannot confabulate. Suggesting is NOT adding (no artifact, no add_pillar).
-        HITL override of the inherited BlackBox method: HITL tracks surfaced pillars
-        differently (walkthrough_concepts / user_contributed_concepts / excluded_
-        concepts, NOT user_added_pillars). The shared SuggestOutcome handler unifies
-        all three arms in Step 4 (§S)."""
-        surfaced = ({c.lower() for c in self.walkthrough_concepts}
-                    | {c.lower() for c in self.user_contributed_concepts}
-                    | {e.lower() for e in self.excluded_concepts})
-        withheld = [p for p in kb.get_all_pillars()
-                    if not p.get("shown", False) and p["name"].lower() not in surfaced]
-        if withheld:
-            target = withheld[0]
-            why = grounding.ground_pillar(target["name"]).split("\n")[0].strip()
-            # §3.6 ask_agent_suggestion OFFER (accepted=False) — the agent NAMED a withheld
-            # area on user request. Suggesting is not adding (I-4); accepting it later is a
-            # separate ask_agent_suggestion(accepted=True), never an add_pillar.
-            # C2-D1: park the offer so a following affirmation resolves as ACCEPTING
-            # THE AGENT's idea (agent-led reveal), not a user add. HITL has no add-new-
-            # pillar button, so acceptance is free-text only -> resolve in the normal turn.
-            self.pending_suggestion = {"level": "pillar", "item": target["name"],
-                                       "origin": "agent_suggest"}
-            ev.record(h.SuggestOutcome(level="pillar", suggested_item=target["name"],
-                                       accepted=False, revealed=False),
+        """ask_agent_to_suggest under reveal-on-match (#5): the agent NEVER names a withheld
+        pillar. Mid-walk -> advance to the next shown concept, logged as agent-suggest (the
+        user asked for guidance). Exhausted -> a throw-back inviting the user (buttons), no
+        withheld names. Mirrors the proactive move-on advance, with elicited=True."""
+        if self._current_concept() is not None and not self.walkthrough_done:
+            ev.record(h.AdvanceOutcome(passive=False, elicited=True),
                       self._evctx(modality="text"), _sink)
-            msg = (f"One area we haven't covered yet is **{target['name']}**"
-                   + (f" — {why}" if why else "")
-                   + "\n\nWant me to bring it into your framework? Just say **yes**.")
-        else:
-            msg = ("You've surfaced the main areas I'd flag — use the buttons to add, "
-                   "skip, or revisit any part of the framework.")
+            self.walkthrough_index += 1
+            if self._current_concept() is None:
+                yield from self._walkthrough_complete_message()
+            else:
+                yield from self._stream_concept(is_first=False)
+            return
+        msg = ("You've surfaced the main areas I'd flag — use the buttons to add, "
+               "skip, or revisit any part of the framework.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg

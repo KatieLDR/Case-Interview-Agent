@@ -61,6 +61,8 @@ class AddOutcome:
     source: str = "user_spontaneous"  # I-4 attribution (user_spontaneous | user_elicited)
     matched_pillar_id: str | None = None   # §3.6 add_pillar field (null for a novel area)
     text: str | None = None           # raw user text for add_sub_bullet (F-M6: NOT model output)
+    also_covered: str | None = None   # B1.1: a presented pillar where this also lives (note only)
+    matched_text: str | None = None   # exact KB text of the matched concept (duplicate messages)
 
 
 @dataclass
@@ -101,6 +103,7 @@ class QuestionOutcome:
 @dataclass
 class AdvanceOutcome:
     passive: bool = False             # passive_advance (no add/remove/question/suggest)
+    elicited: bool = False            # #5: advanced because the user asked for a suggestion
 
 
 @dataclass
@@ -284,14 +287,37 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
         return AddOutcome(action="navigated", pillar=km.pillar, level="pillar",
                           counted=False, source=source)
 
-    # 1 — named existing criterion -> duplicate (F-M1). No count, no artifact.
+    presented = {n.lower() for n in session.presented_pillars()}
+
+    # 1 — EXPLICIT PLACEMENT wins (agency, B1.1). "add X under Y" puts X under Y as the
+    #     user's own point, even when X also matches a known concept somewhere else. It is
+    #     a genuine duplicate ONLY when X already lives under the very pillar the user named.
+    if parent:
+        if (km.level == "concept" and km.pillar
+                and km.pillar.lower() == parent.lower()):
+            return AddOutcome(action="duplicate", pillar=parent, level="concept",
+                              counted=False, text=text, matched_text=km.matched_text,
+                              source=source)
+        if parent.lower() not in presented:
+            session.surface_pillar(parent)   # register a NOVEL destination so it renders (F-A fix)
+        slot = m.place_sub_point(text, parent)
+        session.add_sub_point(slot.pillar, text)
+        # Tell the user if X is ALSO covered elsewhere — but only name a pillar that is
+        # already on screen. Never leak a withheld area here; that is the reveal-on-match step.
+        also = (km.pillar if (km.level == "concept" and km.pillar
+                              and km.pillar.lower() != slot.pillar.lower()
+                              and km.pillar.lower() in presented) else None)
+        return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
+                          counted=True, text=text, also_covered=also,
+                          explanation=(m.pillar_gist(also) if also else None), source=source)
+
+    # 2 — named existing criterion (no placement) -> duplicate (F-M1). No count, no artifact.
     if km.level == "concept":
         return AddOutcome(action="duplicate", pillar=km.pillar, level="concept",
-                          counted=False, source=source)
+                          counted=False, matched_text=km.matched_text, source=source)
 
-    # 2 — resolved to a whole AREA.
+    # 3 — resolved to a whole AREA.
     if km.level == "pillar":
-        presented = {n.lower() for n in session.presented_pillars()}
         if km.pillar and km.pillar.lower() in presented:
             return AddOutcome(action="duplicate", pillar=km.pillar, level="pillar",
                               counted=False, source=source)
@@ -301,8 +327,10 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
                           counted=True, matched_pillar_id=_pillar_id(km.pillar),
                           explanation=g.ground_pillar(km.pillar) or None, source=source)
 
-    # 3 — NOVEL (level==none). Under a destination pillar -> sub-point; else a new area.
-    dest = parent or session.current_pillar()
+    # 4 — NOVEL (level==none, no explicit parent). Under the walk cursor -> sub-point;
+    #     otherwise a brand-new area (BlackBox / end-of-walk): create it now, then the
+    #     render invites the points one at a time (B1.2 two-step).
+    dest = session.current_pillar()
     if dest:
         slot = m.place_sub_point(text, dest)
         session.add_sub_point(slot.pillar, text)
@@ -311,6 +339,7 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
     session.surface_pillar(text)                 # BlackBox: no walkthrough focus -> new area
     return AddOutcome(action="added_new", pillar=text, level="pillar",
                       counted=True, matched_pillar_id=None, text=text, source=source)
+
 
 
 def _resolve_presented_bullet(needle: str, shown: list[str]) -> str | None:
@@ -497,25 +526,21 @@ def question_handler(km: m.KBMatch, session: HandlerSession, *, user_text: str) 
                            is_about_swap=session.is_swap_target(km, user_text))
 
 
-def suggest_handler(session: HandlerSession) -> SuggestOutcome | None:
-    """ask_agent_to_suggest: deterministically pick the first WITHHELD pillar not yet
-    surfaced, grounded from KB text (never free-form -> cannot confabulate; D1/D6). Parks a
-    pending_suggestion so a following 'yes' is recognised as accepting THE AGENT's idea (D7),
-    not a user add. Suggesting is NOT adding — no artifact, no add_pillar."""
-    surfaced = {n.lower() for n in session.surfaced_pillar_names()}
-    for p in kb.get_all_pillars():
-        if not p.get("shown", True) and p["name"].lower() not in surfaced:
-            session.pending_suggestion = {"level": "pillar", "item": p["name"],
-                                          "origin": "agent_suggest"}
-            return SuggestOutcome(level="pillar", suggested_item=p["name"],
-                                  grounding=g.ground_pillar(p["name"]) or None)
-    return None                                  # nothing left to suggest
+def suggest_handler(session: HandlerSession):
+    """ask_agent_to_suggest under reveal-on-match (#5): the agent NEVER names a withheld
+    pillar. Mid-walk -> advance to the next SHOWN pillar, logged as agent-suggest (the user
+    asked for guidance). Exhausted / no walkthrough cursor (BlackBox) -> a SuggestOutcome
+    with no item, which the persona renders as a throw-back inviting the user (no withheld)."""
+    if session.current_pillar() is not None:
+        return advance_handler(session, passive=False, elicited=True)
+    return SuggestOutcome(level="pillar", suggested_item=None)
 
 
-def advance_handler(session: HandlerSession, *, passive: bool = False) -> AdvanceOutcome:
-    """Move on. `passive` marks a passive_advance (advanced with no add/remove/question/
-    suggest this turn) so the agent can log it distinctly (§3.6)."""
-    return AdvanceOutcome(passive=passive)
+def advance_handler(session: HandlerSession, *, passive: bool = False,
+                    elicited: bool = False) -> AdvanceOutcome:
+    """Move on. `passive` marks a passive_advance; `elicited` marks an advance triggered by
+    ask_agent_to_suggest (#5) so it logs as agent-suggest instead of passive (§3.6)."""
+    return AdvanceOutcome(passive=passive, elicited=elicited)
 
 
 def fallback_handler(reason: str = "unclear") -> FallbackOutcome:

@@ -987,9 +987,8 @@ class ExplainableAgent(BaseAgent):
         return (self.swap_presented and not self.concept_swap.is_detected
                 and self._on_swap_now())
 
-    _NEXT_AFFORD = ("\n\n*Would you like to add, change, or question anything here? "
-                    "Or shall we move on to the next pillar? Feel free to raise any "
-                    "pillar you think is important.*")
+    _NEXT_AFFORD = ("\n\n*Add a point here, raise a new area, or question anything \u2014 "
+                    "or say \"next\" to move on.*")
 
     def render_add(self, o):
         # revisit -> navigation to a PASSED pillar (the router never lets revisit carry
@@ -1012,6 +1011,9 @@ class ExplainableAgent(BaseAgent):
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
                 msg = f"**{o.pillar}** is already part of the framework." + self._NEXT_AFFORD
+            elif o.pillar and o.matched_text:
+                msg = (f"That's already covered under **{o.pillar}** as *{o.matched_text}*. "
+                       f"Want to adjust it?" + self._NEXT_AFFORD)
             elif o.pillar:
                 msg = f"That's already covered under **{o.pillar}**." + self._NEXT_AFFORD
             else:
@@ -1031,7 +1033,13 @@ class ExplainableAgent(BaseAgent):
         if o.action == "added_new" and o.level == "sub_bullet":
             st = self._last_sub_add or {}
             if st.get("is_new"):
-                msg = (f"Good point — I've added it under **{o.pillar}**. "
+                if o.also_covered:
+                    gist = f" \u2014 {o.explanation}" if o.explanation else ""
+                    also = (f" It also relates to **{o.also_covered}**{gist} "
+                            f"Say the word if you'd rather it sit there.")
+                else:
+                    also = ""
+                msg = (f"Good point — I've added it under **{o.pillar}**.{also} "
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(o.pillar)}" + self._NEXT_AFFORD)
             else:
@@ -1041,7 +1049,9 @@ class ExplainableAgent(BaseAgent):
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                msg = f"Noted — I've added **{o.pillar}** as a separate area." + self._NEXT_AFFORD
+                msg = (f"Noted — I've added **{o.pillar}** as a separate area. "
+                       f"What points would you like under it? Add them one at a time."
+                       + self._NEXT_AFFORD)
             else:
                 msg = f"**{o.pillar}** is already part of the framework."
             self._emit(msg); yield msg; return
@@ -1410,19 +1420,13 @@ class ExplainableAgent(BaseAgent):
         yield from self._stream_with_instruction(instruction=instruction, prefix=added_note)
 
     def _stream_swap_caught(self):
-        wrong       = self.concept_swap.config["wrong_concept"]
-        wrong_fw    = self.concept_swap.config["wrong_framework"]
-        active_fw   = self.kg_context["framework"]
-        active_case = self.kg_context["case_type"]
-        instruction = (
-            f"{SWAP_CAUGHT_PROMPT}\n\n"
-            f"─── CONTEXT ──────────────────────────────────────────────────────────\n"
-            f"Wrong concept flagged: **{wrong}**\n"
-            f"It belongs to: {wrong_fw} (a different type of analysis)\n"
-            f"This case is: {active_case} analysis — {active_fw}\n"
-            f"─────────────────────────────────────────────────────────────────────\n"
-        )
-        yield from self._stream_with_instruction(instruction=instruction)
+        """#2 — NEUTRAL swap handling: no "sharp catch" praise or LLM commentary that could
+        lead the participant. A plain acknowledgement; the caller advances to the next pillar
+        like any removal. swap_detected / swap_removed already fired upstream."""
+        wrong = self.concept_swap.config["wrong_concept"]
+        msg = f"Understood — we'll set **{wrong}** aside and continue."
+        self._emit(msg)
+        yield msg
 
     def _stream_freeform(self, cs_detected: bool):
         concepts_str = " → ".join(self.kg_context["concepts"])
@@ -1435,8 +1439,9 @@ class ExplainableAgent(BaseAgent):
             f"Answer their question concisely in plain language — no jargon, no "
             f"mention of technical systems. Ask ONE follow-up question after answering."
         )
-        if cs_detected:
-            instruction += f"\n\n{SWAP_CAUGHT_PROMPT}"
+        # #2 — no swap-catch praise even in freeform; answer neutrally (swap_detected
+        # already fired upstream). cs_detected retained for signature/compat.
+        _ = cs_detected
         yield from self._stream_with_instruction(instruction=instruction)
 
     # ══════════════════════════════════════════════════════════════════════

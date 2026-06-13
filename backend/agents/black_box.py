@@ -565,6 +565,9 @@ class BlackBoxAgent(BaseAgent):
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
                 pre = f"**{o.pillar}** is already in the framework.\n\n"
+            elif o.pillar and o.matched_text:
+                pre = (f"That's already covered under **{o.pillar}** as "
+                       f"*{o.matched_text}*. Want to adjust it?\n\n")
             elif o.pillar:
                 pre = f"That's already covered under **{o.pillar}**.\n\n"
             else:
@@ -582,14 +585,22 @@ class BlackBoxAgent(BaseAgent):
         if o.action == "added_new" and o.level == "sub_bullet":
             st = self._last_sub_add or {}
             if st.get("is_new"):
-                yield from self._yield_rerender(f"Added under **{o.pillar}**.\n\n")
+                if o.also_covered:
+                    gist = f" \u2014 {o.explanation}" if o.explanation else ""
+                    also = (f" It also relates to **{o.also_covered}**{gist} "
+                            f"Say the word if you'd rather it sit there.")
+                else:
+                    also = ""
+                yield from self._yield_rerender(f"Added under **{o.pillar}**.{also}\n\n")
             else:
                 yield from self._yield_rerender(f"That's already under **{o.pillar}**.\n\n")
             return
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
+                yield from self._yield_rerender(
+                    f"Added **{o.pillar}** as a new area. What points would you "
+                    f"like under it? Add them one at a time.\n\n")
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
             return

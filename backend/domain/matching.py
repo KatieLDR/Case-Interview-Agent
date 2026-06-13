@@ -303,6 +303,17 @@ def _match_area(item: str) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def pillar_gist(name: str) -> str:
+    """One-sentence gist of a pillar (first sentence of its KB description) for
+    cross-pillar notes. Empty string if unknown."""
+    p = next((p for p in kb.get_all_pillars()
+              if p["name"].lower() == (name or "").lower()), None)
+    if not p or not p.get("description"):
+        return ""
+    first = p["description"].split(". ")[0].strip().rstrip(".")
+    return first + "." if first else ""
+
+
 def locate(user_text: str) -> KBMatch:
     """Resolve user text against the WHOLE KB hierarchy, most-specific-first (§3.2):
         PASS 1  CONCEPT  (name + explanation)                 -> level=concept (+id)
