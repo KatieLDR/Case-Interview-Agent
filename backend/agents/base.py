@@ -1,131 +1,29 @@
-"""backend/base.py  â  Step 6a of REFACTOR_PLAN.md (F-ARCH2: BaseAgent extraction).
-
-Resolves F-ARCH2: BlackBox was both a concrete agent AND the de-facto base that
-ExplainableAgent / HITLAgent inherited from. BaseAgent is the shared turn engine;
-BlackBoxAgent, ExplainableAgent and HITLAgent become SIBLINGS of it (6a wires
-BlackBox; 6b reparents EXP/HITL). Method partition computed from the live override
-+ call matrix (REFACTOR_PLAN Â§S Step-6 block), not guessed.
-
-CONCRETE here  = the shared engine (turn entry, streaming, history, warm-up, shared
-                 classifiers) â inherited unchanged by every arm.
-SEAM (abstract)= persona / matching / grounding / swap hooks each arm implements.
-                 A pure BaseAgent is never instantiated; the stubs fail loud.
-CONCRETE-DEFAULT = _is_excluded_bullet / _build_clarification_system_prompt /
-                 _swap_question_signal: a base method calls them, so base carries
-                 BlackBox's body as the default; the overriding arm (EXP or HITL)
-                 still wins polymorphically.
-Constants (client/models/thresholds/classify_json/strip_fences) come from llm.py
-(Step 1); BaseAgent imports them, never redefines them.
-"""
-
-import os
-import json
-import re
-from google import genai
 from google.genai import types
-from dotenv import load_dotenv
+
+from backend.domain import matching, grounding
+from backend.interaction import handlers
+from backend.knowledge import knowledge_base as kb
+from backend.llm import (
+    client, MAIN_MODEL, classify_json, strip_fences, ANSWER_THRESHOLD,
+)
 from backend.logger import (
-    create_session, end_session, stamp_started_at,
-    log_user_message, log_agent_response,
-    log_interruption,
-    update_answer, log_warmup_response,
+    stamp_started_at, log_user_message, log_agent_response,
+    log_interruption, update_answer,
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
-from backend.knowledge.cases import get_case, get_clarification_facts
-from backend.tools.concept_swap import ConceptSwap
-from backend.knowledge import knowledge_base as kb
-
-load_dotenv()
-
-# ── Gemini client ──────────────────────────────────────────────────────────
-from backend.llm import (
-    client, MAIN_MODEL, CLASSIFIER_MODEL, classify_json, strip_fences,
-    ANSWER_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
-)
-from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
-from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
-from backend.interaction import handlers  # Step 4: shared handlers + PendingAction (I-1)
-from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
-
-# ââ Shared module-level prompts/constants (moved from black_box_agent.py, Step 6a) ââ
-CLARIFICATION_SYSTEM_PROMPT = """
-You are a BCG case interviewer conducting the clarification round before the
-candidate begins their structured analysis.
-
-You have a fixed information sheet for this case. Your job is to answer the
-candidate's questions based strictly on that sheet.
-
-─── RULES ─────────────────────────────────────────────────────────────────
-- Answer ONLY from the facts provided in the CASE INFORMATION SHEET below
-- If the question is closely related to a fact on the sheet, infer naturally
-  from it — but do not introduce new information that is not on the sheet
-- If the question is outside the scope of the sheet, respond with:
-  "I'm afraid I don't have that information for this case."
-- Keep answers concise and professional — one to three sentences per answer
-- Never reveal the framework or hint at the structure the candidate should use
-- Never evaluate or coach the candidate during this phase
-- Do not ask questions back to the candidate
-"""
-
-ANSWER_CLASSIFIER_PROMPT = """
-You are a classifier for a case interview tool.
-
-Determine whether the agent response contains a structured framework answer
-with clear primary buckets and sub-buckets.
-
-Short replies, clarifications, questions, or discussion do NOT qualify.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{"is_answer": true or false, "confidence": float between 0.0 and 1.0}
-"""
-
-WARMUP_PROMPT = (
-    "✏️ **Here is the practice task exercise:**\n\n"
-    "You are moving to a new city for a new job opportunity. "
-    "Before you go, you want to make sure you have a complete plan. "
-    "Let's plan this together.\n\n"
-    "*This should take about 2–3 minutes, there are no right or wrong answers.*\n\n"
-    "**Here's my suggestion:**\n\n"
-    "🏠 **Housing**\n"
-    "- Should we find temporary accommodation?\n"
-    "- How are the neighbourhoods?\n\n"
-    "📋 **Admin**\n"
-    "- Should we register at the new city hall?\n"
-    "- Do we need a local bank account?\n\n"
-    "*What else would you add, or is there anything you'd remove or change?*"
+from backend.agents.prompts.base import (
+    CLARIFICATION_SYSTEM_PROMPT, ANSWER_CLASSIFIER_PROMPT,
+    WARMUP_PROMPT, WARMUP_MERGE_PROMPT,
 )
 
-WARMUP_MERGE_PROMPT = """You are helping a user build a moving-to-a-new-city plan.
-
-The starting plan is:
-🏠 Housing
-- Should we find temporary accommodation?
-- How are the neighbourhoods?
-
-📋 Admin
-- Should we register at the new city hall?
-- Do we need a local bank account?
-
-The user has added the following ideas:
-{additions}
-
-Your task: produce an updated plan that incorporates the user's ideas.
-- Keep the same emoji + bold header format
-- Add new bullet points under the most relevant existing section, or create a new section if needed
-- If the user pushed back on something, remove or reframe it
-- If the user adds a new section (e.g. "Location"), generate 2 relevant sub-bullet questions for it
-- If the user's intent is ambiguous, make a reasonable interpretation and proceed
-- Keep it concise — bullet points only, no extra explanation
-- Do NOT add any intro or closing sentence — return the plan only"""
+from dotenv import load_dotenv
 
 MAX_TURNS_PER_SESSION = 50
 
+load_dotenv()
 
 class BaseAgent:
-    """Shared turn engine for all three study arms. See module docstring."""
-
-    # ââ SEAM declarations (each arm implements; base never instantiated) ââ
     def _build_system_prompt(self, *args, **kwargs):
         raise NotImplementedError(
             f"{type(self).__name__} must implement _build_system_prompt (BaseAgent seam)")
@@ -135,12 +33,6 @@ class BaseAgent:
             f"{type(self).__name__} must implement _stream_main (BaseAgent seam)")
 
     def _stream_summary(self):
-        """6g (I-6 carve-out): shared WALKED-SUBSET End-Session summary for EXP + HITL — byte-identical
-        across those two arms (reads ONLY shared state: presented_pillars + user_sub_points +
-        excluded). BlackBox overrides this with the full shown-framework (walkthrough_enabled=
-        False -> no walked subset; its scope difference traces to the manipulation, not a
-        confound). No sources, no buttons, no affordance: the §3.8 terminal artifact."""
-        from backend.knowledge import knowledge_base as kb
         self.walkthrough_done = True
         wrong    = self.concept_swap.config["wrong_concept"]
         detected = self.concept_swap.is_detected
@@ -173,30 +65,23 @@ class BaseAgent:
         raise NotImplementedError(
             f"{type(self).__name__} must implement _format_sub_bullet (BaseAgent seam)")
 
-    # _match_pillar / _match_key_question stubs removed (Step 6c): matching is
-    # shared (domain.matching, I-3); arms no longer implement matcher seams.
-
     def add_sub_point(self, *args, **kwargs):
         raise NotImplementedError(
             f"{type(self).__name__} must implement add_sub_point (BaseAgent seam)")
 
     def _init_flow_state(self):
-        """Step 6d: the cross-arm-IDENTICAL flow/handler state — one canonical home.
-        Lifecycle (session/case/swap/kg/history) and persona extras stay per-arm; they
-        diverge by agent_type/persona. These 12 init to the same value in every arm."""
         self._pending           = False
         self.turn_count         = 0
         self.phase              = "warmup"
-        self.pending            = None   # PendingAction parked by removal_handler
-        self.pending_suggestion = None   # {level,item,origin} — D7 suggest / B6 remove-offer
-        self.last_discussed     = None   # Fork-A focus
-        self.shown_bullets      = []     # positional-removal context
-        self._last_surface      = None   # stash: surface_pillar result
-        self._last_sub_add      = None   # stash: add_sub_point result
+        self.pending            = None
+        self.pending_suggestion = None
+        self.last_discussed     = None
+        self.shown_bullets      = []
+        self._last_surface      = None
+        self._last_sub_add      = None
         self.user_sub_points    = {}
         self.excluded_concepts  = []
         self.excluded_sub_bullets = {}
-
 
     def begin_analysis(self, *args, **kwargs):
         raise NotImplementedError(
@@ -219,13 +104,9 @@ class BaseAgent:
             f"{type(self).__name__} must implement get_pre_analysis_instruction (BaseAgent seam)")
 
     def get_summary(self):
-        """6g (I-6 carve-out): shared public entry — app.py streams this on End Session."""
         yield from self._stream_summary()
 
     def is_swap_target(self, km, user_text: str) -> bool:
-        """Step 6e: shared swap-target skeleton (was triplicated). The persona
-        'current concept IS the swap' signal is the _extra_swap_signal hook (default
-        False; walkthrough arms override). Behavior-preserving move."""
         if not self.swap_name():
             return False
         if self.concept_swap.matches(user_text):
@@ -238,13 +119,6 @@ class BaseAgent:
         return False
 
     def _extra_swap_signal(self, km, user_text: str) -> bool:
-        """Proposed 6e hook (name not in original): a persona swap signal beyond the
-        shared text/term match. Default off; EXP/HITL override (current == swap)."""
-        return False
-
-    def mark_swap_detected(self) -> None:
-        """Step 6e: shared base — swap DETECTED on confirm, never a delete (§0).
-        Walkthrough arms override to also exclude it from the cursor."""
         self.concept_swap.force_detected()
 
     def presented_pillars(self, *args, **kwargs):
@@ -256,13 +130,9 @@ class BaseAgent:
             f"{type(self).__name__} must implement presented_sub_bullets (BaseAgent seam)")
 
     def before_advance(self, session) -> bool:
-        """Original §3.7 hook (6f). True = advance allowed. Default True — BB/EXP never
-        gate. HITL overrides to hold a shown concept until its decision is justified."""
         return True
 
     def requires_justification(self, km) -> bool:
-        """Reject-side justification gate (effort test = handlers.is_meaningful_justification).
-        Default False (BB/EXP); HITL overrides for its shown pillars (swap excluded)."""
         return False
 
     def surface_pillar(self, *args, **kwargs):
@@ -278,13 +148,7 @@ class BaseAgent:
             return self.concept_swap.config["wrong_concept"]
         return None
 
-    # ââ CONCRETE shared engine (+ 3 concrete-default seams) ââ
     def _fetch_kg_context(self, case_type: str) -> dict:
-        """
-        Load framework context from JSON knowledge base.
-        Change log: 2026-05-28 — migrated from KG to JSON knowledge base.
-        """
-        from backend.knowledge import knowledge_base as kb
         framework = kb.get_framework_name()
         concepts  = [p["name"] for p in kb.get_shown_pillars()]
         return {"case_type": case_type, "framework": framework, "concepts": concepts}
@@ -311,7 +175,6 @@ class BaseAgent:
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
     def _build_tree_overview(self) -> str:
-        from backend.knowledge import knowledge_base as kb
         shown = kb.get_shown_pillars()
         lines = ["**Framework Overview**\n"]
         for pillar in shown:
@@ -325,11 +188,6 @@ class BaseAgent:
         return WARMUP_PROMPT
 
     def merge_warmup_additions(self, additions: list[str]) -> str:
-        """
-        LLM call: merges user additions into the pre-built warmup plan.
-        Fallback: original plan + user additions listed separately.
-        Change log: 2026-05-22 — added for warmup redesign
-        """
         if not additions:
             return WARMUP_PROMPT
 
@@ -435,7 +293,6 @@ class BaseAgent:
             self._pending = False
 
     def _stream_framework_presentation(self):
-        """Static first render of the full framework — no LLM. Change log: 2026-06-01"""
         reply = self._render_full_framework(is_first=True)
         self.history.append(types.Content(role="user",
             parts=[types.Part(text="Please present the full structured framework for this case.")]))
@@ -447,14 +304,12 @@ class BaseAgent:
         yield reply
 
     def _last_agent_text(self) -> str:
-        """Last model message (router context). BlackBox has no walkthrough cursor."""
         for c in reversed(self.history):
             if c.role == "model" and c.parts:
                 return (c.parts[0].text or "")[:500]
         return ""
 
     def _render_full_framework(self, is_first: bool = False, closing: bool = True) -> str:
-        from backend.knowledge import knowledge_base as kb
         excluded  = [e.lower() for e in self.excluded_concepts]
         shown     = [p for p in kb.get_shown_pillars() if p["name"].lower() not in excluded]
         swap      = kb.get_swap_concept()
@@ -507,7 +362,6 @@ class BaseAgent:
         yield reply
 
     def _is_excluded_bullet(self, pillar_name: str, bullet: str) -> bool:
-        """→ shared pure predicate (Step 2); session excluded-map passed by value."""
         return matching.is_excluded_bullet(self.excluded_sub_bullets, pillar_name, bullet)
 
     def _stream_qa(self, user_input: str):
@@ -531,10 +385,6 @@ class BaseAgent:
         yield from self._stream_with_instruction(instruction=instruction)
 
     def _stream_confirm_qa(self, user_input: str, concept: str):
-        """Answer a question raised AT the removal-confirmation prompt, then re-offer the
-        pending decision in ONE streamed message. The shared PendingAction (self.pending)
-        stays parked, so the user's next yes/no still resolves the removal via
-        handlers.resolve_pending. Change log: 2026-06-02; Step 4b: shared pending machine."""
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) or \
                     "Strategic Fit, Solution Design & Scope, Feasibility"
@@ -568,9 +418,6 @@ class BaseAgent:
         yield ack
 
     def _reply_is_question(self, text: str) -> bool:
-        """At a removal-confirm gate, an 'other' reply may be a question. Baseline got
-        is_question from the LLM confirmation classifier; the shared machine returns confirm/
-        decline/other only, so the persona re-derives it here for the answer + W9."""
         prompt = (
             "A user was asked to confirm removing part of a framework (yes/no). Instead "
             "they replied with something else. Is their reply a QUESTION or request for "
@@ -585,7 +432,6 @@ class BaseAgent:
             return False
 
     def _emit(self, msg: str):
-        """Append a plain (non-rerender) agent message + log it."""
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
 
@@ -594,20 +440,12 @@ class BaseAgent:
                                agent_type=self.concept_swap.agent_type)
 
     def _swap_question_signal(self, outcome, user_input: str) -> bool:
-        """BlackBox's W9 question-about-swap signal — the deferred F-S instrument,
-        BB definition (locked): swap_questioned fires when the text NAMES the swap —
-        deterministic concept_swap.matches (canonical substring + match_terms + stems),
-        not the fuzzy LLM. `outcome` is accepted so the cursor arms (EXP/HITL) override
-        to POSITIONAL (any question while the swap is the current concept)."""
         return (self.concept_swap.is_injected and not self.concept_swap.is_detected
                 and (self.concept_swap.matches(user_input)
                      or bool(getattr(outcome, "is_about_swap", False))
                      or self._classify_swap_question(user_input)))
 
     def _fire_turn(self, outcome, user_input, was_pending):
-        """The ONE firing call per turn (I-1). Computes the two turn-flow booleans BlackBox
-        owns and hands them to the shared record_turn; all event/field/counter logic lives
-        in backend.logging.events."""
         kind = type(outcome).__name__
         is_q = swap_q = False
         if kind == "QuestionOutcome":
@@ -615,7 +453,7 @@ class BaseAgent:
             swap_q = self._swap_question_signal(outcome, user_input)
         elif kind == "RemovalOutcome" and outcome.stage == "challenged" and was_pending:
             is_q = self._reply_is_question(user_input)
-            swap_q = is_q and getattr(outcome, "is_swap", False)   # parked path used o.is_swap
+            swap_q = is_q and getattr(outcome, "is_swap", False)
         ev.record_turn(outcome, self._evctx(), _sink,
                        was_pending=was_pending, is_question=is_q, swap_question=swap_q)
 
@@ -648,8 +486,6 @@ class BaseAgent:
             f"{type(self).__name__} must implement render_fallback (BaseAgent render seam)")
 
     def _render_outcome(self, outcome, user_input, *, was_pending=False, pa=None):
-        """6h: shared dispatch: handler returns a structured Outcome; the persona renders it via
-        the public render_* seam (the ONLY persona seam). Fires §3.6 once per turn (I-1)."""
         if outcome is None:
             yield from self.render_fallback(); return
         self._fire_turn(outcome, user_input, was_pending)
@@ -717,11 +553,6 @@ class BaseAgent:
             return False
 
     def _classify_swap_question(self, user_input: str) -> bool:
-        """Swap-question check (W9): is this question specifically ABOUT the swap
-        concept? The `is_about_swap` half of the retired `_classify_question` — the
-        intent router now owns is_question. Called only on `question` turns while the
-        swap is active. Returns False on any error (never over-logs swap_questioned).
-        The §3.6 single shared questioned-vs-detected prompt is Step 5."""
         swap_concept = self.concept_swap.config["wrong_concept"]
         prompt = (
             "You are a classifier for a case-interview framework tool.\n"
@@ -743,20 +574,11 @@ class BaseAgent:
             return False
 
     def _check_duplicate(self, concept: str, existing_concepts: list) -> dict:
-        """
-        Three-layer duplicate guard for concept_added path.
-        Layer 2: exact string match (Python, no LLM)
-        Layer 3: fuzzy LLM check via classify_json (shared CLASSIFIER_MODEL)
-        Change log: 2026-05-12
-        Change log: 2026-06-07 — routed via backend.llm.classify_json (§S Step 1); dropped stray fuzzy-duplicate model
-        """
-        # Layer 2 — exact string match
         for existing in existing_concepts:
             if concept.strip().lower() == existing.strip().lower():
                 print(f"[DUPLICATE] exact match: '{concept}' == '{existing}'")
                 return {"is_duplicate": True, "matched_concept": existing}
 
-        # Layer 3 — LLM fuzzy check
         try:
             parsed = classify_json(
                     f"You are checking if a user-suggested concept is essentially "
@@ -861,6 +683,4 @@ class BaseAgent:
 
     @staticmethod
     def _strip_fences(text: str) -> str:
-        # Single definition lives in backend.llm; thin wrapper kept so inherited
-        # self._strip_fences call sites (explainable/hitl) still resolve. (§S Step 1)
         return strip_fences(text)

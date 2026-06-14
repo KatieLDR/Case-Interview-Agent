@@ -1,195 +1,34 @@
-import os
-import json
-import re
-from google import genai
 from google.genai import types
-from dotenv import load_dotenv
+
+from backend.agents.base import BaseAgent
+from backend.domain import grounding, matching
+from backend.interaction import handlers, intents
+from backend.knowledge import knowledge_base as kb
+from backend.knowledge.cases import get_case, get_clarification_facts
+from backend.llm import (
+    client, CLASSIFIER_MODEL,
+)
 from backend.logger import (
-    create_session, end_session, stamp_started_at,
-    log_user_message, log_agent_response,
-    log_interruption,
-    update_answer, log_warmup_response,
+    create_session, end_session,log_user_message,
+    log_agent_response, log_interruption, update_answer,
 )
 from backend.logging import events as ev
-from backend.logging.sink import firestore_sink as _sink
-from backend.knowledge.cases import get_case, get_clarification_facts
-from backend.tools.concept_swap import ConceptSwap
-from backend.knowledge import knowledge_base as kb
-
-load_dotenv()
-
-# ── Gemini client ──────────────────────────────────────────────────────────
-from backend.llm import (
-    client, MAIN_MODEL, CLASSIFIER_MODEL, classify_json, strip_fences,
-    ANSWER_THRESHOLD, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD,
+from backend.agents.prompts.black_box import (
+    SYSTEM_PROMPT, REMOVAL_TARGET_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
-from backend.domain import matching   # Step 2: shared KB matchers (locate / passes)
-from backend.interaction import intents  # Step 3: unified intent taxonomy (I-2)
-from backend.interaction import handlers  # Step 4: shared handlers + PendingAction (I-1)
-from backend.domain import grounding     # Step 2: shared KB grounding (suggest render)
-from backend.agents.base import BaseAgent          # Step 6a: shared turn engine (F-ARCH2)
+from backend.tools.concept_swap import ConceptSwap
 
-# ── Model config ───────────────────────────────────────────────────────────
-# MAIN_MODEL / CLASSIFIER_MODEL imported from backend.llm (REFACTOR_PLAN §S Step 1)
+from dotenv import load_dotenv
 
-# ── Case config ────────────────────────────────────────────────────────────
 CASE_TYPE = "AI Implementation"
 
-# ══════════════════════════════════════════════════════════════════════════
-# System Prompts
-# ══════════════════════════════════════════════════════════════════════════
-
-
-SYSTEM_PROMPT = """
-You are a strategic consultant specializing in structured frameworks. Your goal
-is to provide a concise, high-level logical breakdown of business problems.
-
-STRICT OUTPUT FORMAT — follow this exactly:
-
-**Core Question**
-One single question the framework aims to solve.
-
-**The Framework**
-
-**[Pillar]**
-- [analytical question, 5-7 words, specific to this case]
-- [analytical question, 5-7 words, specific to this case]
-
-**[Pillar]**
-- [analytical question, 5-7 words, specific to this case]
-- [analytical question, 5-7 words, specific to this case]
-
-(continue for all pillars — do NOT add any not in FRAMEWORK CONTEXT above,
-UNLESS the user explicitly requests it)
-
-─── STRUCTURAL EXAMPLE (format only — do not copy these questions) ──────
-**Strategic Fit**
-- Is GenAI the right tool, or would simpler rules-based automation achieve the same result?
-- Is the use case consistent with responsible AI principles — transparency, human oversight, and accountability?
-
-**Solution Design & Scope**
-- Is the prototype scoped tightly enough to be reviewable and governable?
-- What is the input data classification level — this determines the compliance path?
-
-**Feasibility**
-- Is the input data GDPR-compliant and sufficient in quality and volume?
-- Is there a single-developer dependency with no designated long-term owner?
-─────────────────────────────────────────────────────────────────────────
-
-**Key Considerations** *(only if relevant)*
-- Critical dependency 1
-- Critical dependency 2
-
-─── INTERACTION STYLE ────────────────────────────────────────────────────
-You are a reference tool, not an interviewer. After presenting or updating
-a framework, ask ONE short natural follow-up question to invite exploration.
-
-If the user wants to ADD a new concept or bucket:
-- Add it immediately, no pushback
-- If it fits within Strategic Fit, Solution Design & Scope, or Feasibility → add as a sub-bullet under the right pillar
-- If it is a new top-level area (e.g. Risks, Financial Impact) → add as a new primary pillar
-- Never refuse user additions
-- When a user explicitly asks to add a sub-bullet, always honour it — no limit applies
-
-If the user wants to REMOVE or CHANGE an existing concept:
-- Briefly explain your reasoning in one sentence
-- Ask if they still want to proceed
-- If they confirm, honour it immediately
-
-─── RULES ────────────────────────────────────────────────────────────────
-- Always use the exact format above — bold pillar headers, bullet questions
-- Never use numbered lists for framework pillars
-- Be direct and concise
-- Never evaluate or score the user
-- Ask only ONE follow-up question per response
-- Always present exactly 2 analytical questions per pillar
-"""
-
-# ══════════════════════════════════════════════════════════════════════════
-# Classifier prompts
-# ══════════════════════════════════════════════════════════════════════════
-
-
-# OVERRIDE_CLASSIFIER_PROMPT retired (Step 3 dead-code pass): _detect_override is
-# gone; the unified router (interaction/intents.py) owns steering classification.
-
-# ══════════════════════════════════════════════════════════════════════════
-# Warm-up content
-# Change log: 2026-05-05 — redesigned warm-up
-# Change log: 2026-05-06 — added "Let's go" cue
-# Change log: 2026-05-22 — pre-built plan, LLM merge
-# ══════════════════════════════════════════════════════════════════════════
-
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Thresholds
-# ══════════════════════════════════════════════════════════════════════════
-# ANSWER_THRESHOLD imported from backend.llm (§S Step 1); OVERRIDE_THRESHOLD retired (Step 3)
-
-# Light cancel-escape phrases for the "which part to remove?" prompt (no LLM).
 _CANCEL_PHRASES = {
     "never mind", "nevermind", "cancel", "stop", "forget it", "forget about it",
     "no", "nope", "no thanks", "nothing", "none", "leave it", "leave it alone",
     "keep it", "keep everything", "actually no", "skip", "skip it", "dont", "don't",
 }
 
-# ── Deterministic add-flow matchers (source-free) — Change log: 2026-06-01 ──
-
-# ADD_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
-
-# Whole-KB concept search runs over ~34 non-swap concepts (much broader than the
-# 5-item pillar-name search), and a false hit REVEALS a withheld pillar — i.e.
-# stimulus contamination. So this path uses a deliberately higher bar than the
-# pillar matcher. Change log: 2026-06-02
-# CONCEPT_MATCH_THRESHOLD imported from backend.llm (§S Step 1)
-
-# ADD_PILLAR_MATCH_PROMPT / ADD_MATCH_PROMPT / ADD_CONCEPT_MATCH_PROMPT moved to
-# backend.domain.matching (Step 2 — one shared copy). The matcher methods below delegate;
-# prompts + thresholds are unchanged (canonical text = EXP/BB, which were identical here).
-
-REMOVAL_TARGET_PROMPT = """
-You classify WHAT a user wants to remove from a framework.
-
-Decide whether they mean:
-- "pillar"     : a whole top-level area/pillar
-- "sub_bullet" : ONE specific point/bullet inside a pillar
-
-─── FRAMEWORK (all visible pillars and their current points) ──────────────────
-{framework_bullets}
-────────────────────────────────────────────────────────────────────────────
-─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
-{last_agent}
-────────────────────────────────────────────────────────────────────────────
-─── USER MESSAGE ─────────────────────────────────────────────────────────────
-{user_msg}
-────────────────────────────────────────────────────────────────────────────
-
-Rules:
-- Names/refers to a whole pillar or area → level="pillar", pillar=that name, bullet=null.
-- Refers to one specific point → level="sub_bullet", pillar=its pillar name,
-  bullet = the EXACT matching point text copied verbatim from the framework above.
-- Vague "remove it / this / that": if the agent's last message discussed ONE
-  specific point, treat as that sub_bullet; otherwise treat as the whole pillar.
-- "bullet" MUST be copied verbatim from the framework above, or null for a pillar.
-
-Respond ONLY with valid JSON, no markdown:
-{{"level": "pillar" | "sub_bullet", "pillar": string or null, "bullet": string or null}}
-"""
-
-SUB_BULLET_FORMAT_PROMPT = """
-You reformat a user's note into the terse style of a case-framework sub-bullet.
-Rules:
-- Keep the user's MEANING exactly — add no new content, examples, or sources.
-- Output ONE short phrase (roughly 4–12 words), no leading dash, no trailing period.
-- Drop filler ("I think", "we should also", "maybe", "consider").
-- Match this style:
-    "Payback period until cumulative benefits exceed total costs"
-    "Single-developer dependency and key-person risk"
-    "GDPR compliance for personal or confidential data"
-User note: "{item}"
-Output ONLY the reformatted phrase, nothing else.
-"""
+load_dotenv()
 
 class BlackBoxAgent(BaseAgent):
     def __init__(self, user_id: str = "anonymous"):
@@ -197,13 +36,9 @@ class BlackBoxAgent(BaseAgent):
         self._init_flow_state()
         self.session_id    = create_session(user_id, agent_type="black_box")
         self.original_case = get_case("black_box")
-        self.has_main_contribution = False   # gates End Session button (app.py reads this)
-        # ── Deterministic framework state — Change log: 2026-06-01 ─────────
-        self.user_added_pillars = []    # user-added pillar names (order preserved)
-        # ── Step 4b: shared HandlerSession flow state (replaces pending_excl /
-        #    pending_sub_excl / awaiting_removal_target). interaction/handlers.py
-        #    owns the two-turn removal loop (PendingAction) now. ─────────────
-        self._ack_index         = 0     # rotates the no-reprint acknowledgements
+        self.has_main_contribution = False
+        self.user_added_pillars = []
+        self._ack_index         = 0
         self.clarification_facts = get_clarification_facts("black_box")
 
         self.concept_swap = ConceptSwap(
@@ -230,12 +65,7 @@ class BlackBoxAgent(BaseAgent):
             ),
         ]
 
-    # ══════════════════════════════════════════════════════════════════════
     # KG helpers
-    # ══════════════════════════════════════════════════════════════════════
-
-
-
     def _build_system_prompt(self) -> str:
         framework    = self.kg_context["framework"]
         concepts_str = ", ".join(self.kg_context["concepts"]) \
@@ -256,18 +86,7 @@ class BlackBoxAgent(BaseAgent):
         swap_block = self.concept_swap.get_system_prompt_block()
         return framework_block + swap_block + SYSTEM_PROMPT
 
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Warm-up messages
-    # ══════════════════════════════════════════════════════════════════════
-
-
-
-    # ══════════════════════════════════════════════════════════════════════
     # Opening message
-    # ══════════════════════════════════════════════════════════════════════
-
     def get_opening_message(self) -> str:
         return (
             f"📋 **Here is your case:**\n\n"
@@ -280,22 +99,8 @@ class BlackBoxAgent(BaseAgent):
             "add any ideas or questions that come to mind as we go.*"
         )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Phase transition — shared setup (non-generator)
-    # Change log: 2026-05-05
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Phase transition — tree/button flow
-    # Change log: 2026-05-12 — replaces start_main_phase()
-    # ══════════════════════════════════════════════════════════════════════
-
+    # Phase transition
     def begin_analysis(self):
-        """
-        Generator — called when user clicks 'Got it, show me the full analysis'.
-        Change log: 2026-05-12
-        """
         self._start_main_phase_setup()
 
         yield (
@@ -315,42 +120,15 @@ class BlackBoxAgent(BaseAgent):
             "finish whenever you're ready.*"
         )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Main message handler
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Clarification phase streaming
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Framework presentation
-    # Change log: 2026-05-01
-    # Change log: 2026-05-12 — removed debug print
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
     # Main phase streaming
-    # Change log: 2026-05-12 — override first, swap gated on is_injected AND not override
-    # Change log: 2026-05-16 — skip log_memory_override for concept_added
-    # ══════════════════════════════════════════════════════════════════════
-
-
     def _stream_main(self, user_input: str):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
 
-        # End-Session gate flips True on the first main-phase message (every path).
         self.has_main_contribution = True
         log_user_message(self.session_id, user_input)
         self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
 
-        # ── 1. Unified intent (Step 3). BlackBox renders the whole framework, so
-        #      there is NO single 'current pillar'; the router gets the shown-pillar
-        #      list + last agent message.
         res = intents.classify_intent(
             user_input,
             current_pillar="(none)",
@@ -361,54 +139,38 @@ class BlackBoxAgent(BaseAgent):
         )
         intent = res.intent
 
-        # ── 1a. Swap semantic backstop — W2: only on a FRESH non-steering turn (no
-        #      parked removal / suggestion), the faithful equivalent of the old
-        #      `not override` gate. A NAMED swap removal is intent==remove and is
-        #      detected inside removal_handler, so it is correctly excluded here.
         if (self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None
                 and self.concept_swap.is_injected and intent not in ("add", "remove", "question")):
             if self.concept_swap.check_detection(user_input):
-                # check_detection() already fired §3.6 swap_detected via ConceptSwap._log_detected.
                 yield from self._yield_rerender("Understood — I've taken that out.\n\n")
                 return
 
-        # ── 2. Route through the shared handler layer (Step 4b). A parked removal /
-        #      suggestion is resolved inside dispatch; snapshot it first so the render
-        #      can recover pillar/type after the PendingAction machine clears it.
         was_pending = self.pending is not None
         pa_snapshot = self.pending
         outcome = handlers.dispatch(res, self, user_text=user_input)
         yield from self._render_outcome(outcome, user_input,
                                         was_pending=was_pending, pa=pa_snapshot)
 
-    # ── Deterministic render ───────────────────────────────────────────────
-
-
-
+    # Deterministic render
     def _last_agent_message(self) -> str:
         for c in reversed(self.history):
             if c.role == "model" and c.parts and c.parts[0].text:
                 return c.parts[0].text[:600]
         return ""
 
-
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text"):
         pillar  = self._normalize_pillar(pillar)
         matched, _ = matching.match_key_question(item, pillar)
         if not matched:
-            # (ii): the item may match a KB concept whose canonical bullet lives in ANOTHER
-            # pillar (match_key_question is scoped to `pillar`). Ground it from the KB, refs
-            # stripped (BlackBox shows no sources); else keep the user's wording.
             matched = matching.canonical_add_bullet(item, refs=False)
         stored  = matched if matched else self._format_sub_bullet(item)
-        # Already a shown static bullet on this pillar (incl. KB-backed user pillars)
-        # → already in the framework, don't duplicate. Change log: 2026-06-02
+
         kbp = next((p for p in kb.get_all_pillars() if p["name"].lower() == pillar.lower()), None)
         if any(stored.lower() == grounding._strip_source_refs(b).lower()
                for b in (kbp.get("sub_bullets", []) if kbp else [])):
             return stored, False
-        # Re-placement: if this exact point already sits under another pillar, move it.
+
         for other, pts in self.user_sub_points.items():
             if other.lower() != pillar.lower():
                 for s in list(pts):
@@ -419,12 +181,10 @@ class BlackBoxAgent(BaseAgent):
         if any(s.lower() == stored.lower() for s in existing):
             return stored, False
         existing.append(stored)
-        # Step 4b: add_sub_bullet logging is outcome-driven now (D-H1); the render
-        #   fires log_concept_added + log_add_sub_bullet from the AddOutcome. Storage only.
+
         return stored, True
 
     def _normalize_pillar(self, name: str) -> str:
-        from backend.knowledge import knowledge_base as kb
         for p in kb.get_all_pillars():
             if p["name"].lower() == name.lower():
                 return p["name"]
@@ -432,8 +192,6 @@ class BlackBoxAgent(BaseAgent):
             if p.lower() == name.lower():
                 return p
         return name
-
-    # _match_* wrappers collapsed (Step 6c): call domain.matching.* directly (I-3).
 
     def _format_sub_bullet(self, item: str) -> str:
         try:
@@ -449,22 +207,8 @@ class BlackBoxAgent(BaseAgent):
             print(f"[SUB-POINT FORMAT] error: {e}")
         return item.strip()
 
-    # ── Redo / Q&A / ack / summary ─────────────────────────────────────────
-
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Step 4b — HandlerSession adapter (D-H3) + outcome renderer.
-    #   The shared layer (interaction/handlers.py) does the invariant work and
-    #   returns a structured Outcome; BlackBox renders it (terse persona) and
-    #   fires the §3.6 events DRIVEN BY the outcome (D-H1). The delete event
-    #   therefore fires only at stage="confirmed" — the F-R1 fix.
-    # ══════════════════════════════════════════════════════════════════════
-
-    # ── HandlerSession queries ─────────────────────────────────────────────
+    # HandlerSession queries
     def presented_pillars(self) -> list:
-        """Pillars currently rendered (mirrors _render_full_framework): shown KB
-        pillars (minus excluded) + the swap (while active) + user-added."""
         excluded = [e.lower() for e in self.excluded_concepts]
         names = [p["name"] for p in kb.get_shown_pillars()
                  if p["name"].lower() not in excluded]
@@ -476,8 +220,6 @@ class BlackBoxAgent(BaseAgent):
         return names
 
     def presented_sub_bullets(self) -> dict:
-        """{pillar -> [non-excluded bullet texts]} for every presented pillar (KB
-        sub-bullets refs-stripped + user sub-points). Drives the removal existence guard."""
         out = {}
         excluded = [e.lower() for e in self.excluded_concepts]
         def collect(name, kb_bullets):
@@ -503,21 +245,16 @@ class BlackBoxAgent(BaseAgent):
         return out
 
     def surfaced_pillar_names(self) -> set:
-        """Everything already surfaced (shown / user-added / excluded). suggest_handler
-        offers the first WITHHELD pillar NOT in this set."""
         names = {p["name"].lower() for p in kb.get_shown_pillars()}
         names |= {n.lower() for n in self.user_added_pillars}
         names |= {e.lower() for e in self.excluded_concepts}
         return names
 
     def current_pillar(self):
-        return None   # BlackBox renders the whole framework — no walkthrough cursor.
+        return None
 
-    # ── HandlerSession mutators (pure state; logging is render-driven, D-H1) ──
+    # HandlerSession mutators
     def surface_pillar(self, name: str) -> None:
-        """Reveal a withheld/unreached pillar OR create a novel area — both are a
-        user_added_pillars append for BlackBox. Stash is_new so the render logs
-        add_pillar once (and not on a re-add)."""
         shown = name.lower() in [p["name"].lower() for p in kb.get_shown_pillars()]
         already = name.lower() in [p.lower() for p in self.user_added_pillars]
         if shown or already:
@@ -527,28 +264,10 @@ class BlackBoxAgent(BaseAgent):
         self._last_surface = {"name": name, "is_new": True}
 
     def add_sub_point(self, pillar: str, text: str) -> None:
-        """Store a new sub-point (key-question canonicalisation + formatting + dedup +
-        cross-pillar move live in _store_sub_point). Stash stored text + is_new so the
-        render logs add_sub_bullet from the outcome (Fork-B: logs the stored text)."""
         stored, is_new = self._store_sub_point(pillar, text, "text")
         self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
 
-    # ── swap channel (PRESERVED per-arm, §0 #4) ─────────────────────────────
-
-
-
-
-    # ── gate-reply question check (W9 / _stream_confirm_qa render) ──────────
-
-
-    # ── §3.6 event firing (Step 5) ──────────────────────────────────────────
-    # BlackBox never elicits contributions (no proactive suggestion gate), so its
-    # source is always user_spontaneous; modality is always text. agent_type is read
-    # from concept_swap so the inherited helper resolves correctly in EXP/HITL too.
-
-
-
-    # ── outcome renderer ────────────────────────────────────────────────────
+    # Outcome renderer
     def render_question(self, user_input):
         yield from self._stream_qa(user_input)
 
@@ -559,8 +278,6 @@ class BlackBoxAgent(BaseAgent):
         yield from self._stream_summary()
 
     def render_fallback(self, outcome=None):
-        """6h: None (nothing left to suggest) -> the terse 'surfaced main areas' line;
-        AdvanceOutcome / FallbackOutcome -> ack with no reprint (W5). Persona-preserving."""
         if outcome is None:
             msg = ("You've surfaced the main areas I'd flag — feel free to add, "
                    "remove, or question any part of what's here.")
@@ -568,26 +285,14 @@ class BlackBoxAgent(BaseAgent):
         yield from self._ack_no_reprint()
 
     def render_add(self, o):
-        # #4 ask-flow: a novel add -> ask where it goes. BlackBox has no walkthrough cursor,
-        # so there is no "current area" option — own area, or under a named existing area.
         if o.action == "ask_placement":
             msg = (f"Should **{o.text}** be its own area, or a point under one of the "
                    f"existing areas? *(If under one, which?)*")
             self._emit(msg); yield msg; return
 
-        # #1/#3 navigate offer: BlackBox already shows the whole framework, so there is
-        # nowhere to navigate — just point at where it lives and re-render. Clear the parked
-        # offer (a navigate is not a BlackBox behaviour; nothing should resolve against it).
         if o.action == "navigate_offer":
             self.pending_placement = None
             gist = f" {o.explanation}" if o.explanation else ""
-            # §2a (BB fix): a recognised concept that is NOT already a shown bullet of its
-            # pillar must leave a visible artifact — BB has no two-turn navigate, so the
-            # store+show happens here, on the offer turn, under the shared contract. The
-            # carried canonical bullet (refs stripped — BB renders no sources) is stored
-            # under the target pillar. add_sub_point dedups: a concept already on screen
-            # (e.g. "data privacy" == the shown Input data classification bullet) is NOT
-            # re-added, so no duplicate. The re-render then shows the stored point.
             nb = getattr(o, "navigate_bullet", None)
             stored_new = False
             if o.level == "sub_bullet" and o.pillar and nb:
@@ -616,8 +321,10 @@ class BlackBoxAgent(BaseAgent):
             else:
                 pre = "That's already in the framework.\n\n"
             yield from self._yield_rerender(pre); return
+
         if o.action == "navigated":
-            yield from self._ack_no_reprint(); return   # revisit is not a BB behaviour
+            yield from self._ack_no_reprint(); return
+
         if o.action == "revealed" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
@@ -625,6 +332,7 @@ class BlackBoxAgent(BaseAgent):
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
             return
+
         if o.action == "added_new" and o.level == "sub_bullet":
             st = self._last_sub_add or {}
             if st.get("is_new"):
@@ -638,6 +346,7 @@ class BlackBoxAgent(BaseAgent):
             else:
                 yield from self._yield_rerender(f"That's already under **{o.pillar}**.\n\n")
             return
+
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
@@ -647,7 +356,8 @@ class BlackBoxAgent(BaseAgent):
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
             return
-        yield from self._ack_no_reprint()   # defensive
+
+        yield from self._ack_no_reprint()
 
     def render_removal(self, o, user_input, *, was_pending=False, pa=None):
         stage = o.stage
@@ -662,12 +372,14 @@ class BlackBoxAgent(BaseAgent):
                 return
             yield from self._yield_rerender(f"Done — I've removed **{o.target}**.\n\n")
             return
+
         if stage == "abandoned":
             if pa and pa.type == "remove_sub_bullet":
                 msg = f"No problem — I'll keep that point in **{pa.pillar}**."
             else:
                 msg = f"No problem — I'll keep **{o.target}**."
             self._emit(msg); yield msg; return
+
         if stage == "nothing_to_remove":
             if o.suggest_add_alternative:
                 msg = (f"**{o.suggest_add_alternative}** isn't in the current framework. "
@@ -676,6 +388,7 @@ class BlackBoxAgent(BaseAgent):
                 msg = (f"**{o.target or 'That'}** isn't part of the current framework, "
                        f"so there's nothing to remove there.")
             self._emit(msg); yield msg; return
+
         if stage == "needs_disambiguation":
             options = self.presented_pillars()
             opt = ("\n\nCurrently in the framework: "
@@ -683,6 +396,7 @@ class BlackBoxAgent(BaseAgent):
             msg = ("Which part would you like to remove? You can name the pillar or the point."
                    + opt + "\n\n*(Or say **never mind** to keep everything as is.)*")
             self._emit(msg); yield msg; return
+
         if stage == "challenged":
             if was_pending:
                 if self._reply_is_question(user_input):
@@ -698,14 +412,12 @@ class BlackBoxAgent(BaseAgent):
                 msg = (f"Are you sure you want to remove **{o.target}**?\n\n"
                        f"*Reply **yes** to confirm, or **no** to keep it.*")
             self._emit(msg); yield msg; return
-        # needs_justification (N/A for BlackBox) / defensive
+
         msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
         self._emit(msg); yield msg
 
     def render_next_steps(self, o):
         if getattr(o, "revealed", False):
-            # D7 accept: the withheld pillar is now surfaced -> re-render. No DV
-            # (the ask_agent_suggestion event is Step 5); suggesting is not adding.
             yield from self._yield_rerender(f"Good point — I've included **{o.suggested_item}**.\n\n")
             return
         if not getattr(o, "suggested_item", None):
@@ -729,17 +441,7 @@ class BlackBoxAgent(BaseAgent):
     def get_summary(self):
         yield from self._stream_summary()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # Non-streaming fallback (summary)
-    # Change log: 2026-05-12 — updated prompt to include sub-bullets
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
     # Session control
-    # Change log: 2026-05-12 — removed unreliable end_session swap detection
-    # ══════════════════════════════════════════════════════════════════════
-
     def end_session(self) -> None:
         final_framework = ""
         fallback        = ""
@@ -778,28 +480,4 @@ class BlackBoxAgent(BaseAgent):
             print(f"[END SESSION] Firestore stamp failed: {e}")
 
         end_session(self.session_id)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Classifiers
-    # ══════════════════════════════════════════════════════════════════════
-
-
-
-        
-
-    # ══════════════════════════════════════════════════════════════════════
-    # History helpers
-    # ══════════════════════════════════════════════════════════════════════
-
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Core streaming utility — used by ExplainableAgent and HITLAgent
-    # Change log: 2026-04-09 — moved up from ExplainableAgent.
-    # ══════════════════════════════════════════════════════════════════════
-
-
-    # ══════════════════════════════════════════════════════════════════════
-    # Utility
-    # ══════════════════════════════════════════════════════════════════════
-
+    
