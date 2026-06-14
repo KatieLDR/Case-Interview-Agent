@@ -182,13 +182,19 @@ class HITLAgent(BaseAgent):
         return concept.lower() == self.concept_swap.config["wrong_concept"].lower()
 
     def _walkthrough_complete_message(self):
-        self.walkthrough_done = True
-        yield (
-            "✅ We've covered all the concepts. That's the full framework as it stands — "
-            "want to revisit any area to add, change, or question something? "
-            "Otherwise, click **‼️End Session** to see your final framework. "
-            "**Note: this cannot be undone**.\n\n"
+        # Re-render the full framework (like EXP), then invite freeform discussion.
+        # _stream_summary sets walkthrough_done = True, which routes subsequent
+        # messages to _stream_freeform (Q&A) and hides the per-concept buttons.
+        yield "✅ We've covered all the concepts. Here's the framework as it stands:\n\n"
+        yield from self._stream_summary()
+        invite = (
+            "\n\nThat's the full framework as it stands — want to revisit any area to "
+            "add, change, or question something? Otherwise, click **‼️End Session** "
+            "to finish. **Note: this cannot be undone**.\n\n"
         )
+        self.history.append(types.Content(role="model", parts=[types.Part(text=invite)]))
+        log_agent_response(self.session_id, invite)
+        yield invite
 
     def _get_proactive_prompt(self) -> str:
         prompt = PROACTIVE_PROMPTS[self.prompt_index % len(PROACTIVE_PROMPTS)]
