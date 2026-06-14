@@ -1,18 +1,17 @@
 import uuid
-import inspect
 import chainlit as cl
-from backend.agents.black_box import BlackBoxAgent
-from backend.agents.base import MAX_TURNS_PER_SESSION   # Step 6a: turn-budget const moved to BaseAgent's module
-from backend.agents.explainable import ExplainableAgent
-from backend.agents.hitl import HITLAgent
 import asyncio
 
+from backend.agents.base import MAX_TURNS_PER_SESSION
+from backend.agents.black_box import BlackBoxAgent
+from backend.agents.explainable import ExplainableAgent
+from backend.agents.hitl import HITLAgent
 
-# ── Security caps ──────────────────────────────────────────────────────────
+# Security caps
 MAX_INPUT_CHARS = 6000
 
 
-# ── Session startup ────────────────────────────────────────────────────────
+# Session startup
 @cl.on_chat_start
 async def on_chat_start():
     user_id = f"user-{uuid.uuid4().hex[:8]}"
@@ -37,6 +36,7 @@ async def on_chat_start():
             ),
         ]
     ).send()
+
 
 @cl.action_callback("readme_confirmed")
 async def on_readme_confirmed(action: cl.Action):
@@ -64,21 +64,24 @@ async def on_readme_confirmed(action: cl.Action):
         ]
     ).send()
 
-# ── Agent selection callbacks ──────────────────────────────────────────────
+
+# Agent selection callbacks
 @cl.action_callback("select_agent_1")
 async def on_select_agent_1(action: cl.Action):
     await _init_agent("black_box")
 
+
 @cl.action_callback("select_agent_2")
 async def on_select_agent_2(action: cl.Action):
     await _init_agent("explainable")
+
 
 @cl.action_callback("select_agent_3")
 async def on_select_agent_3(action: cl.Action):
     await _init_agent("hitl")
 
 
-# ── Shared agent initialisation ────────────────────────────────────────────
+# Shared agent initialisation
 async def _init_agent(agent_type: str):
     if cl.user_session.get("agent") is not None:
         await cl.Message(
@@ -117,16 +120,9 @@ async def _init_agent(agent_type: str):
     cl.user_session.set("agent_type", agent_type)
 
     await cl.Message(content=intro).send()
-
-    # ── Show warm-up prompt — no button yet
-    # Button appears after participant submits their answer.
-    # Change log: 2026-05-01 — warm-up phase added before clarification.
     await cl.Message(content=agent.get_warmup_message()).send()
 
 
-# ── "Let's go" button — transitions warmup → clarification ────────────────
-# Change log: 2026-05-01 — added for warm-up phase.
-# Change log: 2026-05-06 — split into two messages: case text + instruction/button.
 @cl.action_callback("lets_go")
 async def on_lets_go(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -169,8 +165,6 @@ async def on_lets_go(action: cl.Action):
     ).send()
 
 
-# ── "Done" button — ends warm-up, shows model answer, shows Let's go ──────
-# Change log: 2026-05-05 — multi-message warm-up
 @cl.action_callback("done_warmup")
 async def on_done_warmup(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -205,8 +199,7 @@ async def on_done_warmup(action: cl.Action):
         ).send()
         return
 
-    # ── Retrieve last merged plan from session ────────────────────────
-    # Change log: 2026-05-22 — log final merged plan, not raw messages
+    # Retrieve last merged plan from session
     merged_plan = cl.user_session.get("warmup_merged_plan", "")
 
     from backend.logger import log_warmup_response
@@ -237,10 +230,7 @@ async def on_done_warmup(action: cl.Action):
     ).send()
 
 
-# ── "I'm Ready" button — shows tree overview + instruction + Got it button ─
-# Change log: 2026-05-12 — split into show_tree() + begin_analysis() flow.
-# No longer calls start_main_phase() directly.
-# started_at now stamps in begin_analysis() via _start_main_phase_setup().
+# "I'm Ready" button — shows tree overview + instruction + Got it button
 @cl.action_callback("start_main_phase")
 async def on_start_main_phase(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -275,8 +265,7 @@ async def on_start_main_phase(action: cl.Action):
     ).send()
 
 
-# ── "Got it" button — triggers begin_analysis(), stamps started_at ─────────
-# Change log: 2026-05-12 — new callback for tree/button flow.
+# "Got it" button — triggers begin_analysis(), stamps started_at
 @cl.action_callback("begin_analysis")
 async def on_begin_analysis(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -314,7 +303,7 @@ async def on_begin_analysis(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── Stop button handler ────────────────────────────────────────────────────
+# Stop button handler
 @cl.on_stop
 async def on_stop():
     agent = cl.user_session.get("agent")
@@ -323,7 +312,7 @@ async def on_stop():
         log_interruption(agent.session_id, context="user_clicked_stop")
 
 
-# ── Incoming messages ──────────────────────────────────────────────────────
+# Incoming messages
 @cl.on_message
 async def on_message(message: cl.Message):
     agent  = cl.user_session.get("agent")
@@ -352,9 +341,7 @@ async def on_message(message: cl.Message):
         await _send_summary()
         return
 
-    # ── Warmup phase ──────────────────────────────────────────────────────
-    # Change log: 2026-05-01
-    # Change log: 2026-05-22 — show merged plan on every user message
+    # Warmup phase
     if hasattr(agent, "phase") and agent.phase == "warmup":
         warmup_messages = cl.user_session.get("warmup_messages", [])
         warmup_messages.append(message.content)
@@ -400,7 +387,7 @@ async def on_message(message: cl.Message):
         await _attach_buttons(agent)
 
 
-# ── HITL — Approve concept ─────────────────────────────────────────────────
+# HITL — Approve concept
 @cl.action_callback("approve_concept")
 async def on_approve_concept(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -418,7 +405,7 @@ async def on_approve_concept(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — Reject concept (triggers pushback) ──────────────────────────────
+# HITL — Reject concept (triggers pushback)
 @cl.action_callback("reject_concept")
 async def on_reject_concept(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -434,6 +421,7 @@ async def on_reject_concept(action: cl.Action):
     await msg.update()
 
     await _attach_buttons(agent)
+
 
 @cl.action_callback("add_to_concept")
 async def on_add_to_concept(action: cl.Action):
@@ -463,7 +451,7 @@ async def on_done_adding(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — ➖ Remove a point: open picker ─────────────────────────────────
+# HITL — ➖ Remove a point: open picker
 @cl.action_callback("remove_point_open")
 async def on_remove_point_open(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -490,7 +478,7 @@ async def on_remove_point_open(action: cl.Action):
     ).send()
 
 
-# ── HITL — ➖ Remove a point: item selected ───────────────────────────────
+# HITL — ➖ Remove a point: item selected
 @cl.action_callback("remove_point_item")
 async def on_remove_point_item(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -508,7 +496,7 @@ async def on_remove_point_item(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — ➖ Remove a point: confirm ─────────────────────────────────────
+# HITL — ➖ Remove a point: confirm
 @cl.action_callback("confirm_remove_point")
 async def on_confirm_remove_point(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -523,7 +511,7 @@ async def on_confirm_remove_point(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — ➖ Remove a point: cancel ─────────────────────────────────────
+# HITL — ➖ Remove a point: cancel
 @cl.action_callback("cancel_remove_point")
 async def on_cancel_remove_point(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -538,7 +526,7 @@ async def on_cancel_remove_point(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — ↩️ Revisit past pillar: open picker ───────────────────────────
+# HITL — ↩️ Revisit past pillar: open picker
 @cl.action_callback("revisit_pillar_open")
 async def on_revisit_pillar_open(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -565,7 +553,7 @@ async def on_revisit_pillar_open(action: cl.Action):
     ).send()
 
 
-# ── HITL — ↩️ Revisit past pillar: pillar selected ──────────────────────
+# HITL — ↩️ Revisit past pillar: pillar selected
 @cl.action_callback("revisit_pillar_item")
 async def on_revisit_pillar_item(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -583,7 +571,7 @@ async def on_revisit_pillar_item(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — Confirm reject (commit exclusion) ───────────────────────────────
+# HITL — Confirm reject (commit exclusion)
 @cl.action_callback("confirm_reject")
 async def on_confirm_reject(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -601,7 +589,7 @@ async def on_confirm_reject(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── HITL — Cancel reject (keep concept) ───────────────────────────────────
+# HITL — Cancel reject (keep concept)
 @cl.action_callback("cancel_reject")
 async def on_cancel_reject(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -619,26 +607,15 @@ async def on_cancel_reject(action: cl.Action):
     await _attach_buttons(agent)
 
 
-# ── Shared button attachment logic ─────────────────────────────────────────
+# Shared button attachment logic
 async def _attach_buttons(agent):
-    """
-    Attach the correct buttons based on agent type and current state.
-    Called after every streaming response completes.
-
-    Change log: 2026-04-09 — extracted from on_message
-    Change log: 2026-05-01 — added warmup phase button
-    Change log: 2026-05-06 — updated I'm Ready label
-    Change log: 2026-05-12 — removed user_framework phase (replaced by tree/button flow)
-    Change log: 2026-05-31 — End Session gated on agent.has_main_contribution
-                             (agent-agnostic; agents without the flag default to shown)
-    """
     if hasattr(agent, "phase") and agent.phase == "warmup":
         return
 
     if cl.user_session.get("ended", False):
         return
 
-    # ── HITL-specific button logic ─────────────────────────────────────
+    # HITL-specific button logic
     if isinstance(agent, HITLAgent):
         if agent.phase == "clarification":
             await cl.Message(
@@ -735,7 +712,7 @@ async def _attach_buttons(agent):
 
         return
 
-    # ── BlackBox / Explainable button logic ───────────────────────────
+    # BlackBox / Explainable button logic
     if hasattr(agent, "phase") and agent.phase == "clarification":
         await cl.Message(
             content="",
@@ -750,18 +727,10 @@ async def _attach_buttons(agent):
         ).send()
 
     else:
-            # Gate End Session until the user has made a main-phase contribution.
-            # Agent-agnostic: agents that don't set the flag default to shown, so
-            # Explainable/HITL are unaffected unless the flag is deliberately added.
-            # BlackBox sets has_main_contribution=True on its first main-phase turn.
-            # Change log: 2026-05-31
+            # Gate End Session until the user has made a main-phase contribution
             if not getattr(agent, "has_main_contribution", True):
                 return
 
-            # BlackBox's End Session button is gated, so its begin_analysis line can't
-            # mention it — the irreversibility warning rides on the button description
-            # instead. Explainable already carries the note in its own begin_analysis
-            # message text, so it keeps the plain description (no echo). Change log: 2026-05-31
             end_desc = "End your session"
             if type(agent).__name__ == "BlackBoxAgent":
                 end_desc = "End your session — this cannot be undone"
@@ -779,19 +748,19 @@ async def _attach_buttons(agent):
             ).send()
 
 
-# ── Get summary button ─────────────────────────────────────────────────────
+# Get summary button
 @cl.action_callback("get_summary")
 async def on_get_summary(action: cl.Action):
     await _send_summary()
 
 
-# ── End session button ─────────────────────────────────────────────────────
+# End session button
 @cl.action_callback("end_session")
 async def on_end_session(action: cl.Action):
     await _close_session()
 
 
-# ── Shared summary logic ───────────────────────────────────────────────────
+# Shared summary logic
 async def _send_summary():
     agent      = cl.user_session.get("agent")
     agent_type = cl.user_session.get("agent_type")
@@ -805,7 +774,7 @@ async def _send_summary():
         await cl.Message(content="⚠️ Session already ended.").send()
         return
 
-    # ── HITL — stream summary directly from walkthrough state ─────────
+    # HITL — stream summary directly from walkthrough state
     if agent_type in ("hitl", "explainable", "black_box"):
         cl.user_session.set("ended", True)
         agent.end_session()
@@ -827,7 +796,8 @@ async def _send_summary():
         ).send()
         return
 
-# ── Shared session closing logic ───────────────────────────────────────────
+
+# Shared session closing logic
 async def _close_session():
     agent  = cl.user_session.get("agent")
     ended  = cl.user_session.get("ended", False)

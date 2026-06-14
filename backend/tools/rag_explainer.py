@@ -1,86 +1,19 @@
-import json
 import logging
-import os
-from google import genai
+
 from dotenv import load_dotenv
+
 from backend.knowledge import knowledge_base as kb
+from backend.llm import (
+    classify_json, FAITHFULNESS_THRESHOLD, PILLAR_MATCH_THRESHOLD
+)
+from backend.tools.prompts.rag_explainer import (
+    _PILLAR_MATCH_PROMPT, _FAITHFULNESS_PROMPT
+)
 
 load_dotenv()
 
-# ── LLM (centralised in backend.llm) ───────────────────────────────────────
-from backend.llm import client, CLASSIFIER_MODEL, classify_json, FAITHFULNESS_THRESHOLD, PILLAR_MATCH_THRESHOLD
 
-# ── Faithfulness threshold ─────────────────────────────────────────────────
-# FAITHFULNESS_THRESHOLD now imported from backend.llm
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# Prompts
-# ══════════════════════════════════════════════════════════════════════════
-
-_PILLAR_MATCH_PROMPT = """
-You are a classifier for a case interview coaching system.
-
-The agent is presenting a concept to the user. Your job is to match the concept
-name to one of the pillars in the knowledge base below.
-
-─── KNOWLEDGE BASE PILLARS ───────────────────────────────────────────────
-{pillars_block}
-──────────────────────────────────────────────────────────────────────────
-
-─── CONCEPT NAME ─────────────────────────────────────────────────────────
-{concept_name}
-──────────────────────────────────────────────────────────────────────────
-
-Rules:
-- Match if the concept name is clearly a sub-concept of one of the pillars above
-- Match if the concept name is a close paraphrase or synonym of a sub-concept
-- Match the pillar the concept most naturally belongs to
-- If the concept does not match any pillar, return null
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched_pillar_id": "pillar_id string or null", "confidence": float between 0.0 and 1.0}}
-"""
-
-_FAITHFULNESS_PROMPT = """
-You are a grounding classifier for a knowledge-base-backed case interview system.
-
-Your job is to check whether an agent's concept block stays within the analytical
-scope defined by the knowledge base data below.
-
-─── KNOWLEDGE BASE DATA ──────────────────────────────────────────────────
-Pillar      : {pillar_name}
-Description : {pillar_description}
-Sub-concepts: {sub_concepts}
-──────────────────────────────────────────────────────────────────────────
-
-─── AGENT CONCEPT BLOCK ───────────────────────────────────────────────────
-{concept_block}
-───────────────────────────────────────────────────────────────────────────
-
-Mark as NOT faithful if the concept block:
-- Introduces concepts from a completely different domain
-- Makes claims that clearly contradict the pillar description or scope
-- Introduces analytical lenses not mentioned in the pillar description
-
-Mark as FAITHFUL if:
-- The block stays within the analytical scope described in the pillar description
-- The block uses case-specific elaboration consistent with the pillar scope
-- The block uses consulting framing language without introducing new domains
-
-When in doubt, mark as faithful.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"faithful": true or false, "confidence": float between 0.0 and 1.0}}
-"""
-
-# PILLAR_MATCH_THRESHOLD now imported from backend.llm
-
-
-# ══════════════════════════════════════════════════════════════════════════
 # Pillar matcher — LLM fuzzy match
-# ══════════════════════════════════════════════════════════════════════════
-
 def _match_pillar(concept_name: str) -> dict | None:
     """
     LLM fuzzy-match a concept name to a pillar in the knowledge base.
@@ -130,24 +63,8 @@ def _match_pillar(concept_name: str) -> dict | None:
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════
 # Citation builder
-# ══════════════════════════════════════════════════════════════════════════
-
 def build_citation_header(concept_name: str, framework: str) -> tuple[str | None, dict]:
-    """
-    Build citation header for a concept.
-
-    Two states:
-      State 1 — concept matches a pillar in JSON:
-        Returns (header, kb_data) with pillar description + HTML source links.
-      State 2 — concept not matched:
-        Returns (None, kb_data). Caller shows unverified note.
-
-    kb_data dict always returned for faithfulness check downstream.
-
-    Change log: 2026-05-25 — replaced KG lookup with JSON pillar match
-    """
     pillar = _match_pillar(concept_name)
 
     kb_data = {
@@ -168,12 +85,6 @@ def build_citation_header(concept_name: str, framework: str) -> tuple[str | None
     description = pillar.get("description", "")
 
     # Build header block
-    # Format:
-    # **Concept Name**
-    # [pillar description]
-    #
-    # 📚 **Sources:** [link1] · [link2]
-    #
     sources_line = (
         f"\n\n📚 **Sources:** {sources_html}" if sources_html else ""
     )
@@ -191,17 +102,8 @@ def build_citation_header(concept_name: str, framework: str) -> tuple[str | None
     return header, kb_data
 
 
-# ══════════════════════════════════════════════════════════════════════════
 # Faithfulness check
-# ══════════════════════════════════════════════════════════════════════════
-
 def check_and_append_warning(concept_name: str, concept_block: str, kb_data: dict) -> str | None:
-    """
-    Run faithfulness check after concept block streams.
-    Returns warning string if unfaithful, None if faithful.
-
-    Change log: 2026-05-25 — grounded in JSON pillar description instead of KG block
-    """
     pillar = kb_data.get("pillar")
 
     if pillar is None:
@@ -239,12 +141,8 @@ def check_and_append_warning(concept_name: str, concept_block: str, kb_data: dic
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════
 # Legacy compatibility — kept for any remaining callers
-# ══════════════════════════════════════════════════════════════════════════
-
 def build_and_check_citation(concept_name: str, framework: str, concept_block: str) -> str:
-    """Legacy single-call pipeline — kept for backward compatibility with tests."""
     header, kb_data = build_citation_header(concept_name, framework)
     warning         = check_and_append_warning(concept_name, concept_block, kb_data)
     result          = header or ""

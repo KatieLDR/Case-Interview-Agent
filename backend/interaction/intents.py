@@ -1,41 +1,3 @@
-"""backend/interaction/intents.py  —  Step 3 of REFACTOR_PLAN.md (unified intent taxonomy).
-
-ONE classifier, ONE taxonomy (I-2), fired from the shared layer for every arm (I-1).
-Pure module: NO agent state, NO `self`. The turn context the router needs is passed
-by value. Dependency direction is one-way:  agent -> intents -> llm.
-This module must never import from any agent, and never resolves a KB target.
-
-WHY THIS EXISTS — the Step-0 audit found three incompatible classifiers, not one:
-  * BlackBox : a cascade (_detect_override `redo|concept_excluded|concept_added|none`
-               -> _classify_question y/n). No advance/doubt/revisit/suggest. "anything
-               else" -> a pillar literally named "else" (D6 catastrophe, F-I1/F-I2).
-  * Explainable : one context-enriched single-pass router (advance|add|remove|question|
-               doubt|redo|none). revisit folded into add; no ask_agent_to_suggest.
-               -> THIS is the base we generalise from.
-  * HITL : buttons + state-flags, plus one narrow free-text classifier
-               (suggestion|guidance|sub_point) gated behind the proactive prompt — AND
-               it still calls the inherited _detect_override on normal turns, so one add
-               reaches matching via TWO entry points and double-counts add_pillar (F-M4).
-
-This module replaces all three with a single taxonomy:
-
-    add | remove | question | ask_agent_to_suggest | revisit | doubt | advance | none
-
-DESIGN DECISIONS (locked 2026-06-08, see REFACTOR_PLAN §S Step-3 block):
-  * D-Q1  Buttons bypass the LLM and map straight to the enum (BUTTON_INTENT). Free-text
-          goes through `classify_intent`. The HITL "free-text an action -> nudge to the
-          button instead of executing" behaviour is PERSONA RENDERING of the shared intent
-          (a Step-4 render seam), NOT a second classifier — so classification stays shared.
-  * D-Q2  INTENT ONLY. The router says *what* the user wants and extracts a raw `detail`
-          phrase; it does NOT resolve which KB element that is. Resolution is the dispatch
-          step calling `domain.matching.locate()` (I-3). `detail` stays an unresolved
-          string, exactly as all three arms produce today.
-
-  * `redo` is REMOVED (§0): users may not wipe a session. "start over"/"restart"/"reset"
-    classify as `none` -> the agent renders its fallback.
-  * Filler-word guard (F-I1/F-I2): "else / more / other / another / anything / something"
-    can never be a concept name. Belt-and-braces with `matching.locate()`'s own guard.
-"""
 from __future__ import annotations
 
 import logging
@@ -44,80 +6,26 @@ from dataclasses import dataclass
 
 from backend.llm import classify_json
 
-# ── Taxonomy (I-2) ──────────────────────────────────────────────────────────
 INTENTS = frozenset(
     {"add", "remove", "question", "ask_agent_to_suggest",
      "revisit", "doubt", "advance", "none"}
 )
-
-# Default on classifier error: `question` is the safe fallback (never silently
-# advances or removes). The result is flagged `error=True` so Step-5 logging can
-# keep LLM-error fallbacks OUT of the question count (F-I3).
-_FALLBACK_INTENT = "question"
-
-
-@dataclass
-class IntentResult:
-    intent: str            # one of INTENTS
-    detail: str | None     # raw noun phrase to add/remove/revisit — UNRESOLVED (D-Q2)
-    confidence: float
-    error: bool = False    # True iff this is an LLM-error fallback (F-I3; do not log as a real question)
-    parent: str | None = None  # explicit "add X under Y" destination — raw, UNRESOLVED (D-Q2)
-
-
-# ── D-Q1: deterministic button -> intent (no LLM) ───────────────────────────
-# HITL exposes these as buttons; app.py maps a clicked button to one of these
-# names. Other arms have no buttons and never hit this map.
 BUTTON_INTENT = {
-    "approve":  "advance",   # ✅ approve concept / move on
+    "approve":  "advance",
     "advance":  "advance",
     "next":     "advance",
-    "reject":   "remove",    # ❌ reject concept
-    "remove":   "remove",    # ➖ remove point
-    "revisit":  "revisit",   # ↩️ revisit a past pillar
-    "add":      "add",       # ➕ add a point
+    "reject":   "remove",
+    "remove":   "remove",
+    "revisit":  "revisit",
+    "add":      "add",
 }
 
-
-def intent_for_button(button_name: str) -> str | None:
-    """Map a deterministic UI button to a shared intent (D-Q1). None if unknown
-    (e.g. confirm/cancel buttons, which are handled by the confirmation machine,
-    not the intent taxonomy)."""
-    return BUTTON_INTENT.get((button_name or "").strip().lower())
-
-
-# ── Filler-word guard (F-I1 / F-I2) ─────────────────────────────────────────
-# A bare filler is NEVER a concept. These can appear as the whole message
-# ("anything else?") or as an extracted detail ("else"); both are caught.
+_FALLBACK_INTENT = "question"
 _FILLER_WORDS = {
     "else", "more", "other", "others", "another", "anything",
     "something", "etc", "stuff", "things", "anything else",
     "something else", "what else", "anything more",
 }
-
-
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower()).strip("?.!, ")
-
-
-def _is_filler_detail(detail: str | None) -> bool:
-    """True if `detail` is empty or a pure filler token (no real concept in it)."""
-    if not detail:
-        return True
-    return _norm(detail) in _FILLER_WORDS
-
-
-# ── Steering / delegation guard (F-I1-HITL, Step 4f) ────────────────────────
-# A message that HANDS THE NEXT MOVE to the agent and names no concept of the
-# user's own ("guide it", "you lead", "you decide", "your call") is DELEGATION,
-# not an add. The proactive prompts SOLICIT exactly these ("would you like me to
-# suggest one?", "shall I take the lead?"), so a reply like "guide it" must map to
-# ask_agent_to_suggest — it must NEVER survive as add+detail and become a pillar
-# (the live phantom-pillar contaminant). "guide"/"lead"/"drive" are never concept
-# names. Matched on the WHOLE normalized message (mirrors _FILLER_WORDS) — never a
-# substring — so a real concept that merely CONTAINS such a word ("user guide
-# quality") is untouched. Pure-proceed phrases ("go ahead") are deliberately NOT
-# here: those lean `advance`, are not the bug, and the LLM handles them.
 _STEERING_PHRASES = {
     "guide it", "guide me", "guide us", "you guide", "you guide it",
     "please guide", "please guide me", "please lead",
@@ -133,15 +41,6 @@ _STEERING_PHRASES = {
     "you suggest", "you tell me",
 }
 
-
-def _is_steering_message(text: str) -> bool:
-    """True if the WHOLE message is a steering/delegation phrase — the user hands the
-    next move to the agent and names no concept. Whole-message match only (never a
-    substring), so a real concept containing a steering word is unaffected."""
-    return _norm(text) in _STEERING_PHRASES
-
-
-# ── The one router prompt (derived from Explainable's INTENT_ROUTER_PROMPT) ──
 INTENT_ROUTER_PROMPT = """\
 You route a user's message during a framework problem-solving session.
 Return the SINGLE best intent. Resolve only WHAT the user wants — do NOT try to
@@ -233,6 +132,33 @@ Respond ONLY with valid JSON, no markdown:
 """
 
 
+@dataclass
+class IntentResult:
+    intent: str
+    detail: str | None
+    confidence: float
+    error: bool = False
+    parent: str | None = None
+
+
+def intent_for_button(button_name: str) -> str | None:
+    return BUTTON_INTENT.get((button_name or "").strip().lower())
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower()).strip("?.!, ")
+
+
+def _is_filler_detail(detail: str | None) -> bool:
+    if not detail:
+        return True
+    return _norm(detail) in _FILLER_WORDS
+
+
+def _is_steering_message(text: str) -> bool:
+    return _norm(text) in _STEERING_PHRASES
+
+
 def classify_intent(
     user_text: str,
     *,
@@ -241,16 +167,6 @@ def classify_intent(
     walkthrough_pillars: str = "(none)",
     last_agent: str = "(nothing yet)",
 ) -> IntentResult:
-    """Classify ONE free-text turn into the unified taxonomy (D-Q2: intent only).
-
-    All context is passed by value (pure function). The caller builds the context
-    strings from its own state — exactly the kwargs Explainable already assembles.
-
-    Returns an IntentResult whose `detail` is a RAW phrase, never a resolved KB
-    target. The dispatch step then calls `domain.matching.locate(detail or user_text)`.
-
-    Buttons do NOT call this — see `intent_for_button` (D-Q1).
-    """
     prompt = INTENT_ROUTER_PROMPT.format(
         current_pillar=current_pillar or "(none)",
         current_bullets=current_bullets or "(none)",
@@ -261,7 +177,7 @@ def classify_intent(
 
     try:
         parsed = classify_json(prompt)
-    except Exception as e:  # transport/parse error — classify_json raises by policy
+    except Exception as e:
         logging.warning(f"[INTENT] classifier error: {e} — defaulting to {_FALLBACK_INTENT}")
         return IntentResult(intent=_FALLBACK_INTENT, detail=None, confidence=0.0, error=True)
 
@@ -269,8 +185,6 @@ def classify_intent(
     if intent not in INTENTS:
         intent = _FALLBACK_INTENT
 
-    # GUARD: a non-string detail (model occasionally returns a list/dict) must not
-    # reach the filler check, which calls .strip() — coerce anything non-str to None.
     detail = parsed.get("detail")
     if not isinstance(detail, str):
         detail = None
@@ -282,47 +196,29 @@ def classify_intent(
     else:
         parent = parent.strip() or None
 
-    # GUARD: confidence parse is outside the classify_json try/except; a non-numeric
-    # value ("high") would crash the turn here. Default to 0.0 on any parse failure.
     try:
         confidence = float(parsed.get("confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
 
-    # ── Steering/delegation guard (F-I1-HITL, Step 4f): a whole-message handoff to
-    #    the agent ("guide it", "you lead", "your call") is delegation, NOT an add —
-    #    map it to ask_agent_to_suggest (the agent proposes) so it can never survive
-    #    as add+detail and be materialised into a phantom pillar. Runs FIRST so it
-    #    overrides whatever label the classifier assigned to the bare steering phrase.
     if _is_steering_message(user_text):
         if intent != "ask_agent_to_suggest":
             logging.info(f"[INTENT] '{user_text[:60]}' -> steering/delegation; "
                          f"rerouting {intent} -> ask_agent_to_suggest")
         intent, detail, parent = "ask_agent_to_suggest", None, None
 
-    # ── Filler-word guard (F-I1 / F-I2): defence in depth with matching.locate() ──
-    # 1. A filler can never be a concept -> drop it from detail.
     if _is_filler_detail(detail):
         detail = None
-    # 2. An ADD with no real concept left is the "else"-bug shape (BlackBox once made a
-    #    pillar called "else"): "what else could we add" == asking the agent to suggest.
     if intent == "add" and detail is None:
         logging.info(f"[INTENT] '{user_text[:60]}' -> add with filler/empty detail; "
                      f"rerouting to ask_agent_to_suggest")
         intent = "ask_agent_to_suggest"
-    # 3. A REMOVE or REVISIT with no target cannot act (a targetless "delete"/"go back").
-    #    Rerouting these to *suggest* would be a category error, so fall to none ->
-    #    the agent renders its fallback (non-destructive). Deictic words ("this"/"it"/
-    #    "that") are NOT filler, so "remove this" keeps its detail and reaches Fork-A.
     elif intent in {"remove", "revisit"} and detail is None:
         logging.info(f"[INTENT] '{user_text[:60]}' -> {intent} with no target; falling to none")
         intent = "none"
 
-    # advance/doubt/none/ask_agent_to_suggest never carry a target concept.
     if intent in {"advance", "doubt", "none", "ask_agent_to_suggest"}:
         detail = None
-    # parent is meaningful ONLY for an explicit "add X under Y" — never elsewhere,
-    # never a filler token.
     if intent != "add" or _is_filler_detail(parent):
         parent = None
 

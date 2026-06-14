@@ -1,139 +1,58 @@
-"""backend/domain/matching.py  —  Step 2 of REFACTOR_PLAN.md (domain extraction).
-
-Pure KB matching/resolution. NO agent state, NO `self`. State the matcher needs is
-passed by value. Dependency direction is one-way:  agent -> matching -> knowledge_base.
-This module must never import from any agent.
-
-Unifies the per-agent matchers that had drifted (F-M1..F-M6):
-  _match_pillar / _match_concept / _match_key_question / _classify_removal_target
-  + _norm / _is_excluded_bullet.
-HITL previously lacked the concept matcher and the removal-target classifier entirely;
-routing every arm through locate() gives all three identical resolution by construction.
-
-Behaviour-preserving for Step 2 (A-rows must reproduce baseline). The only deliberate
-change: a concept-level hit now keeps `concept_id` + `level="concept"` instead of
-collapsing to the parent pillar name, so a named criterion ("data quality") resolves as
-a duplicate identically across arms (F-M1). Handlers (Step 4) consume KBMatch.level.
-"""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
+from backend.domain.grounding import _strip_source_refs
 from backend.knowledge import knowledge_base as kb
-from backend.llm import classify_json, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD
+from backend.llm import (
+    classify_json, ADD_MATCH_THRESHOLD, CONCEPT_MATCH_THRESHOLD
+)
+from backend.domain.prompts.matching import (
+    ADD_PILLAR_MATCH_PROMPT, ADD_CONCEPT_MATCH_PROMPT,
+    ADD_MATCH_PROMPT, LOCATE_AREA_PROMPT
+)
 
-# ── ported verbatim from the agents (source-ref stripping) ──────────────────
+CONCEPT_GENERIC_FLOOR = 0.92
+
+_GENERIC_CACHE = None
 _REF_RE = re.compile(r"\s*\[[a-z]\]")
-
-from backend.domain.grounding import _strip_source_refs  # F-ARCH2: single source
-
-def _norm(text: str) -> str:
-    """Whitespace/ref-insensitive, lower-cased — for set-membership comparisons."""
-    return re.sub(r"\s+", " ", _REF_RE.sub("", text or "")).strip().lower()
-
-# Deictic references resolve against what was LAST DISCUSSED (passed in), never re-parsed
-# from free text — keeps removal deterministic (I-7) and identical across arms.
 _DEICTIC = {
     "this", "it", "that", "this one", "that one", "the last one",
     "the one above", "the last point", "the above", "remove this",
 }
-# Filler words are NEVER a valid concept/area name — guards the "else" pillar bug (F-I1/F-I2).
 _FILLER = {"else", "more", "other", "others", "anything", "something", "etc", "and so on"}
-# Minimal function-word set, so an all-filler PHRASE ("anything else", "what else")
-# is caught, not just a bare token. Deliberately tiny — never strip a real topic word.
 _GLUE = {"the", "a", "an", "to", "we", "i", "you", "is", "are", "any", "of", "for",
          "please", "can", "could", "would", "do", "what", "should", "and", "or",
          "add", "remove", "delete", "include", "consider", "want", "like", "think",
          "also", "so", "on", "about", "let", "us"}
-
-# Ordinal references to the currently-shown bullets ("the second point").
 _ORDINALS = {
     "first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
     "fourth": 3, "4th": 3, "fifth": 4, "5th": 4, "last": -1,
 }
 
-ADD_PILLAR_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user wants to add a new area: "{item}".
-Each area below is given as "Name: description". Check whether the user's new
-area is essentially the SAME AREA of analysis as one of them — same topic or
-clearly the same scope, possibly different wording.
-
-─── AREAS ───────────────────────────────────────────────────────────────────
-{pillars}
-────────────────────────────────────────────────────────────────────────────
-Match only at the level of the whole AREA. If the user's text is just one
-specific point that would sit *inside* an area (rather than naming the area
-itself), set matched=false.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_pillar": "pillar name or null", "confidence": float}}
-"""
-
-ADD_CONCEPT_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-The user wrote: "{item}".
-
-Below is a numbered list of analytical concepts, each as "Name: explanation".
-Decide whether the user's text refers to the SAME underlying concern as ONE of
-these concepts — the same analytical point, possibly worded differently.
-
-─── CONCEPTS ────────────────────────────────────────────────────────────────
-{concepts}
-────────────────────────────────────────────────────────────────────────────
-Judge by MEANING, not shared words. Two phrases that share only a generic term
-(e.g. both contain "data") are NOT a match unless they address the same concern.
-For example "data privacy / protection" is about confidentiality and PII — it is
-NOT the same concern as data QUALITY or AVAILABILITY, even though both say "data".
-Match only if the user's text is essentially that concept; reward a confident,
-meaning-level match with high confidence and a loose/topical one with low. If it
-is only loosely or topically related, set matched=false.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
-
-ADD_MATCH_PROMPT = """
-You are a classifier for a case interview framework tool.
-
-The user added "{item}" under the pillar "{pillar}".
-Check whether it matches one of the pillar's existing key questions below.
-
-─── KEY QUESTIONS FOR {pillar} ──────────────────────────────────────────────
-{key_questions}
-────────────────────────────────────────────────────────────────────────────
-
-A match means the user's addition is essentially the same point as one of the
-key questions above — same topic, possibly different wording.
-
-Respond ONLY with valid JSON, no explanation, no markdown:
-{{"matched": true or false, "matched_index": integer or null, "confidence": float}}
-"""
-
-
 @dataclass
 class KBMatch:
-    """Result of resolving user text against the KB hierarchy (§3.2).
-
-    `match_type`, pillar-state and score are RUNTIME signals (I-5) — used for control,
-    not persisted. `needs_disambiguation` is set only by resolve_removal_target when a
-    deictic ("this") arrives with no recorded focus (BlackBox full-render case)."""
-    pillar: str | None = None          # ALWAYS the resolved PARENT pillar name
+    pillar: str | None = None
     pillar_is_withheld: bool = False
-    level: str = "none"                # "pillar" | "concept" | "none"
+    level: str = "none"
     concept_id: str | None = None
-    matched_text: str | None = None    # exact KB text for a key_question hit (verbatim)
-    match_type: str | None = None      # revealed_withheld | surfaced_unreached_shown | novel_not_in_kb
+    matched_text: str | None = None
+    match_type: str | None = None
     score: float = 0.0
     needs_disambiguation: bool = False
 
+@dataclass
+class SubPointSlot:
+    pillar: str
+    position: str = "end"
 
-# ── small pure predicate (was BlackBox/EXP `_is_excluded_bullet`) ───────────
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", _REF_RE.sub("", text or "")).strip().lower()
+
+
 def is_excluded_bullet(excluded_sub_bullets: dict, pillar_name: str, bullet: str) -> bool:
-    """True if `bullet` was already removed from `pillar_name`. The excluded-map is
-    SESSION state, so it is passed in explicitly (no `self`)."""
     removed = {_norm(b) for b in (excluded_sub_bullets or {}).get(pillar_name, [])}
     return _norm(bullet) in removed
 
@@ -147,8 +66,6 @@ def _pillar_is_withheld(pillar_name: str | None) -> bool:
 
 
 def _pillar_id_for_name(pillar_name: str | None) -> str | None:
-    """The KB id for a pillar NAME (PASS 2 returns a name; the scoped concept re-probe needs
-    the id). None if unknown — the re-route then falls through to the plain pillar result."""
     if not pillar_name:
         return None
     p = next((p for p in kb.get_all_pillars()
@@ -156,10 +73,7 @@ def _pillar_id_for_name(pillar_name: str | None) -> str | None:
     return p["id"] if p else None
 
 
-# ── the three matching passes (one shared copy; was triplicated) ────────────
 def match_pillar(item: str) -> tuple[str | None, float]:
-    """Does the text name one of the framework AREAS (shown or withheld)? Description-
-    enriched so semantically-adjacent terms ("IT budget" -> "Financial Impact") resolve."""
     pillars = kb.get_all_pillars()
     if not pillars:
         return None, 0.0
@@ -174,16 +88,11 @@ def match_pillar(item: str) -> tuple[str | None, float]:
     return None, 0.0
 
 
-CONCEPT_GENERIC_FLOOR = 0.92   # B2(c): a generic-token-only match must clear this higher bar
-
-
 def _content_tokens(text: str) -> set:
     return {t for t in re.findall(r"[a-z0-9]+", _norm(text or "")) if t not in _GLUE}
 
 
-_GENERIC_CACHE = None
 def _generic_tokens() -> set:
-    """Content tokens appearing in >=2 concept NAMES — too common to anchor a match alone."""
     global _GENERIC_CACHE
     if _GENERIC_CACHE is None:
         counts: dict = {}
@@ -197,9 +106,6 @@ def _generic_tokens() -> set:
 
 
 def _only_generic_overlap(item: str, concept: dict) -> bool:
-    """True when the user item shares NO distinguishing (non-generic) content token with the
-    matched concept's name+explanation — the match rests only on a generic everywhere-word
-    (e.g. "data privacy" vs "Data quality and availability", which share only "data")."""
     item_toks = _content_tokens(item)
     cand_toks = (_content_tokens(concept.get("name", ""))
                  | _content_tokens(concept.get("explanation", "")))
@@ -208,17 +114,6 @@ def _only_generic_overlap(item: str, concept: dict) -> bool:
 
 def match_concept(item: str, *, pillar_id: str | None = None,
                   apply_generic_floor: bool = True) -> tuple[dict | None, float]:
-    """Search analytical concepts (name + explanation), SWAP EXCLUDED. Returns the matched
-    concept dict (keeps id + pillar_id) — not just the parent name — so locate() can mark
-    level=concept (the F-M1 fix).
-
-    `pillar_id` (None = all pillars, the PASS-1 behaviour) restricts the candidate set to one
-    area's concepts. `apply_generic_floor` (default True = the PASS-1 B2(c) guard) can be
-    turned OFF by the locate() PASS-2->concept re-route: once the AREA matcher has already
-    established the term belongs to a specific area, a within-area concept hit resting on a
-    shared term ("data privacy" vs the area's PII concept) is no longer shallow overlap, so the
-    higher generic bar — which is exactly what blocked the legitimate concept — does not apply.
-    Both knobs are additive; the global PASS-1 call is unchanged."""
     concepts = [c for c in kb.get_all_concepts()
                 if not c.get("swap", False) and c.get("pillar_id")
                 and (pillar_id is None or c.get("pillar_id") == pillar_id)]
@@ -233,11 +128,6 @@ def match_concept(item: str, *, pillar_id: str | None = None,
             idx = parsed.get("matched_index")
             if idx is not None and 0 <= idx < len(concepts):
                 cand = concepts[idx]
-                # B2(c): a match resting only on a generic everywhere-token must clear a
-                # higher bar than one anchored by a distinguishing word — this rejects shallow
-                # keyword overlap while genuine high-confidence semantic matches still pass.
-                # The re-route disables this (see docstring): the area match already supplied
-                # the discriminating evidence the generic-floor stands in for.
                 floor = CONCEPT_MATCH_THRESHOLD
                 if apply_generic_floor and _only_generic_overlap(item, cand):
                     floor = CONCEPT_GENERIC_FLOOR
@@ -249,8 +139,6 @@ def match_concept(item: str, *, pillar_id: str | None = None,
 
 
 def match_key_question(item: str, pillar_name: str) -> tuple[str | None, float]:
-    """Does the addition duplicate a key_question already inside `pillar_name`?
-    Returns the matched KB question text VERBATIM (source-refs stripped)."""
     pillar = next((p for p in kb.get_all_pillars()
                    if p["name"].lower() == pillar_name.lower()), None)
     if pillar is None:
@@ -271,36 +159,7 @@ def match_key_question(item: str, pillar_name: str) -> tuple[str | None, float]:
     return None, 0.0
 
 
-# ── public entry points ─────────────────────────────────────────────────────
-# Area matcher for locate() PASS 2. Unlike BlackBox's match_pillar (terse name+desc,
-# strict "reject sub-points" guard), this presents each area ENRICHED with its concrete
-# concerns — concept names + key_questions + sub_bullets — so a user term that is the
-# funding/resource/aspect of one of those concerns (e.g. "IT budget" -> Financial Impact's
-# cost concerns) resolves to the area. This is the "match the whole hierarchy" surface the
-# plan (§3.2) specifies; the old locate() only saw concept names + bare pillar descriptions.
-# locate-private (BlackBox keeps its own match_pillar untouched). JSON example doubled-braced.
-LOCATE_AREA_PROMPT = """
-The user wrote: "{item}".
-
-Below are the framework's AREAS. Each lists its description and the specific concerns it
-covers (criteria, key questions, and points).
-
-{areas}
-
-Decide whether the user's text clearly corresponds to exactly ONE area -- i.e. it names
-that area, or it is one of the concerns that area covers, or the funding / resource /
-specific aspect of one of those concerns. Match ONLY if it clearly belongs to a SINGLE
-area's listed concerns. If it is unrelated, too vague, or could belong to several areas
-equally well, set matched=false.
-
-Respond ONLY with valid JSON, no markdown:
-{{"matched": true or false, "matched_pillar": "area name or null", "confidence": float}}
-"""
-
-
 def _match_area(item: str) -> tuple[str | None, float]:
-    """PASS 2 of locate(): match against each area ENRICHED with its concerns
-    (concept names + key_questions + sub_bullets). Returns (pillar_name, confidence)."""
     pillars = kb.get_all_pillars()
     concepts = kb.get_all_concepts()
     blocks = []
@@ -327,8 +186,6 @@ def _match_area(item: str) -> tuple[str | None, float]:
 
 
 def pillar_gist(name: str) -> str:
-    """One-sentence gist of a pillar (first sentence of its KB description) for
-    cross-pillar notes. Empty string if unknown."""
     p = next((p for p in kb.get_all_pillars()
               if p["name"].lower() == (name or "").lower()), None)
     if not p or not p.get("description"):
@@ -338,11 +195,6 @@ def pillar_gist(name: str) -> str:
 
 
 def normalize_name(name: str) -> str:
-    """Capitalize the first letter of a USER-supplied area/point name so it matches the
-    KB presentation style (KB pillars are Title Case). First-letter-only by design (D6):
-    upper-casing just the leading character avoids mangling acronyms or proper terms that
-    sit inside the name ("data privacy" -> "Data privacy", not "Data Privacy"). Idempotent;
-    leaves an already-capitalised or empty string unchanged."""
     s = (name or "").strip()
     if not s:
         return s
@@ -350,11 +202,6 @@ def normalize_name(name: str) -> str:
 
 
 def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
-    """The canonical KB text for a matched concept — the (ii) shared add wording across arms.
-    Prefers the concept's KB key-question bullet (the pillar sub_bullet whose lead phrase is
-    the concept name); falls back to the concept NAME when the concept is not surfaced as a
-    bullet (most of the 31 concepts). `refs=True` keeps inline [a] citation refs (EXP); False
-    strips them (BlackBox / HITL render no sources). None if the id is unknown."""
     c = kb.get_concept_by_id(concept_id)
     if not c:
         return None
@@ -365,12 +212,6 @@ def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
         nlow = name.lower()
         for b in pillar.get("sub_bullets", []):
             lead = _strip_source_refs(b).split(":", 1)[0].strip().lower()
-            # The KB has no explicit concept->sub_bullet key; the link is inferred from the
-            # bullet's lead phrase. Exact equality misses when the concept NAME carries a
-            # qualifier the bullet lead omits ("Input data classification level" vs lead
-            # "Input data classification"). Prefix-tolerant in EITHER direction recovers the
-            # intended link. Verified across all 31 concepts: this changes the result for
-            # ONLY that one concept and produces no ambiguous or cross-pillar match.
             if lead and (lead == nlow or nlow.startswith(lead) or lead.startswith(nlow)):
                 bullet = b
                 break
@@ -380,10 +221,6 @@ def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
 
 
 def canonical_add_bullet(text: str, *, refs: bool = True) -> str | None:
-    """If `text` confidently matches a KB concept (the matcher gate), return that concept's
-    canonical KB bullet (the (ii) shared add wording) — else None, so the caller keeps the
-    user's own wording. The cross-pillar companion to match_key_question (which is scoped to
-    one pillar): this recognises a concept wherever it lives in the KB."""
     km = locate(text)
     if km.level == "concept" and km.concept_id:
         return concept_bullet(km.concept_id, refs=refs)
@@ -391,31 +228,13 @@ def canonical_add_bullet(text: str, *, refs: bool = True) -> str | None:
 
 
 def locate(user_text: str) -> KBMatch:
-    """Resolve user text against the WHOLE KB hierarchy, most-specific-first (§3.2):
-        PASS 1  CONCEPT  (name + explanation)                 -> level=concept (+id)
-        PASS 2  AREA     (description + key_questions +
-                          sub_bullets + concept names)         -> level=pillar
-        PASS 3  nothing                                        -> level=none (novel)
-    Concept-before-area keeps a named criterion ("data quality") resolving as the
-    duplicate it is (F-M1). PASS 2 is enriched with each area's CONCRETE concerns (the
-    key_questions/sub_bullets the old locate() ignored), so a term that is the funding /
-    resource / aspect of an area's concern ("IT budget" -> Financial Impact's cost
-    concerns) resolves to that area instead of falling through to novel. Matching is
-    against real KB text with strict framing, so genuinely novel terms ("change
-    management", "vendor lock-in") still fall to none. Filler short-circuits to none."""
     text = (user_text or "").strip()
     toks = [t for t in re.findall(r"[a-z0-9]+", _norm(text)) if t not in _GLUE]
     if not text or not toks or all(t in _FILLER for t in toks):
         return KBMatch(level="none", match_type="novel_not_in_kb")
 
-    # F-CASE (Step-2 amendment 2026-06-09): case-fold the probe sent to the LLM matchers.
-    # locate() already lower-cases for the filler/token gate above; the matcher calls must
-    # use the SAME normalised form, or a user's natural casing ("IT Budget") misses a match
-    # the curated lower-case gate input ("IT budget") makes. matched_text / concept_id come
-    # from the KB, so this only changes what the matcher SEES, never the KBMatch fields.
     probe = text.lower()
 
-    # PASS 1 — specific criterion
     concept, cscore = match_concept(probe)
     if concept:
         parent = kb.get_pillar_by_id(concept["pillar_id"])
@@ -428,19 +247,8 @@ def locate(user_text: str) -> KBMatch:
             score=cscore,
         )
 
-    # PASS 2 — area, enriched with its concrete concerns (key_questions + sub_bullets)
     pillar_name, ascore = _match_area(probe)
     if pillar_name:
-        # §3.2 re-route: PASS 2's enrichment lists each area's CONCEPT NAMES, so the area
-        # matcher fires when the term is really one of those concepts ("data privacy" matched
-        # Solution Design only because that area lists the PII concept). Per §3.2 a concept
-        # phrasing is "not a separate level" — it IS the concept. So before returning a pillar,
-        # re-probe the concepts SCOPED TO THIS AREA: the area match has already established
-        # topical relevance, so the generic-floor (which blocked the legitimate within-area
-        # concept on shared-token grounds) is dropped here. A within-area concept hit returns
-        # level=concept (the specific element, I-3); only a genuine whole-area term stays
-        # level=pillar. This is the matcher-granularity fix — it never widens what matches the
-        # AREA, it only re-labels an area hit that is actually a concept.
         pidf = _pillar_id_for_name(pillar_name)
         if pidf:
             sub, sscore = match_concept(probe, pillar_id=pidf, apply_generic_floor=False)
@@ -459,8 +267,8 @@ def locate(user_text: str) -> KBMatch:
             score=ascore,
         )
 
-    # PASS 3 — novel
     return KBMatch(level="none", match_type="novel_not_in_kb")
+
 
 def resolve_removal_target(
     user_text: str,
@@ -468,22 +276,15 @@ def resolve_removal_target(
     last_discussed: KBMatch | None = None,
     shown_bullets: list[str] | None = None,
 ) -> KBMatch:
-    """Resolve WHAT a removal targets. Deictic/positional refs resolve deterministically
-    against passed-in context (NO LLM, identical across arms — I-7); named targets fall
-    through to locate(). `last_discussed` is the structured focus the agent recorded on
-    its previous turn (walkthrough arms: the current pillar/concept; BlackBox after a full
-    re-render: typically None -> needs_disambiguation rather than a silent pillar guess)."""
     text = (user_text or "").strip()
     norm = _norm(text)
     shown_bullets = shown_bullets or []
 
-    # 1 — deictic "remove this / it / that": resolve to what was last discussed.
     if norm in _DEICTIC or any(norm == d or norm.endswith(" " + d) for d in _DEICTIC):
         if last_discussed is not None and last_discussed.level != "none":
             return last_discussed
         return KBMatch(level="none", needs_disambiguation=True)
 
-    # 2 — positional "the second point" against the currently-shown bullets.
     for word, idx in _ORDINALS.items():
         if re.search(rf"\b{re.escape(word)}\b", norm) and shown_bullets:
             try:
@@ -493,19 +294,8 @@ def resolve_removal_target(
             return KBMatch(level="concept", matched_text=_strip_source_refs(bullet),
                            match_type="surfaced_unreached_shown")
 
-    # 3 — named target: same KB resolution as an add.
     return locate(text)
 
 
-@dataclass
-class SubPointSlot:
-    pillar: str
-    position: str = "end"   # only "end" today; KB keeps insertion order
-
-
 def place_sub_point(item: str, pillar: str) -> SubPointSlot:
-    """Slot for a NEW sub-point (`item`) inside an already-chosen `pillar` (distinct from
-    'find existing'). Trivial today — append; `item` is unused for now but kept in the
-    signature per §3.2. Watch-item: if this ever needs the same LLM pass as locate(),
-    merge them rather than keep two prompts."""
     return SubPointSlot(pillar=pillar, position="end")
