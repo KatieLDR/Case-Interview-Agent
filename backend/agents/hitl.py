@@ -582,11 +582,8 @@ class HITLAgent(BaseAgent):
             cur = self._current_concept()
             if cur is not None:
                 self._justified_concepts.add(cur)
-            # A1 (revised per K; supersedes the C2 hold-ack): HOLD by entering the proactive
-            # state — ack, then the "take the lead?" prompt. This hides the buttons
-            # (should_show_buttons gates on awaiting_user_suggestion), so there's no stale button;
-            # the next free-text turn routes through the proactive branch: "you lead"->
-            # ask_agent_to_suggest, "move on"->passive_advance, a named pillar->add. No auto-advance.
+                self.walkthrough_index += 1
+
             yield from self._stream_justification_ack()
             return
 
@@ -631,7 +628,6 @@ class HITLAgent(BaseAgent):
                 if pres.intent == "advance":
                     logging.info("[PROACTIVE] move-on -> passive_advance + advance")
                     ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
-                    self.walkthrough_index += 1
                     if self._current_concept() is None:
                         yield from self._walkthrough_complete_message()
                     else:
