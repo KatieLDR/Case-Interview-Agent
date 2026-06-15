@@ -17,6 +17,12 @@ CONCEPT_GENERIC_FLOOR = 0.92
 
 _GENERIC_CACHE = None
 _REF_RE = re.compile(r"\s*\[[a-z]\]")
+_ARTICLE_RE = re.compile(r"\b(?:a|an|the)\b")
+
+def _drop_articles(s: str) -> str:
+    """Lowercased text with articles (a/an/the) removed and whitespace collapsed —
+    for comparing a concept name to a key-question/sub-bullet lead robustly."""
+    return re.sub(r"\s+", " ", _ARTICLE_RE.sub(" ", s)).strip()
 _DEICTIC = {
     "this", "it", "that", "this one", "that one", "the last one",
     "the one above", "the last point", "the above", "remove this",
@@ -209,11 +215,15 @@ def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
     pillar = kb.get_pillar_by_id(c.get("pillar_id"))
     bullet = None
     if pillar and name:
-        nlow = name.lower()
+        # Compare leads with articles (a/an/the) dropped, so authored drift between
+        # a concept's name and its key-question lead (e.g. "by third-party provider"
+        # vs "by a third-party provider") doesn't defeat the match and silently lose
+        # the citation in the fallback below.
+        ncanon = _drop_articles(name.lower())
 
         def _lead_match(text: str) -> bool:
-            lead = _strip_source_refs(text).split(":", 1)[0].strip().lower()
-            return bool(lead) and (lead == nlow or nlow.startswith(lead) or lead.startswith(nlow))
+            lead = _drop_articles(_strip_source_refs(text).split(":", 1)[0].strip().lower())
+            return bool(lead) and (lead == ncanon or ncanon.startswith(lead) or lead.startswith(ncanon))
 
         # Prefer a displayed sub-bullet; otherwise fall back to the concept's key
         # question, which carries its source ref ([x]). Without this fallback a

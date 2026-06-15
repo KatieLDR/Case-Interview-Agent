@@ -13,6 +13,7 @@ from backend.logger import (
     log_agent_response, log_interruption, update_answer,
 )
 from backend.logging import events as ev
+from backend.logging.sink import firestore_sink as _sink
 from backend.agents.prompts.black_box import (
     SYSTEM_PROMPT, REMOVAL_TARGET_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
@@ -291,16 +292,32 @@ class BlackBoxAgent(BaseAgent):
             self._emit(msg); yield msg; return
 
         if o.action == "navigate_offer":
+            pp = self.pending_placement or {}
+            reveal_withheld = bool(pp.get("reveal_on_accept"))   # sub-point of a WITHHELD pillar
             self.pending_placement = None
             gist = f" {o.explanation}" if o.explanation else ""
             nb = getattr(o, "navigate_bullet", None)
             stored_new = False
             if o.level == "sub_bullet" and o.pillar and nb:
+                # A withheld pillar isn't on screen yet — surface it so the point renders
+                # (and so dedup sees its KB bullets).
+                if reveal_withheld:
+                    self.surface_pillar(o.pillar)
                 already = {grounding._strip_source_refs(b).strip().lower()
                            for b in self.presented_sub_bullets().get(o.pillar, [])}
                 if grounding._strip_source_refs(nb).strip().lower() not in already:
                     self.add_sub_point(o.pillar, nb)
                     stored_new = bool((self._last_sub_add or {}).get("is_new"))
+                    if stored_new and not o.counted:
+                        # BB resolves sub-point adds at the offer. The shared handler only
+                        # counts a concept-add when its pillar was unreached (never true in
+                        # BB's all-shown view) or withheld — so a genuinely-new sub-point
+                        # under an already-shown pillar would go uncounted. Count it here at
+                        # sub_bullet level, mirroring HITL._store_sub_point.
+                        ev.record(handlers.AddOutcome(
+                            action="added_new", pillar=o.pillar, level="sub_bullet",
+                            counted=True, text=nb, source="user_spontaneous"),
+                            self._evctx(), _sink)
             if stored_new:
                 pre = f"Added under **{o.pillar}**.{gist}\n\n"
             elif o.level == "concept" and o.matched_text:

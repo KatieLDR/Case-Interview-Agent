@@ -176,6 +176,20 @@ _OWN_AREA = ("own area", "separate area", "new area", "its own", "on its own", "
 _HERE = ("keep it here", "under this", "this area", "this pillar", "right here", "under it",
          "where we are", "current area", "under current", "keep here", "here", "current")
 
+_PILLAR_NAME_STOP = {"area", "areas", "pillar", "pillars", "section", "sections",
+                     "topic", "topics", "part", "the", "a", "an", "and", "or", "of"}
+
+def _names_pillar(text: str, pillar_name: str | None) -> bool:
+    """True when the user's text is essentially the pillar's NAME (a request to
+    navigate there), vs a content phrase that merely matched the pillar. Used to
+    decide whether surfacing the area should count as pillar agency."""
+    if not pillar_name:
+        return False
+    def _toks(s: str) -> set:
+        return {t for t in re.findall(r"[a-z0-9]+", _norm(s)) if t not in _PILLAR_NAME_STOP}
+    t, p = _toks(text), _toks(pillar_name)
+    return bool(t) and t <= p
+
 
 def _placement_choice(text: str):
     n = _norm(text)
@@ -217,9 +231,16 @@ def resolve_placement(session: HandlerSession, user_text: str) -> Outcome | None
     if kind == "navigate":
         if _wants_navigate(user_text):
             if pp.get("reveal_on_accept") and pp.get("target"):
+                # Surfacing a WITHHELD pillar via a sub-point: the user contributed a
+                # sub-bullet, not a pillar. Reveal the pillar (so it renders) but count
+                # the contribution at sub_bullet level — never as a pillar add — to
+                # mirror HITL._store_sub_point. The bullet itself is stored/rendered by
+                # render_add's `navigated` branch via navigate_bullet.
                 session.surface_pillar(pp.get("target"))
-                return AddOutcome(action="navigated", pillar=pp.get("target"), level="pillar",
-                                  counted=True, source="user_spontaneous",
+                return AddOutcome(action="navigated", pillar=pp.get("target"),
+                                  level="sub_bullet", counted=True,
+                                  text=pp.get("navigate_bullet") or item,
+                                  source="user_spontaneous",
                                   matched_pillar_id=pp.get("matched_pillar_id"),
                                   navigate_bullet=pp.get("navigate_bullet"),
                                   navigate_concept_id=pp.get("concept_id"))
@@ -350,10 +371,25 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
             return AddOutcome(action="revealed", pillar=km.pillar, level="pillar",
                               counted=True, matched_pillar_id=_pillar_id(km.pillar),
                               explanation=g.ground_pillar(km.pillar) or None, source=source)
+        # A phrase that matched a pillar by CONTENT (not by naming it) and whose
+        # pillar isn't on screen yet: the user surfaced that area early. Credit it
+        # once as a pillar engagement (add_pillar), mirroring HITL. Literally naming
+        # an in-framework pillar to navigate stays uncounted (counted=False).
+        unreached = bool(km.pillar) and km.pillar.lower() not in presented
+        counted = False
+        if unreached and not _names_pillar(text, km.pillar):
+            seen_p = getattr(session, "_agency_pillars", None)
+            if seen_p is None:
+                seen_p = set()
+                session._agency_pillars = seen_p
+            if km.pillar.lower() not in seen_p:
+                seen_p.add(km.pillar.lower())
+                counted = True
         session.pending_placement = {"kind": "navigate", "target": km.pillar,
                                      "level": "pillar", "item": text}
         return AddOutcome(action="navigate_offer", pillar=km.pillar, level="pillar",
-                          counted=False, explanation=m.pillar_gist(km.pillar) or None,
+                          counted=counted, matched_pillar_id=_pillar_id(km.pillar),
+                          explanation=m.pillar_gist(km.pillar) or None,
                           source=source)
 
     session.pending_placement = {"kind": "novel", "item": text}
