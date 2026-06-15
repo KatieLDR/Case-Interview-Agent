@@ -273,9 +273,17 @@ class HITLAgent(BaseAgent):
         if not matched:
             matched = matching.canonical_add_bullet(item, refs=False)
         stored  = matched if matched else self._format_sub_bullet(item)
+        # Dedup against what the pillar already shows: the streamed block (if the
+        # pillar has been presented) AND its canonical KB sub-bullets, so a
+        # KB-matched bullet for a not-yet-streamed pillar isn't duplicated on render.
         block = self.concept_blocks.get(pillar, "")
-        shown_lines = [l.strip().lstrip("-• ").strip().lower()
-                       for l in block.splitlines() if l.strip()]
+        shown_lines = {l.strip().lstrip("-• ").strip().lower()
+                       for l in block.splitlines() if l.strip()}
+        kb_pillar = next((p for p in kb.get_all_pillars()
+                          if p["name"].lower() == pillar.lower()), None)
+        if kb_pillar:
+            shown_lines.update(grounding._strip_source_refs(b).strip().lower()
+                               for b in kb_pillar.get("sub_bullets", []))
         if stored.lower() in shown_lines:
             return stored, False
         existing = self.user_sub_points.setdefault(pillar, [])
@@ -404,7 +412,7 @@ class HITLAgent(BaseAgent):
             if pres.intent != "advance":
                 sub = self._locate_subpoint(user_input)
                 if sub is not None:
-                    yield from self._navigate_for_subpoint(*sub)
+                    yield from self._navigate_for_subpoint(*sub, user_text=user_input)
                     return
 
             # Resolve which concept the user is pointing at. Prefer an explicit
@@ -451,7 +459,9 @@ class HITLAgent(BaseAgent):
                                                source="user_elicited"),
                                   self._evctx(source="user_elicited", modality="text"), _sink)
                     logging.info(f"[PROACTIVE] navigate to '{target}' (was idx={idx})")
-                    yield f"Sure — let's look at **{target}** now.\n\n"
+                    gist    = matching.pillar_gist(target)
+                    why_txt = f" {gist}" if gist else ""
+                    yield f"Sure — let's look at **{target}** now.{why_txt}\n\n"
                     yield from self._stream_concept(is_first=False)
                 else:
                     logging.info(f"[PROACTIVE] '{target}' already covered (idx={idx})")
@@ -895,49 +905,63 @@ class HITLAgent(BaseAgent):
         return concept
 
     def _locate_subpoint(self, text: str) -> tuple[str, str | None, str | None] | None:
-        """Resolve free text to a *sub-point* of a known walkthrough pillar,
-        mirroring EXP/BB (which resolve sub-bullet granularity via
-        matching.locate in the shared outcome router). Returns
-        (pillar, matched_point, why) when the text names a point that belongs to
-        a known, non-excluded pillar — otherwise None. A verbatim pillar mention
-        is left to the pillar-level resolvers."""
+        """Resolve free text to a *sub-point* of a pillar, mirroring EXP/BB
+        (which resolve sub-bullet granularity via matching.locate in the shared
+        outcome router). Returns (pillar, matched_point, why) when the text names
+        a point that belongs to a non-excluded KB pillar — whether that pillar is
+        already in the walkthrough or still withheld (a withheld pillar is simply
+        one not yet in walkthrough_concepts). The caller surfaces/navigates the
+        pillar and counts the contribution at sub_bullet level in both cases. A
+        verbatim pillar mention is left to the pillar-level resolvers."""
         if not text or self._mentioned_pillar(text):
             return None
         km = matching.locate(text)
         if km.level != "concept" or not km.pillar:
             return None
-        if self._locate_concept(km.pillar) is None:
-            return None                       # owning pillar isn't in the walkthrough
         if km.pillar.lower() in [e.lower() for e in self.excluded_concepts]:
             return None
         return (self._normalize_pillar(km.pillar), km.matched_text,
                 matching.pillar_gist(km.pillar) or None)
 
-    def _navigate_for_subpoint(self, pillar: str, point: str | None, why: str | None):
+    def _navigate_for_subpoint(self, pillar: str, point: str | None, why: str | None,
+                               *, user_text: str):
         """A mention matched a sub-point of `pillar` during the walkthrough.
-        Tell the user where it lives and why, then move the walkthrough to that
-        pillar so the per-concept buttons show. Forward navigation re-orders the
-        pillar to the front (like the pillar-navigate path); a pillar already
-        covered is reported in place without rewinding."""
+        Tell the user where it lives and why, add their point as a visible
+        sub-bullet under the pillar, then move the walkthrough to that pillar so
+        the per-concept buttons show. A pillar already in the walkthrough is
+        re-ordered to the front (like the pillar-navigate path); a withheld
+        pillar not yet in the list is inserted at the current position. A pillar
+        already covered keeps the point and is reported in place without
+        rewinding.
+
+        The point is stored via `_store_sub_point`, which uses KB phrasing when
+        the text matches a known concept/key-question and otherwise rephrases the
+        user's wording to house style. Whether the pillar was already in the
+        framework or surfaced from withheld, the contribution is counted at
+        sub_bullet level — never as a pillar add."""
         idx     = self._locate_concept(pillar)
         pt      = f" *{point}*" if point else ""
         why_txt = f" — {why}" if why else ""
         if idx is not None and idx < self.walkthrough_index:
             logging.info(f"[PROACTIVE] sub-point of already-covered '{pillar}'")
+            self._store_sub_point(pillar, user_text, source="user_elicited")
             yield (f"That point{pt} is part of **{pillar}**{why_txt} "
-                   f"We've already covered **{pillar}** — it's in your framework.\n\n")
+                   f"We've already covered **{pillar}** — I've added it there.\n\n")
             yield from self._stream_proactive_prompt()
             return
-        if idx is not None and idx != self.walkthrough_index:
+        if idx is None:
+            # Withheld pillar (not yet in the walkthrough): bring it into the
+            # framework at the current position. The swap concept's tracked
+            # position shifts with the insert, as in the other reveal paths.
+            self.walkthrough_concepts.insert(self.walkthrough_index, pillar)
+            if self.walkthrough_index <= self.swap_position:
+                self.swap_position += 1
+            logging.info(f"[PROACTIVE] withheld sub-point -> surface '{pillar}'")
+        elif idx != self.walkthrough_index:
             self.walkthrough_concepts.pop(idx)
             self.walkthrough_concepts.insert(self.walkthrough_index, pillar)
-        # The user surfaced a *sub-bullet*, not a pillar — count it at sub_bullet
-        # level (the owning pillar is already in the framework, so no pillar add).
-        if pillar.lower() not in self.navigated_pillars:
-            self.navigated_pillars.add(pillar.lower())
-            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
-                                   counted=True, text=point, source="user_elicited"),
-                      self._evctx(source="user_elicited", modality="text"), _sink)
+        self.navigated_pillars.add(pillar.lower())
+        self._store_sub_point(pillar, user_text, source="user_elicited")
         logging.info(f"[PROACTIVE] sub-point '{point}' -> navigate to '{pillar}'")
         yield (f"That point{pt} belongs under **{pillar}**{why_txt} "
                f"Let's look at **{pillar}**.\n\n")
@@ -974,6 +998,11 @@ class HITLAgent(BaseAgent):
             pillar, point, why = sub
             pt      = f" *{point}*" if point else ""
             why_txt = f" — {why}" if why else ""
+            if self._locate_concept(pillar) is None:
+                # Withheld pillar surfaced post-walkthrough: add it to the
+                # framework so _revisit_pillar_full can navigate to it.
+                self.walkthrough_concepts.append(pillar)
+            self._store_sub_point(pillar, user_input, source="user_elicited")
             yield f"That point{pt} belongs under **{pillar}**{why_txt}\n\n"
             yield from self._revisit_pillar_full(pillar, answer_question=is_question)
             return
