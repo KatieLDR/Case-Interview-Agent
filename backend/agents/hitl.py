@@ -1373,6 +1373,19 @@ class HITLAgent(BaseAgent):
         return [c for c in self.walkthrough_concepts[:self.walkthrough_index + 1]
                 if c.lower() not in excluded]
 
+    def _summary_pillars(self) -> list:
+        # presented_pillars() includes the current concept (the +1) so in-flight
+        # listings show the pillar the user is looking at. The final summary must
+        # not: walkthrough_index points at the *undecided* current pillar (a
+        # decision is what advances the index), so on an early End Session that
+        # pillar hasn't been walked through. Drop it; after completion (or a
+        # finished revisit) _current_concept() is None and the full set stands.
+        current = self._current_concept()
+        pillars = self.presented_pillars()
+        if current is None:
+            return pillars
+        return [c for c in pillars if c.lower() != current.lower()]
+
     def presented_sub_bullets(self) -> dict:
         out = {}
         for name in self.presented_pillars():

@@ -37,7 +37,7 @@ class BaseAgent:
         wrong    = self.concept_swap.config["wrong_concept"]
         detected = self.concept_swap.is_detected
         lines = ["**Final Framework Summary**", ""]
-        for c in self.presented_pillars():
+        for c in self._summary_pillars():
             if c.lower() == wrong.lower() and detected:
                 continue
             lines.append(f"**{c}**")
@@ -124,6 +124,12 @@ class BaseAgent:
     def presented_pillars(self, *args, **kwargs):
         raise NotImplementedError(
             f"{type(self).__name__} must implement presented_pillars (BaseAgent seam)")
+
+    def _summary_pillars(self) -> list:
+        """Pillars to list in the final summary. Defaults to presented_pillars();
+        agents whose presented_pillars() includes a currently-displayed,
+        not-yet-decided pillar override this to drop it on an early end."""
+        return self.presented_pillars()
 
     def presented_sub_bullets(self, *args, **kwargs):
         raise NotImplementedError(
