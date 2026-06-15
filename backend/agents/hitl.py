@@ -931,10 +931,12 @@ class HITLAgent(BaseAgent):
         if idx is not None and idx != self.walkthrough_index:
             self.walkthrough_concepts.pop(idx)
             self.walkthrough_concepts.insert(self.walkthrough_index, pillar)
+        # The user surfaced a *sub-bullet*, not a pillar — count it at sub_bullet
+        # level (the owning pillar is already in the framework, so no pillar add).
         if pillar.lower() not in self.navigated_pillars:
             self.navigated_pillars.add(pillar.lower())
-            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="pillar",
-                                   counted=True, source="user_elicited"),
+            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
+                                   counted=True, text=point, source="user_elicited"),
                       self._evctx(source="user_elicited", modality="text"), _sink)
         logging.info(f"[PROACTIVE] sub-point '{point}' -> navigate to '{pillar}'")
         yield (f"That point{pt} belongs under **{pillar}**{why_txt} "
