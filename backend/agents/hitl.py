@@ -393,7 +393,14 @@ class HITLAgent(BaseAgent):
                 last_agent=self._last_agent_text() or "(nothing yet)",
             )
 
-            if pres.intent == "add" and pres.detail and pres.parent:
+            # Honour an explicit destination ("add X under Feasibility") only when
+            # the user actually named it. The classifier often infers the *current*
+            # pillar as parent for a bare "how about X" — trusting that would file a
+            # point under the wrong pillar (e.g. "how about ROI" while on Strategic
+            # Fit). When the parent isn't explicit, drop it and fall through to
+            # _locate_subpoint, which resolves the concept to its real KB home.
+            if (pres.intent == "add" and pres.detail and pres.parent
+                    and h._parent_is_explicit(pres.parent, user_input)):
                 logging.info(f"[PROACTIVE] sub-point: '{pres.detail}' → '{pres.parent}'")
                 yield from self._add_sub_point(pres.parent, pres.detail)
                 yield from self._stream_concept_qa()
