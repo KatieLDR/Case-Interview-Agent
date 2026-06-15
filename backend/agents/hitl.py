@@ -384,8 +384,18 @@ class HITLAgent(BaseAgent):
                 return
 
             if pres.intent == "ask_agent_to_suggest":
-                logging.info("[PROACTIVE] ask_agent_to_suggest -> suggest path")
-                yield from self._handle_suggest(user_input)
+                # The index already points at the next, not-yet-presented concept
+                # (the preceding decision advanced it before this proactive prompt).
+                # Present it as the agent's suggestion WITHOUT advancing again —
+                # advancing here would skip that pending concept. Still log the
+                # elicited advance, since the user deferred the choice to the agent.
+                logging.info("[PROACTIVE] ask_agent_to_suggest -> present current (no advance)")
+                ev.record(h.AdvanceOutcome(passive=False, elicited=True),
+                          self._evctx(modality="text"), _sink)
+                if self._current_concept() is None:
+                    yield from self._walkthrough_complete_message()
+                else:
+                    yield from self._stream_concept(is_first=False)
                 return
 
             if not (pres.intent == "add" and pres.detail):
