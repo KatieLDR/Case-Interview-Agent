@@ -84,6 +84,7 @@ class HITLAgent(BaseAgent):
         self.awaiting_sub_point        = False
         self.awaiting_revisit_add      = False
         self.revisit_target            = None
+        self.post_walkthrough_revisit  = False
         self.prompt_index              = 0
         self.ack_index                 = 0
         self.user_contributed_concepts = set()
@@ -181,15 +182,20 @@ class HITLAgent(BaseAgent):
     def _is_wrong_concept(self, concept: str) -> bool:
         return concept.lower() == self.concept_swap.config["wrong_concept"].lower()
 
-    def _walkthrough_complete_message(self):
+    def _walkthrough_complete_message(self, reopened: bool = False):
         # Re-render the full framework (like EXP), then invite freeform discussion.
         # _stream_summary sets walkthrough_done = True, which routes subsequent
-        # messages to _stream_freeform (Q&A) and hides the per-concept buttons.
-        yield "✅ We've covered all the concepts. Here's the framework as it stands:\n\n"
+        # messages to _stream_post_walkthrough (revisit/Q&A) and hides the
+        # per-concept buttons. `reopened` is set when returning from a
+        # post-walkthrough pillar revisit rather than first completion.
+        if reopened:
+            yield "✅ Updated. Here's the framework as it stands now:\n\n"
+        else:
+            yield "✅ We've covered all the concepts. Here's the framework as it stands:\n\n"
         yield from self._stream_summary()
         invite = (
             "\n\nThat's the full framework as it stands — want to revisit any area to "
-            "add, change, or question something? Otherwise, click **‼️End Session** "
+            "add, change, or question something? Just mention the pillar name. Otherwise, click **‼️End Session** "
             "to finish. **Note: this cannot be undone**.\n\n"
         )
         self.history.append(types.Content(role="model", parts=[types.Part(text=invite)]))
@@ -500,16 +506,12 @@ class HITLAgent(BaseAgent):
             yield from self._stream_concept(is_first=True)
 
         elif self.walkthrough_done:
-            yield from self._stream_freeform()
+            yield from self._stream_post_walkthrough(user_input, res)
 
         elif cs_detected:
             yield from self._stream_swap_caught()
             yield "\n\n"
-            next_concept = self._current_concept()
-            if next_concept is None:
-                yield from self._walkthrough_complete_message()
-            else:
-                yield from self._stream_proactive_prompt()
+            yield from self._continue_or_finish()
 
         elif intent in _BUTTON_ACTION_INTENTS:
             yield from self._nudge_to_button(intent)
@@ -585,11 +587,7 @@ class HITLAgent(BaseAgent):
         ack = JUSTIFICATION_ACKS[self.ack_index % len(JUSTIFICATION_ACKS)]
         self.ack_index += 1
         yield ack + "\n\n"
-        next_concept = self._current_concept()
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
-        else:
-            yield from self._stream_proactive_prompt()
+        yield from self._continue_or_finish()
 
     def _stream_justification_hold_ack(self, concept: str):
         ack = JUSTIFICATION_ACKS[self.ack_index % len(JUSTIFICATION_ACKS)]
@@ -827,6 +825,135 @@ class HITLAgent(BaseAgent):
         )
         yield from self._stream_with_instruction(instruction=instruction)
 
+    # Post-walkthrough revisit
+    _EDIT_INTENTS = frozenset({"add", "revisit", "remove"})
+
+    def _mentioned_pillar(self, text: str) -> str | None:
+        """Deterministic scan: return the longest non-excluded walkthrough
+        concept whose name appears verbatim in `text`, else None."""
+        if not text:
+            return None
+        norm = re.sub(r"\s+", " ", text.lower())
+        excluded = [e.lower() for e in self.excluded_concepts]
+        best = None
+        for c in self.walkthrough_concepts:
+            if c.lower() in excluded:
+                continue
+            if c.lower() in norm and (best is None or len(c) > len(best)):
+                best = c
+        return best
+
+    def _resolve_known_pillar(self, name: str) -> str | None:
+        """Resolve a free-text mention to an existing, non-excluded walkthrough
+        pillar. Returns the exact concept string, or None if it isn't a known
+        navigable pillar. Tries a cheap verbatim scan first, then the proactive
+        block's LLM resolution (_check_duplicate_proactive → match_pillar)."""
+        if not name:
+            return None
+        direct = self._mentioned_pillar(name)
+        if direct:
+            return direct
+        dup = self._check_duplicate_proactive(name)
+        if dup["is_duplicate"] and dup["matched_concept"]:
+            target = dup["matched_concept"]
+        else:
+            matched_withheld, _ = matching.match_pillar(name)
+            target = matched_withheld or name
+        idx = self._locate_concept(target)
+        if idx is None:
+            return None
+        concept = self.walkthrough_concepts[idx]
+        if concept.lower() in [e.lower() for e in self.excluded_concepts]:
+            return None
+        return concept
+
+    def _stream_post_walkthrough(self, user_input: str, res):
+        """After the walkthrough, free text is pillar-revisit-centric:
+        - an edit/navigate intent (add/revisit/remove) naming a known pillar, or
+          a question/doubt that names a known pillar, re-opens that pillar with
+          the normal walkthrough buttons (questions are also answered);
+        - anything that doesn't resolve to a known pillar asks the user to name
+          which pillar they mean."""
+        is_question = res.intent in ("question", "doubt")
+        if res.intent in self._EDIT_INTENTS:
+            target = None
+            for cand in (res.parent, res.detail):
+                target = self._resolve_known_pillar(cand)
+                if target:
+                    break
+        else:
+            # questions and everything else carry no reliable detail — resolve
+            # the pillar from the raw message.
+            target = self._resolve_known_pillar(user_input)
+
+        if target:
+            yield from self._revisit_pillar_full(target, answer_question=is_question)
+        else:
+            yield from self._ask_which_pillar()
+
+    def _ask_which_pillar(self):
+        """No pillar could be resolved post-walkthrough — ask the user to name
+        one of the pillars on the framework (or end the session)."""
+        pillars = self.presented_pillars()
+        if not pillars:
+            yield from self._stream_freeform()
+            return
+        listing = ", ".join(f"**{p}**" for p in pillars)
+        msg = (
+            f"Which pillar would you like to revisit? Just name one of: {listing}. "
+            f"Otherwise, click **‼️End Session** to finish."
+        )
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def _revisit_pillar_full(self, target: str, *, answer_question: bool = False):
+        """Go back to an already-covered pillar and re-present it with the
+        normal walkthrough buttons. Logs the same navigation event as the
+        in-walkthrough proactive path, guarded by navigated_pillars. When
+        `answer_question` is set, also answer the user's question in context."""
+        idx = self._locate_concept(target)
+        if idx is None:
+            yield from self._ask_which_pillar()
+            return
+        self.walkthrough_index        = idx
+        self.walkthrough_done         = False
+        self.walkthrough_active       = True
+        self.post_walkthrough_revisit = True
+        # No add_pillar event: revisiting navigates to a pillar that is already
+        # in the framework — it is not a new contribution.
+        logging.info(f"[REVISIT] post-walkthrough go-back to '{target}' "
+                     f"(idx={idx}, answer_question={answer_question})")
+        yield f"Sure — let's revisit **{target}**.\n\n"
+        yield from self._stream_concept(is_first=False)
+        if answer_question:
+            ev.question(self._evctx(modality="text"), _sink)
+            if (self.swap_presented and not self.concept_swap.is_detected
+                    and self._is_wrong_concept(target)):
+                ev.swap_questioned(self._evctx(modality="text"), _sink)
+            yield "\n\n"
+            yield from self._stream_concept_qa()
+
+    def _finish_revisit(self):
+        """Finish a post-walkthrough revisit: jump the index past the end so
+        _current_concept() is None again, then re-render the summary."""
+        self.post_walkthrough_revisit = False
+        self.walkthrough_index = len(self.walkthrough_concepts)
+        logging.info("[REVISIT] finished — returning to summary/freeform")
+        yield from self._walkthrough_complete_message(reopened=True)
+
+    def _continue_or_finish(self):
+        """Shared 'advance to next concept / complete' tail. During a
+        post-walkthrough revisit, return to the summary instead of advancing."""
+        if self.post_walkthrough_revisit:
+            yield from self._finish_revisit()
+            return
+        nxt = self._current_concept()
+        if nxt is None:
+            yield from self._walkthrough_complete_message()
+        else:
+            yield from self._stream_proactive_prompt()
+
     # System prompts
     def _build_system_prompt(self) -> str:
         concepts_str = " → ".join(self.kg_context["concepts"]) \
@@ -881,11 +1008,7 @@ class HITLAgent(BaseAgent):
             return
 
         self.walkthrough_index += 1
-        next_concept = self._current_concept()
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
-        else:
-            yield from self._stream_proactive_prompt()
+        yield from self._continue_or_finish()
 
     def on_reject_concept(self):
         concept = self._current_concept()
@@ -967,11 +1090,7 @@ class HITLAgent(BaseAgent):
         yield "Reply **yes** to remove, or **no** to keep it.\n\n"
 
     def _after_removal_continue(self, concept, *, was_reject):
-        next_concept = self._current_concept()
-        if next_concept is None:
-            yield from self._walkthrough_complete_message()
-        else:
-            yield from self._stream_proactive_prompt()
+        yield from self._continue_or_finish()
 
     def _apply_sub_bullet_removal(self, concept: str, bullet: str):
         target = bullet.strip().lstrip("-• ").strip().lower()
