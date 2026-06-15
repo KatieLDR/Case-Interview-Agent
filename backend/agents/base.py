@@ -119,7 +119,12 @@ class BaseAgent:
         return False
 
     def _extra_swap_signal(self, km, user_text: str) -> bool:
-        self.concept_swap.force_detected()
+        # No positional swap signal by default (no walkthrough). Must stay PURE —
+        # is_swap_target() calls this on every question/removal probe, so a side
+        # effect here (e.g. force_detected()) would mark the swap detected on any
+        # unrelated probe while a swap is active. EXP/HITL override with a pure
+        # "is the current walkthrough pillar the swap?" predicate.
+        return False
 
     def presented_pillars(self, *args, **kwargs):
         raise NotImplementedError(
@@ -153,6 +158,12 @@ class BaseAgent:
         if self.concept_swap.is_injected and not self.concept_swap.is_detected:
             return self.concept_swap.config["wrong_concept"]
         return None
+
+    def mark_swap_detected(self) -> None:
+        self.concept_swap.force_detected()
+        wrong = self.concept_swap.config["wrong_concept"]
+        if wrong not in self.excluded_concepts:
+            self.excluded_concepts.append(wrong)
 
     def _fetch_kg_context(self, case_type: str) -> dict:
         framework = kb.get_framework_name()

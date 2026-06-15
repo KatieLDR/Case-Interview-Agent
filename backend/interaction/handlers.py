@@ -31,6 +31,7 @@ class RemovalOutcome:
     target: str | None
     level: str
     pillar: str | None = None
+    needs_justification: bool = False
     justification: str | None = None
     consequence_facts: list = field(default_factory=list)
     post_delete_branch: bool = False

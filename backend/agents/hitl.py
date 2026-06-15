@@ -1334,12 +1334,6 @@ class HITLAgent(BaseAgent):
         cur = self.current_pillar()
         return bool(cur and self._is_wrong_concept(cur))
 
-    def mark_swap_detected(self) -> None:
-        self.concept_swap.force_detected()
-        wrong = self.concept_swap.config["wrong_concept"]
-        if wrong not in self.excluded_concepts:
-            self.excluded_concepts.append(wrong)
-
     def before_advance(self, session) -> bool:
         cur = self._current_concept()
         if cur is None:
