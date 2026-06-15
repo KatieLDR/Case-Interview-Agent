@@ -398,7 +398,16 @@ class HITLAgent(BaseAgent):
                     yield from self._stream_concept(is_first=False)
                 return
 
-            if not (pres.intent == "add" and pres.detail):
+            # Resolve which concept the user is pointing at. Prefer an explicit
+            # add-detail, but also navigate when the raw text verbatim names a
+            # known walkthrough pillar (e.g. a bare "Feasibility") that the
+            # classifier didn't tag "add" — otherwise such a turn falls through
+            # to guidance and we wrongly show the current (next) pillar.
+            concept = pres.detail if (pres.intent == "add" and pres.detail) else None
+            if concept is None and pres.intent != "advance":
+                concept = self._mentioned_pillar(user_input)
+
+            if concept is None:
                 if pres.intent == "advance":
                     logging.info("[PROACTIVE] move-on -> passive_advance + advance")
                     ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
@@ -411,7 +420,6 @@ class HITLAgent(BaseAgent):
                 yield from self._stream_concept(is_first=False)
                 return
 
-            concept = pres.detail
             dup     = self._check_duplicate_proactive(concept)
 
             if dup["is_duplicate"] and dup["matched_concept"]:
