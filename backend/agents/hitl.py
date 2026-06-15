@@ -398,6 +398,15 @@ class HITLAgent(BaseAgent):
                     yield from self._stream_concept(is_first=False)
                 return
 
+            # Sub-bullet granularity (mirrors EXP/BB): the user may name a point
+            # that belongs to a pillar rather than the pillar itself. Tell them
+            # where it lives and why, then navigate there so the buttons show.
+            if pres.intent != "advance":
+                sub = self._locate_subpoint(user_input)
+                if sub is not None:
+                    yield from self._navigate_for_subpoint(*sub)
+                    return
+
             # Resolve which concept the user is pointing at. Prefer an explicit
             # add-detail, but also navigate when the raw text verbatim names a
             # known walkthrough pillar (e.g. a bare "Feasibility") that the
@@ -885,6 +894,53 @@ class HITLAgent(BaseAgent):
             return None
         return concept
 
+    def _locate_subpoint(self, text: str) -> tuple[str, str | None, str | None] | None:
+        """Resolve free text to a *sub-point* of a known walkthrough pillar,
+        mirroring EXP/BB (which resolve sub-bullet granularity via
+        matching.locate in the shared outcome router). Returns
+        (pillar, matched_point, why) when the text names a point that belongs to
+        a known, non-excluded pillar — otherwise None. A verbatim pillar mention
+        is left to the pillar-level resolvers."""
+        if not text or self._mentioned_pillar(text):
+            return None
+        km = matching.locate(text)
+        if km.level != "concept" or not km.pillar:
+            return None
+        if self._locate_concept(km.pillar) is None:
+            return None                       # owning pillar isn't in the walkthrough
+        if km.pillar.lower() in [e.lower() for e in self.excluded_concepts]:
+            return None
+        return (self._normalize_pillar(km.pillar), km.matched_text,
+                matching.pillar_gist(km.pillar) or None)
+
+    def _navigate_for_subpoint(self, pillar: str, point: str | None, why: str | None):
+        """A mention matched a sub-point of `pillar` during the walkthrough.
+        Tell the user where it lives and why, then move the walkthrough to that
+        pillar so the per-concept buttons show. Forward navigation re-orders the
+        pillar to the front (like the pillar-navigate path); a pillar already
+        covered is reported in place without rewinding."""
+        idx     = self._locate_concept(pillar)
+        pt      = f" *{point}*" if point else ""
+        why_txt = f" — {why}" if why else ""
+        if idx is not None and idx < self.walkthrough_index:
+            logging.info(f"[PROACTIVE] sub-point of already-covered '{pillar}'")
+            yield (f"That point{pt} is part of **{pillar}**{why_txt} "
+                   f"We've already covered **{pillar}** — it's in your framework.\n\n")
+            yield from self._stream_proactive_prompt()
+            return
+        if idx is not None and idx != self.walkthrough_index:
+            self.walkthrough_concepts.pop(idx)
+            self.walkthrough_concepts.insert(self.walkthrough_index, pillar)
+        if pillar.lower() not in self.navigated_pillars:
+            self.navigated_pillars.add(pillar.lower())
+            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="pillar",
+                                   counted=True, source="user_elicited"),
+                      self._evctx(source="user_elicited", modality="text"), _sink)
+        logging.info(f"[PROACTIVE] sub-point '{point}' -> navigate to '{pillar}'")
+        yield (f"That point{pt} belongs under **{pillar}**{why_txt} "
+               f"Let's look at **{pillar}**.\n\n")
+        yield from self._stream_concept(is_first=False)
+
     def _stream_post_walkthrough(self, user_input: str, res):
         """After the walkthrough, free text is pillar-revisit-centric:
         - an edit/navigate intent (add/revisit/remove) naming a known pillar, or
@@ -906,8 +962,21 @@ class HITLAgent(BaseAgent):
 
         if target:
             yield from self._revisit_pillar_full(target, answer_question=is_question)
-        else:
-            yield from self._ask_which_pillar()
+            return
+
+        # Sub-bullet granularity (mirrors EXP/BB): the mention may name a point
+        # that belongs to a known pillar. Re-open that pillar (buttons show),
+        # prefacing with where the point lives and why.
+        sub = self._locate_subpoint(user_input)
+        if sub is not None:
+            pillar, point, why = sub
+            pt      = f" *{point}*" if point else ""
+            why_txt = f" — {why}" if why else ""
+            yield f"That point{pt} belongs under **{pillar}**{why_txt}\n\n"
+            yield from self._revisit_pillar_full(pillar, answer_question=is_question)
+            return
+
+        yield from self._ask_which_pillar()
 
     def _ask_which_pillar(self):
         """No pillar could be resolved post-walkthrough — ask the user to name
