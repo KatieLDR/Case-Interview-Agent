@@ -206,15 +206,24 @@ def concept_bullet(concept_id: str, *, refs: bool = True) -> str | None:
     if not c:
         return None
     name = (c.get("name") or "").strip()
-    bullet = name or None
     pillar = kb.get_pillar_by_id(c.get("pillar_id"))
+    bullet = None
     if pillar and name:
         nlow = name.lower()
-        for b in pillar.get("sub_bullets", []):
-            lead = _strip_source_refs(b).split(":", 1)[0].strip().lower()
-            if lead and (lead == nlow or nlow.startswith(lead) or lead.startswith(nlow)):
-                bullet = b
-                break
+
+        def _lead_match(text: str) -> bool:
+            lead = _strip_source_refs(text).split(":", 1)[0].strip().lower()
+            return bool(lead) and (lead == nlow or nlow.startswith(lead) or lead.startswith(nlow))
+
+        # Prefer a displayed sub-bullet; otherwise fall back to the concept's key
+        # question, which carries its source ref ([x]). Without this fallback a
+        # concept that isn't one of the shown sub-bullets resolves to the bare
+        # name and loses its citation when added.
+        bullet = next((b for b in pillar.get("sub_bullets", []) if _lead_match(b)), None)
+        if bullet is None:
+            bullet = next((q for q in pillar.get("key_questions", []) if _lead_match(q)), None)
+    if bullet is None:
+        bullet = name or None
     if bullet is None:
         return None
     return bullet if refs else _strip_source_refs(bullet)

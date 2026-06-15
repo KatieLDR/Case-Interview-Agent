@@ -456,18 +456,31 @@ class ExplainableAgent(BaseAgent):
                 else:
                     self.walkthrough_index = idx
                 self.walkthrough_done = False
-                lead = "Going back to" if back else "Let's look at"
-                yield f"{lead} **{target}** — here's where we are.\n\n"
-                yield from self._stream_concept(is_first=False)
+                # If the user raised a specific point, persist it BEFORE streaming
+                # so it renders inline in the pillar block (like HITL), not as a
+                # trailing "You raised this" note. Store the already-resolved KB
+                # bullet verbatim (no second match); display-only — the pillar
+                # reveal already counts the agency.
                 cid = getattr(o, "navigate_concept_id", None)
                 nb = (matching.concept_bullet(cid, refs=True) if cid else None) \
                     or getattr(o, "navigate_bullet", None)
+                added = False
                 if nb:
                     already = {matching._strip_source_refs(b).strip().lower()
                                for b in (self.presented_sub_bullets().get(target, []))}
                     nb_key = matching._strip_source_refs(nb).strip().lower()
                     if nb_key not in already:
-                        yield f"\nYou raised this — adding it here:\n- {nb}\n"
+                        bucket = self.user_sub_points.setdefault(target, [])
+                        if not any(matching._strip_source_refs(b).strip().lower() == nb_key
+                                   for b in bucket):
+                            bucket.append(nb)
+                        added = True
+                if added:
+                    yield f"Good point — I've added it under **{target}**. Here's where we are.\n\n"
+                else:
+                    lead = "Going back to" if back else "Let's look at"
+                    yield f"{lead} **{target}** — here's where we are.\n\n"
+                yield from self._stream_concept(is_first=False)
             else:
                 ev.question(self._evctx(), _sink)   # revisit -> grounded Q&A (no turn outcome)
                 yield from self._stream_concept_qa()
