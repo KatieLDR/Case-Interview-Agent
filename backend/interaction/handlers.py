@@ -191,6 +191,25 @@ def _names_pillar(text: str, pillar_name: str | None) -> bool:
     return bool(t) and t <= p
 
 
+def _concept_already_in_pillar(session, km) -> bool:
+    """True when concept `km` is already a displayed point under its pillar — a static
+    KB sub-bullet or one the user already added. Lets a point that an on-screen pillar
+    doesn't yet contain still count as a new sub-bullet (vs re-raising a shown one)."""
+    if not km.pillar:
+        return False
+    kbp = next((p for p in kb.get_all_pillars()
+                if p["name"].lower() == km.pillar.lower()), None)
+    bullet = (m.concept_bullet(km.concept_id, refs=False) if km.concept_id else None) or km.matched_text
+    if not bullet:
+        return False
+    key = g._strip_source_refs(bullet).strip().lower()
+    statics = [g._strip_source_refs(b).strip().lower()
+               for b in (kbp.get("sub_bullets", []) if kbp else [])]
+    user = [g._strip_source_refs(b).strip().lower()
+            for b in getattr(session, "user_sub_points", {}).get(km.pillar, [])]
+    return key in statics or key in user
+
+
 def _placement_choice(text: str):
     n = _norm(text)
     if any(p in n for p in _OWN_AREA):
@@ -345,8 +364,12 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
         if seen is None:
             seen = set()
             session._agency_concepts = seen
-        counted = bool(unreached and key and key not in seen
-                       and not km.pillar_is_withheld)
+        # Count a sub-bullet contribution when the concept is genuinely new to its
+        # pillar: the pillar isn't on screen yet (unreached), OR it's on screen but
+        # doesn't yet contain this point. Withheld pillars defer the count to the
+        # reveal-on-accept step (EXP) / render (BB). Once per concept via `seen`.
+        counted = bool(key and key not in seen and not km.pillar_is_withheld
+                       and (unreached or not _concept_already_in_pillar(session, km)))
         if counted:
             seen.add(key)
         expl = ((g.ground_concept(km.concept_id) if km.concept_id else None)

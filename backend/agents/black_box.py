@@ -308,18 +308,23 @@ class BlackBoxAgent(BaseAgent):
                 if grounding._strip_source_refs(nb).strip().lower() not in already:
                     self.add_sub_point(o.pillar, nb)
                     stored_new = bool((self._last_sub_add or {}).get("is_new"))
-                    if stored_new and not o.counted:
-                        # BB resolves sub-point adds at the offer. The shared handler only
-                        # counts a concept-add when its pillar was unreached (never true in
-                        # BB's all-shown view) or withheld — so a genuinely-new sub-point
-                        # under an already-shown pillar would go uncounted. Count it here at
-                        # sub_bullet level, mirroring HITL._store_sub_point.
-                        ev.record(handlers.AddOutcome(
-                            action="added_new", pillar=o.pillar, level="sub_bullet",
-                            counted=True, text=nb, source="user_spontaneous"),
-                            self._evctx(), _sink)
+                # Count the contribution once (the shared offer left it uncounted). A
+                # withheld pillar surfaced via a sub-point ALWAYS counts — the reveal is
+                # the contribution, even when the concept's bullet is one the revealed
+                # pillar shows statically (so stored_new is False), mirroring EXP's
+                # reveal-on-accept. Otherwise count only a genuinely-new stored point.
+                # BB resolves at the offer, so the handler never counts these (no
+                # 'unreached' in BB's all-shown view).
+                if not o.counted and (reveal_withheld or stored_new):
+                    ev.record(handlers.AddOutcome(
+                        action="added_new", pillar=o.pillar, level="sub_bullet",
+                        counted=True, text=nb, source="user_spontaneous"),
+                        self._evctx(), _sink)
             if stored_new:
                 pre = f"Added under **{o.pillar}**.{gist}\n\n"
+            elif reveal_withheld:
+                # just brought a withheld pillar into the framework via the sub-point
+                pre = f"Good point — I've brought in **{o.pillar}**.{gist}\n\n"
             elif o.level == "concept" and o.matched_text:
                 pre = (f"That's already covered under **{o.pillar}** as "
                        f"*{o.matched_text}*.{gist}\n\n")
