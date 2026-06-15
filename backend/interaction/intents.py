@@ -97,8 +97,15 @@ KEY DISAMBIGUATION:
   NEVER an add, and "guide"/"lead"/"drive"/"decide" are NEVER concept names. (The agent
   often invites this — "shall I take the lead?", "would you like me to suggest one?" —
   so the reply is the user accepting the agent's lead, not naming an area.)
-- add vs question: proposing something to include -> add; asking to understand what is
-  already shown -> question.
+- add vs question: proposing to INCLUDE something -> add ("add X", "we should consider X",
+  "what about X"). But an INTERROGATIVE asking to UNDERSTAND how/why a concept relates to,
+  fits, applies to, connects with, or belongs under an area is "question", even when it
+  names BOTH a concept and an area ("how is X related to Y", "how does X fit (into) Y",
+  "can you explain how X fits Y", "why does X matter for Y", "where does X belong"). The
+  verbs "fit"/"fits"/"fit into", "relate(d) to", "apply", "connect", "belong" inside a
+  "how/why/can you explain …?" frame signal a question about an existing relationship, NOT
+  a request to place X under Y — classify as question, parent = null. Only an imperative or
+  proposal to INCLUDE X is add.
 - Naming an existing area AS THE PLACE for a new point is "add", not revisit — the area
   is just the location, the new point is the thing being added. detail = the new point.
   ("Let's revisit Strategic Fit, we need to understand the opportunity frequency"
