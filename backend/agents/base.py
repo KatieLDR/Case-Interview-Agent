@@ -191,16 +191,6 @@ class BaseAgent:
             )
         return facts_block + CLARIFICATION_SYSTEM_PROMPT
 
-    def _build_tree_overview(self) -> str:
-        shown = kb.get_shown_pillars()
-        lines = ["**Framework Overview**\n"]
-        for pillar in shown:
-            lines.append(f"- {pillar['name']}")
-        return "\n".join(lines)
-
-    def show_tree(self) -> str:
-        return self._build_tree_overview()
-
     def get_warmup_message(self) -> str:
         return WARMUP_PROMPT
 

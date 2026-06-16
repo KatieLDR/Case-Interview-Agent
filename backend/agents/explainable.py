@@ -47,7 +47,6 @@ class ExplainableAgent(BaseAgent):
       - _strip_concept_swap_from_history()
       - send_message(), end_session()
       - KG infrastructure (_fetch_kg_context, _update_kg_if_framework_mentioned)
-      - show_tree(), _build_tree_overview()
       - _check_duplicate()
 
     Overrides:

@@ -230,7 +230,7 @@ async def on_done_warmup(action: cl.Action):
     ).send()
 
 
-# "I'm Ready" button — shows tree overview + instruction + Got it button
+# "I'm Ready" button — shows instruction + Got it button
 @cl.action_callback("start_main_phase")
 async def on_start_main_phase(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -243,10 +243,6 @@ async def on_start_main_phase(action: cl.Action):
     if ended:
         await cl.Message(content="⚠️ This session has already ended.").send()
         return
-
-    # Show tree overview
-    tree = agent.show_tree()
-    await cl.Message(content=tree).send()
 
     # Show per-agent instruction
     await cl.Message(content=agent.get_pre_analysis_instruction()).send()
