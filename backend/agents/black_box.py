@@ -17,6 +17,7 @@ from backend.logging.sink import firestore_sink as _sink
 from backend.agents.prompts.black_box import (
     SYSTEM_PROMPT, REMOVAL_TARGET_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
+from backend.agents.prompts.base import ADD_ONE_AT_A_TIME
 from backend.tools.concept_swap import ConceptSwap
 
 from dotenv import load_dotenv
@@ -112,6 +113,7 @@ class BlackBoxAgent(BaseAgent):
         yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
 
         yield from self._stream_framework_presentation()
+        yield ADD_ONE_AT_A_TIME
 
         yield (
             "\n\n---\n\n"
@@ -130,6 +132,11 @@ class BlackBoxAgent(BaseAgent):
         log_user_message(self.session_id, user_input)
         self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
 
+        # Multi-point safeguard: an open pillar offer takes priority over routing.
+        if self.pending_pillar_offer is not None:
+            yield from self._resolve_pillar_offer(user_input)
+            return
+
         res = intents.classify_intent(
             user_input,
             current_pillar="(none)",
@@ -139,6 +146,17 @@ class BlackBoxAgent(BaseAgent):
             last_agent=self._last_agent_text() or "(nothing yet)",
         )
         intent = res.intent
+
+        # Multi-point safeguard: ≥2 separable additions. With a candidate pillar ->
+        # offer to add it (pending); otherwise -> passive reminder. (User turn already
+        # logged above.)
+        if (res.multi and self.pending is None and self.pending_suggestion is None
+                and getattr(self, "pending_placement", None) is None):
+            if res.pillar_name:
+                yield from self._offer_pillar(res.pillar_name, res.items)
+            else:
+                yield from self._safeguard_multi(res.items)
+            return
 
         if (self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None

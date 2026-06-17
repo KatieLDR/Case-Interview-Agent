@@ -20,6 +20,7 @@ from backend.agents.prompts.explainable import (
     CLARIFY_DOUBT_PROMPT, CLARIFY_RESOLVE_PROMPT, REMOVAL_TARGET_PROMPT,
     ADD_CLASSIFY_PROMPT, ADD_RESOLVE_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
+from backend.agents.prompts.base import ADD_ONE_AT_A_TIME
 from backend.tools.concept_swap import ConceptSwap
 
 CASE_TYPE = "AI Implementation"
@@ -140,6 +141,7 @@ class ExplainableAgent(BaseAgent):
         )
 
         yield from self._stream_concept(is_first=True)
+        yield ADD_ONE_AT_A_TIME
 
     # Walkthrough state helpers
     def _build_walkthrough_concepts(self) -> list:
@@ -296,6 +298,13 @@ class ExplainableAgent(BaseAgent):
         # Gate flag — flips True on the user's FIRST main-phase message
         self.has_main_contribution = True
 
+        # Multi-point safeguard: an open pillar offer takes priority over routing.
+        if self.pending_pillar_offer is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._resolve_pillar_offer(user_input)
+            return
+
         _cur    = self.current_pillar() or "(none)"
         _pillar = next((p for p in kb.get_all_pillars()
                         if p["name"].lower() == _cur.lower()), None)
@@ -311,6 +320,18 @@ class ExplainableAgent(BaseAgent):
         )
         intent = res.intent
         logging.info(f"[INTENT] {intent} — detail={res.detail!r} parent={res.parent!r}")
+
+        # Multi-point safeguard: ≥2 separable additions in one message. With a
+        # candidate pillar -> offer to add it (pending); otherwise -> passive reminder.
+        if (res.multi and self.pending is None and self.pending_suggestion is None
+                and getattr(self, "pending_placement", None) is None):
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            if res.pillar_name:
+                yield from self._offer_pillar(res.pillar_name, res.items)
+            else:
+                yield from self._safeguard_multi(res.items)
+            return
 
         if (self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None

@@ -1,3 +1,6 @@
+import logging
+import re
+
 from google.genai import types
 
 from backend.domain import matching, grounding
@@ -15,6 +18,10 @@ from backend.logging.sink import firestore_sink as _sink
 from backend.agents.prompts.base import (
     CLARIFICATION_SYSTEM_PROMPT, ANSWER_CLASSIFIER_PROMPT,
     WARMUP_PROMPT, WARMUP_MERGE_PROMPT,
+    ADD_ONE_AT_A_TIME, PILLAR_OFFER_TEMPLATE, PILLAR_OFFER_REASK,
+    PILLAR_OFFER_DROP, PILLAR_DECLINE_PLACEMENT,
+    WALK_INTRO, WALK_ASK_UNDER, WALK_ASK_PLACE, WALK_ADDED, WALK_DUP,
+    WALK_SKIPPED, WALK_DONE, WALK_REPLY_PROMPT,
 )
 
 from dotenv import load_dotenv
@@ -82,6 +89,271 @@ class BaseAgent:
         self.user_sub_points    = {}
         self.excluded_concepts  = []
         self.excluded_sub_bullets = {}
+        self.pending_pillar_offer = None   # multi-point safeguard (pillar confirmation)
+
+    # ── Multi-point safeguard: pillar offer + passive reminder (shared) ─────────
+    def _emit_text(self, msg: str) -> str:
+        """Append a plain agent message to history + log it, and return it to yield."""
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        return msg
+
+    @staticmethod
+    def _bullets_md(items: list[str], n: int = 6) -> str:
+        shown = items[:n]
+        more = "" if len(items) <= n else f"\n- …and {len(items) - n} more"
+        return "\n".join(f"- {i}" for i in shown) + more
+
+    # ── Unified counting rule: count a pillar/sub-bullet iff it was NOT already shown
+    # to the user. The "shown" set is captured once at paste-time (before any reveal),
+    # then grows as we commit — so a withheld item the user surfaces counts, and
+    # anything already on screen (or added earlier in the same paste) doesn't. ───────
+    @staticmethod
+    def _norm_bullet(b: str) -> str:
+        return grounding._strip_source_refs(b or "").strip().lower()
+
+    def _capture_shown(self) -> dict:
+        return {
+            "pillars": {p.lower() for p in self.presented_pillars()},
+            "bullets": {self._norm_bullet(b)
+                        for bl in self.presented_sub_bullets().values() for b in bl},
+        }
+
+    def _count_unshown(self, kind: str, text: str) -> bool:
+        """True iff `text` (a pillar name or a bullet) is not yet in the shown set;
+        marks it shown so a repeat in the same paste won't recount. `kind` is
+        'pillars' or 'bullets'."""
+        snap = (self.pending_pillar_offer or {}).get("shown")
+        if snap is None:
+            return True
+        key = text.lower() if kind == "pillars" else self._norm_bullet(text)
+        if key in snap[kind]:
+            return False
+        snap[kind].add(key)
+        return True
+
+    _PLACE_SEPARATELY = ("one at a time", "one by one", "separately", "individually",
+                         "each on", "on its own", "one at time")
+    _SKIP_WORDS = ("skip", "skip it", "skip this", "move on", "later", "neither",
+                   "none", "no thanks", "drop it", "leave it out")
+    _OWN_AREA = ("own area", "its own", "their own", "separate area", "new area",
+                 "on its own", "own")
+
+    def _strip_to_area(self, text: str) -> str:
+        """Drop leading verbs/prepositions/negatives so a destination area resolves
+        ('no, put it under Feasibility' -> 'Feasibility')."""
+        probe = re.sub(r"(?i)\b(put|add|place|file|them|these|it|that|under|into|in|to|"
+                       r"within|as part of|the|no|not|instead|rather|actually|there|"
+                       r"please|maybe|move)\b", " ", text or "")
+        return re.sub(r"\s+", " ", probe).strip()
+
+    def _offer_pillar(self, pillar_name: str, items: list[str]):
+        """Resolve the candidate pillar against the KB and arm the pending offer.
+        Commits nothing until the user confirms."""
+        matched, _ = matching.match_pillar(pillar_name)
+        in_kb = matched is not None
+        name = matched or pillar_name
+        self.pending_pillar_offer = {"name": name, "in_kb": in_kb, "bullets": list(items),
+                                     "rounds": 0, "stage": "offer",
+                                     "shown": self._capture_shown()}
+        kb_clause = f" under **{name}**" if in_kb else f" as a new area, **{name}**"
+        yield self._emit_text(PILLAR_OFFER_TEMPLATE.format(
+            kb_clause=kb_clause, bullets=self._bullets_md(items), pillar=name))
+
+    def _safeguard_multi(self, items: list[str]):
+        """Headerless multi-point: go straight into the per-bullet walk with no chosen
+        home — each bullet self-resolves its own KB home."""
+        yield from self._start_walk(None, items)
+
+    def _resolve_pillar_offer(self, user_input: str):
+        """Dispatch the pending multi-point state by stage."""
+        st = self.pending_pillar_offer
+        stage = st.get("stage")
+        if stage in ("walk", "walk_place"):
+            yield from self._walk_reply(user_input); return
+        if stage == "decline_where":
+            yield from self._decline_where(user_input); return
+
+        # stage "offer": confirm → add pillar then walk; decline → ask where; else re-ask
+        bullets = st["bullets"]
+        low = (user_input or "").strip().lower().strip("?.! ")
+        decision = "decline" if low in self._SKIP_WORDS else \
+            handlers._classify_confirmation(user_input)
+        if decision == "confirm":
+            yield from self._commit_pillar(st["name"], st["in_kb"])
+            yield from self._start_walk(st["name"], bullets, shown=st.get("shown"))
+            return
+        if decision == "decline":
+            st["stage"] = "decline_where"           # don't strand the points
+            yield self._emit_text(PILLAR_DECLINE_PLACEMENT.format(pillar=st["name"]))
+            return
+        st["rounds"] += 1
+        if st["rounds"] >= 2:
+            self.pending_pillar_offer = None
+            yield self._emit_text(PILLAR_OFFER_DROP)
+            return
+        yield self._emit_text(PILLAR_OFFER_REASK.format(pillar=st["name"]))
+
+    def _decline_where(self, user_input: str):
+        """User declined the pillar — route their 'where' answer into the walk: a named
+        area becomes the home; 'one at a time'/unclear → self-resolving walk."""
+        st = self.pending_pillar_offer
+        bullets = st["bullets"]
+        low = (user_input or "").lower()
+        area = None
+        if not (low.strip("?.! ") in self._SKIP_WORDS
+                or any(k in low for k in self._PLACE_SEPARATELY)):
+            area, _ = matching.match_pillar(self._strip_to_area(user_input) or user_input)
+        yield from self._start_walk(area, bullets, shown=st.get("shown"))
+
+    # ── Per-bullet walk: keep / relocate / skip, each point KB-resolved ──────────
+    def _start_walk(self, home: str | None, items: list[str], shown: dict | None = None):
+        self.pending_pillar_offer = {"stage": "walk", "home": home,
+                                     "queue": list(items), "rounds": 0, "cur": None,
+                                     "shown": shown if shown is not None else self._capture_shown()}
+        yield self._emit_text(WALK_INTRO)
+        yield from self._walk_present()
+
+    def _walk_present(self):
+        st = self.pending_pillar_offer
+        if not st["queue"]:
+            self.pending_pillar_offer = None
+            yield self._emit_text(WALK_DONE)
+            return
+        bullet = st["queue"][0]
+        st["rounds"] = 0
+        if st["home"]:                              # user chose one area for the batch
+            st["cur"] = st["home"]; st["stage"] = "walk"
+            yield self._emit_text(WALK_ASK_UNDER.format(bullet=bullet, pillar=st["home"]))
+            return
+        km = matching.locate(bullet)                # self-resolve this bullet's home
+        if km.pillar:
+            st["cur"] = km.pillar; st["stage"] = "walk"
+            yield self._emit_text(
+                WALK_ASK_UNDER.format(bullet=km.matched_text or bullet, pillar=km.pillar))
+        else:
+            st["cur"] = None; st["stage"] = "walk_place"
+            yield self._emit_text(WALK_ASK_PLACE.format(bullet=bullet))
+
+    def _walk_advance(self):
+        st = self.pending_pillar_offer
+        if st and st["queue"]:
+            st["queue"].pop(0)
+        yield from self._walk_present()
+
+    # Fast-paths so the most common one-word replies skip the LLM call entirely.
+    _WALK_KEEP_FAST = ("keep", "keep it", "yes", "yeah", "yep", "yup", "sure", "ok",
+                       "okay", "y", "agreed")
+    _WALK_SKIP_FAST = ("no", "nope", "n", "nah", "skip", "skip it", "drop it")
+
+    def _classify_walk_reply(self, reply: str, bullet: str, pillar: str | None) -> dict:
+        """Map any walk reply to keep | relocate | own_area | skip | question (+area),
+        via the cheap flash-lite classifier. Falls back to 'unclear' on error."""
+        try:
+            p = classify_json(WALK_REPLY_PROMPT.format(
+                bullet=bullet, pillar=pillar or "(a new point, not yet placed)", reply=reply))
+        except Exception as e:
+            logging.warning(f"[WALK] reply classifier error: {e} -> unclear")
+            return {"action": "unclear", "area": None}
+        action = p.get("action")
+        if action not in ("keep", "relocate", "own_area", "skip", "question"):
+            action = "unclear"
+        area = p.get("area")
+        area = area.strip() if isinstance(area, str) and area.strip() else None
+        return {"action": action, "area": area}
+
+    def _walk_reply(self, user_input: str):
+        """Resolve the user's reply for the current bullet (works for both a proposed
+        pillar and an unplaced novel point). keep/relocate/own_area/skip act and
+        advance; question answers then re-asks the same bullet; unclear re-asks, then
+        defaults to keep (never silently dropping a point the user didn't reject)."""
+        st = self.pending_pillar_offer
+        bullet = st["queue"][0]
+        proposed = st.get("cur")
+        low = (user_input or "").lower().strip("?.! ")
+
+        # Fast-paths (no LLM): a bare yes/keep or no/skip.
+        if proposed and low in self._WALK_KEEP_FAST:
+            yield from self._commit_sub_bullet(bullet, proposed)
+            yield from self._walk_advance(); return
+        if low in self._WALK_SKIP_FAST:
+            yield self._emit_text(WALK_SKIPPED.format(bullet=bullet))
+            yield from self._walk_advance(); return
+
+        res = self._classify_walk_reply(user_input, bullet, proposed)
+        action, area = res["action"], res["area"]
+
+        if action == "keep" and proposed:
+            yield from self._commit_sub_bullet(bullet, proposed)
+            yield from self._walk_advance(); return
+        if action == "relocate" and area:
+            yield from self._commit_sub_bullet(bullet, area)
+            yield from self._walk_advance(); return
+        if action == "own_area":
+            yield from self._commit_pillar(bullet, in_kb=False)   # the point becomes its area
+            yield from self._walk_advance(); return
+        if action == "skip":
+            yield self._emit_text(WALK_SKIPPED.format(bullet=bullet))
+            yield from self._walk_advance(); return
+        if action == "question":
+            yield from self._walk_answer(user_input)              # answer, then re-ask
+            yield self._emit_text(self._walk_ask(bullet, proposed))
+            return
+        # unclear / relocate-without-area -> bounded re-ask, then a safe default.
+        st["rounds"] += 1
+        if st["rounds"] >= 2:
+            if proposed:                                          # never drop silently
+                yield from self._commit_sub_bullet(bullet, proposed)
+            else:
+                yield self._emit_text(WALK_SKIPPED.format(bullet=bullet))
+            yield from self._walk_advance(); return
+        yield self._emit_text(self._walk_ask(bullet, proposed))
+
+    @staticmethod
+    def _walk_ask(bullet: str, proposed: str | None) -> str:
+        return (WALK_ASK_UNDER.format(bullet=bullet, pillar=proposed) if proposed
+                else WALK_ASK_PLACE.format(bullet=bullet))
+
+    def _walk_answer(self, user_input: str):
+        """Answer a question raised mid-walk, in context. Default uses the arm's
+        grounded Q&A renderer (EXP/BB); HITL overrides to use _stream_concept_qa."""
+        yield from self.render_question(user_input)
+
+    def _commit_sub_bullet(self, bullet: str, pillar: str):
+        """EXP/BB: store `bullet` under `pillar` via add_sub_point (which canonicalizes
+        to the KB phrasing + dedups), then count by the unified shown rule and fire a
+        clean sub_bullet event. Using add_sub_point (not add_handler) means the stored
+        text matches the snapshot's KB phrasing — so paraphrases of a shown bullet are
+        recognized — and avoids add_handler's concept/duplicate outcome. HITL overrides."""
+        if pillar and pillar.lower() not in {p.lower() for p in self.presented_pillars()}:
+            self.surface_pillar(pillar)                 # surface a relocate target (uncounted)
+        self.add_sub_point(pillar, bullet)
+        stored = (getattr(self, "_last_sub_add", None) or {}).get("stored") or bullet
+        counted = self._count_unshown("bullets", stored)
+        if counted:
+            self._fire_turn(handlers.AddOutcome(action="added_new", pillar=pillar,
+                            level="sub_bullet", counted=True, text=stored,
+                            source="user_spontaneous"), bullet, False)
+        tmpl = WALK_ADDED if counted else WALK_DUP
+        yield self._emit_text(tmpl.format(stored=stored, pillar=pillar))
+
+    def _commit_pillar(self, name: str, in_kb: bool):
+        """EXP/BB: reveal (KB) or create (novel) the pillar via surface_pillar + the
+        normal add render, counting once and only if newly surfaced (an already-shown
+        pillar yields is_new=False → not counted). HITL overrides this."""
+        if in_kb:
+            km = matching.locate(name)
+            pillar = km.pillar or name
+            action = "revealed"
+        else:
+            pillar = matching.normalize_name(name)
+            action = "added_new"
+        self.surface_pillar(pillar)
+        # Same unified rule as sub-bullets: count iff this pillar wasn't already shown.
+        counted = self._count_unshown("pillars", pillar)
+        outcome = handlers.AddOutcome(action=action, pillar=pillar, level="pillar",
+                                      counted=counted, source="user_spontaneous")
+        yield from self._render_outcome(outcome, name)
 
     def begin_analysis(self, *args, **kwargs):
         raise NotImplementedError(

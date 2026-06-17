@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from backend.llm import classify_json
+from backend.interaction.prompts.intents import INTENT_ROUTER_PROMPT
 
 INTENTS = frozenset(
     {"add", "remove", "question", "ask_agent_to_suggest",
@@ -41,104 +42,6 @@ _STEERING_PHRASES = {
     "you suggest", "you tell me",
 }
 
-INTENT_ROUTER_PROMPT = """\
-You route a user's message during a framework problem-solving session.
-Return the SINGLE best intent. Resolve only WHAT the user wants — do NOT try to
-identify WHICH framework element they mean (a separate step does that).
-
-Intents:
-- "add"      : wants to ADD a new point or area — including proposals phrased as
-               "we should consider X", "we need to think about X", "what about X",
-               "how about X", "can we also look at X", "add X", "include X".
-               detail = the NEW thing to add (a noun phrase). A leading "no" does
-               NOT cancel an add ("no, add X" is still add).
-- "remove"   : a CLEAR command to remove a whole area OR one specific point
-               ("remove X", "drop this", "take out the part about Y", "delete that").
-               detail = what to remove.
-- "question" : asking to UNDERSTAND something already shown ("what is X?", "why is
-               this here?", "how does this apply?", "can you explain?").
-- "ask_agent_to_suggest" : asking the AGENT to propose what to add/consider next —
-               the user is NOT naming their own idea, they want the agent's.
-               ("what else should we consider?", "any suggestions from you?",
-               "what would you add?", "am I missing anything?", "what should come
-               next?" used as 'what do you suggest', "anything else?").
-               detail = null ALWAYS (the user named no concept of their own).
-- "revisit"  : wants to RETURN to / GO BACK to / LOOK AGAIN at an area already
-               covered earlier — pure NAVIGATION, no new content. Triggers include
-               "let's go back to X", "go back to X", "return to X", "can we revisit X",
-               "let's look at X again", "take me back to X". This IS a valid action:
-               NEVER classify a clear "go back to X" as none or advance.
-               detail = the named area, ALWAYS extract it ("go back to Strategic Fit"
-               -> detail "Strategic Fit"). If the user ALSO names a NEW point to put
-               there, that is "add" (detail = the new point), not revisit.
-- "doubt"    : vaguely doubts the current point belongs, WITHOUT a clear remove
-               command ("I'm not sure this fits", "this seems off", "is this
-               necessary?"). detail = null.
-- "advance"  : ready to move on to the next area, with no other request
-               ("yes", "ok", "next", "move on", "continue", "makes sense",
-               "got it", "sounds good"). detail = null.
-- "none"     : none of the above / unclear / a request to RESTART or WIPE the
-               session ("start over", "redo this", "reset", "regenerate everything")
-               — restarting is not allowed; classify those as none. detail = null.
-
-KEY DISAMBIGUATION:
-- ask_agent_to_suggest vs add: if the user names THEIR OWN concept to include -> add
-  (detail = that concept). If the user asks the agent to come up with it -> 
-  ask_agent_to_suggest (detail = null). "what about regulatory risk?" names a concept
-  -> add. "what else should we look at?" names none -> ask_agent_to_suggest.
-- ask_agent_to_suggest vs advance: "what should come next?" / "what's next?" asks the
-  agent to SUGGEST -> ask_agent_to_suggest. A bare "next" / "move on" is advance.
-- "else", "more", "other", "anything", "something" are NEVER a concept. If the whole
-  message is just "anything else?" / "what else?" -> ask_agent_to_suggest, detail null.
-  NEVER put "else"/"more"/etc into detail.
-- delegation/steering vs add: if the user HANDS THE NEXT MOVE to you and names no
-  concept of their own ("you decide", "you lead", "guide it", "your call", "you pick",
-  "up to you", "you take it from here") -> ask_agent_to_suggest, detail null. These are
-  NEVER an add, and "guide"/"lead"/"drive"/"decide" are NEVER concept names. (The agent
-  often invites this — "shall I take the lead?", "would you like me to suggest one?" —
-  so the reply is the user accepting the agent's lead, not naming an area.)
-- add vs question: proposing to INCLUDE something -> add ("add X", "we should consider X",
-  "what about X"). But an INTERROGATIVE asking to UNDERSTAND how/why a concept relates to,
-  fits, applies to, connects with, or belongs under an area is "question", even when it
-  names BOTH a concept and an area ("how is X related to Y", "how does X fit (into) Y",
-  "can you explain how X fits Y", "why does X matter for Y", "where does X belong"). The
-  verbs "fit"/"fits"/"fit into", "relate(d) to", "apply", "connect", "belong" inside a
-  "how/why/can you explain …?" frame signal a question about an existing relationship, NOT
-  a request to place X under Y — classify as question, parent = null. Only an imperative or
-  proposal to INCLUDE X is add.
-- Naming an existing area AS THE PLACE for a new point is "add", not revisit — the area
-  is just the location, the new point is the thing being added. detail = the new point.
-  ("Let's revisit Strategic Fit, we need to understand the opportunity frequency"
-   -> add, detail "opportunity frequency".)
-- "parent": ONLY for add — the EXISTING area the user names as the destination via
-  "under" / "as part of" / "within" / "in" ("add data privacy under Feasibility"
-  -> detail "data privacy", parent "Feasibility"). null when no destination is named;
-  null for every non-add intent.
-- revisit vs none/advance: a request to RETURN to a NAMED area already covered is
-  ALWAYS revisit (detail = that area) — never none, never advance. A bare "next" /
-  "move on" with no named target is advance; "go back to Strategic Fit" is revisit.
-- doubt vs remove: doubt is hesitation with NO command; remove is a clear instruction.
-
-─── CURRENT PILLAR ───────────────────────────────────────────────────────────
-{current_pillar}
-Its points:
-{current_bullets}
-────────────────────────────────────────────────────────────────────────────
-─── PILLARS COVERED SO FAR (for revisit) ─────────────────────────────────────
-{walkthrough_pillars}
-────────────────────────────────────────────────────────────────────────────
-─── WHAT THE AGENT LAST SAID ─────────────────────────────────────────────────
-{last_agent}
-────────────────────────────────────────────────────────────────────────────
-─── USER MESSAGE ─────────────────────────────────────────────────────────────
-{user_msg}
-────────────────────────────────────────────────────────────────────────────
-
-Respond ONLY with valid JSON, no markdown:
-{{"intent": "add|remove|question|ask_agent_to_suggest|revisit|doubt|advance|none", "detail": "string or null", "parent": "string or null", "confidence": float}}
-"""
-
-
 @dataclass
 class IntentResult:
     intent: str
@@ -146,6 +49,10 @@ class IntentResult:
     confidence: float
     error: bool = False
     parent: str | None = None
+    # Multi-point safeguard (only meaningful for an "add" with ≥2 separable items)
+    multi: bool = False
+    items: list[str] = field(default_factory=list)
+    pillar_name: str | None = None
 
 
 def intent_for_button(button_name: str) -> str | None:
@@ -164,6 +71,51 @@ def _is_filler_detail(detail: str | None) -> bool:
 
 def _is_steering_message(text: str) -> bool:
     return _norm(text) in _STEERING_PHRASES
+
+
+# Deterministic structural floor for multi-point detection: the LLM occasionally
+# misses an obvious list, so explicit list formats (Header: a, b / bullets / multi
+# short lines) are caught here regardless. The LLM still handles inline prose
+# ("culture fit and team morale"); this only guarantees explicit lists fire.
+_BULLET_RE = re.compile(r"^\s*(?:[-*•·–—]|\d+[.)])\s+")
+_INLINE_SPLIT_RE = re.compile(r"\s*(?:,|;|/|\band\b|&)\s*", re.I)
+
+
+def _split_inline(s: str) -> list[str]:
+    return [p.strip() for p in _INLINE_SPLIT_RE.split(s or "") if p.strip()]
+
+
+def _looks_like_point(line: str) -> bool:
+    t = (line or "").strip()
+    return bool(t) and not t.endswith("?") and len(t.split()) <= 10
+
+
+def _structural_list(text: str) -> tuple[str | None, list[str]]:
+    """(header, items) when the message is an explicit list, else (None, []).
+    Header is a short colon-label or a short non-bullet line above bullets."""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    if not lines:
+        return None, []
+    # Case A: "Header: a, b" (colon label on the first line) + any following lines.
+    m = re.match(r"^\s*([^:\n]{1,60}?):\s*(.*)$", lines[0])
+    if m and len(m.group(1).split()) <= 6:
+        items = _split_inline(m.group(2))
+        items += [_BULLET_RE.sub("", l).strip() for l in lines[1:]]
+        items = [i for i in items if i]
+        if len(items) >= 2:
+            return m.group(1).strip(), items
+    # Case B/C: ≥2 bullet lines, optional short header line above them.
+    bullets = [l for l in lines if _BULLET_RE.match(l)]
+    if len(bullets) >= 2:
+        header = None
+        first_b = next(i for i, l in enumerate(lines) if _BULLET_RE.match(l))
+        if first_b == 1 and not _BULLET_RE.match(lines[0]) and len(lines[0].split()) <= 6:
+            header = lines[0].rstrip(":").strip()
+        return header, [_BULLET_RE.sub("", b).strip() for b in bullets]
+    # Case D: ≥2 short, point-like plain lines (no header identifiable).
+    if len(lines) >= 2 and all(_looks_like_point(l) for l in lines):
+        return None, lines
+    return None, []
 
 
 def classify_intent(
@@ -186,6 +138,11 @@ def classify_intent(
         parsed = classify_json(prompt)
     except Exception as e:
         logging.warning(f"[INTENT] classifier error: {e} — defaulting to {_FALLBACK_INTENT}")
+        # The LLM is down, but an explicit list must still fire the safeguard.
+        s_header, s_items = _structural_list(user_text)
+        if len(s_items) >= 2:
+            return IntentResult(intent="add", detail=s_items[0], confidence=0.0, error=True,
+                                multi=True, items=s_items, pillar_name=s_header)
         return IntentResult(intent=_FALLBACK_INTENT, detail=None, confidence=0.0, error=True)
 
     intent = parsed.get("intent", _FALLBACK_INTENT)
@@ -208,6 +165,19 @@ def classify_intent(
     except (TypeError, ValueError):
         confidence = 0.0
 
+    # Multi-point safeguard fields
+    multi_raw = bool(parsed.get("multi", False))
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        items = []
+    items = [i.strip() for i in items if isinstance(i, str) and i.strip()]
+    pillar_name = parsed.get("pillar")
+    pillar_name = pillar_name.strip() if isinstance(pillar_name, str) and pillar_name.strip() else None
+    # Seed detail from the first item so the add/filler reroute below doesn't misfire
+    # on a multi-add whose single detail the model left null.
+    if multi_raw and items and not detail:
+        detail = items[0]
+
     if _is_steering_message(user_text):
         if intent != "ask_agent_to_suggest":
             logging.info(f"[INTENT] '{user_text[:60]}' -> steering/delegation; "
@@ -229,5 +199,26 @@ def classify_intent(
     if intent != "add" or _is_filler_detail(parent):
         parent = None
 
-    logging.info(f"[INTENT] '{user_text[:60]}' -> {intent} (detail={detail!r}, parent={parent!r}, conf={confidence:.2f})")
-    return IntentResult(intent=intent, detail=detail, parent=parent, confidence=confidence, error=False)
+    # Multi is only meaningful for an add with ≥2 separable items; otherwise drop it
+    # (and its pillar hint) so downstream never treats a single point as a block.
+    multi = multi_raw and intent == "add" and len(items) >= 2
+    if not multi:
+        items = []
+        pillar_name = None
+
+    # Structural floor: an explicit list always fires multi, even if the LLM missed
+    # it. Skip when the LLM read a removal (don't turn "remove: a, b" into an add).
+    if intent != "remove":
+        s_header, s_items = _structural_list(user_text)
+        if len(s_items) >= 2:
+            intent, multi = "add", True
+            if len(items) < 2:
+                items = s_items
+            if not pillar_name and s_header:
+                pillar_name = s_header
+
+    logging.info(f"[INTENT] '{user_text[:60]}' -> {intent} "
+                 f"(detail={detail!r}, parent={parent!r}, conf={confidence:.2f}, "
+                 f"multi={multi}, items={items}, pillar={pillar_name!r})")
+    return IntentResult(intent=intent, detail=detail, parent=parent, confidence=confidence,
+                        error=False, multi=multi, items=items, pillar_name=pillar_name)
