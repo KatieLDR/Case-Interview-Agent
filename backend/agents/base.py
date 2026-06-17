@@ -147,6 +147,27 @@ class BaseAgent:
                        r"please|maybe|move)\b", " ", text or "")
         return re.sub(r"\s+", " ", probe).strip()
 
+    def _resolve_area(self, text: str) -> str | None:
+        """Resolve free text to a pillar name. First a greedy-longest substring match
+        over KB + presented pillar names (so 'Strategic' -> 'Strategic Fit', 'Risk' ->
+        'Risk & Governance', mirroring the walkthrough's loose matching); else the LLM
+        matcher. Returns None when nothing resolves."""
+        probe = self._strip_to_area(text) or (text or "")
+        low = probe.lower()
+        if not low:
+            return None
+        names = [p["name"] for p in kb.get_all_pillars()]
+        names += [p for p in self.presented_pillars()
+                  if p.lower() not in {n.lower() for n in names}]
+        hit = None
+        for name in names:                              # bidirectional substring, longest wins
+            nl = name.lower()
+            if (low in nl or nl in low) and (hit is None or len(name) > len(hit)):
+                hit = name
+        if hit:
+            return hit
+        return matching.match_pillar(probe)[0]
+
     def _offer_pillar(self, pillar_name: str, items: list[str]):
         """Resolve the candidate pillar against the KB and arm the pending offer.
         Commits nothing until the user confirms."""
@@ -203,22 +224,31 @@ class BaseAgent:
         area = None
         if not (low.strip("?.! ") in self._SKIP_WORDS
                 or any(k in low for k in self._PLACE_SEPARATELY)):
-            area, _ = matching.match_pillar(self._strip_to_area(user_input) or user_input)
+            area = self._resolve_area(user_input)
         yield from self._start_walk(area, bullets, shown=st.get("shown"))
 
     # ── Per-bullet walk: keep / relocate / skip, each point KB-resolved ──────────
     def _start_walk(self, home: str | None, items: list[str], shown: dict | None = None):
         self.pending_pillar_offer = {"stage": "walk", "home": home,
                                      "queue": list(items), "rounds": 0, "cur": None,
+                                     "touched": [],
                                      "shown": shown if shown is not None else self._capture_shown()}
         yield self._emit_text(WALK_INTRO)
         yield from self._walk_present()
 
+    def _walk_touch(self, name: str) -> None:
+        """Record a pillar a walked point landed in, so the walk-end render can show it."""
+        st = self.pending_pillar_offer
+        if st is not None and name and "touched" in st and name not in st["touched"]:
+            st["touched"].append(name)
+
     def _walk_present(self):
         st = self.pending_pillar_offer
         if not st["queue"]:
+            touched = list(st.get("touched", []))
             self.pending_pillar_offer = None
             yield self._emit_text(WALK_DONE)
+            yield from self._walk_done_render(touched)
             return
         bullet = st["queue"][0]
         st["rounds"] = 0
@@ -287,7 +317,7 @@ class BaseAgent:
             yield from self._commit_sub_bullet(bullet, proposed)
             yield from self._walk_advance(); return
         if action == "relocate" and area:
-            yield from self._commit_sub_bullet(bullet, area)
+            yield from self._commit_sub_bullet(bullet, self._resolve_area(area) or area)
             yield from self._walk_advance(); return
         if action == "own_area":
             yield from self._commit_pillar(bullet, in_kb=False)   # the point becomes its area
@@ -319,6 +349,12 @@ class BaseAgent:
         grounded Q&A renderer (EXP/BB); HITL overrides to use _stream_concept_qa."""
         yield from self.render_question(user_input)
 
+    def _walk_done_render(self, touched: list[str]):
+        """Re-render the framework when the walk finishes. Default no-op; EXP shows the
+        touched pillar block(s) + next-step guidance, BB re-renders the full framework."""
+        return
+        yield   # pragma: no cover  (make this a generator)
+
     def _commit_sub_bullet(self, bullet: str, pillar: str):
         """EXP/BB: store `bullet` under `pillar` via add_sub_point (which canonicalizes
         to the KB phrasing + dedups), then count by the unified shown rule and fire a
@@ -334,6 +370,7 @@ class BaseAgent:
             self._fire_turn(handlers.AddOutcome(action="added_new", pillar=pillar,
                             level="sub_bullet", counted=True, text=stored,
                             source="user_spontaneous"), bullet, False)
+        self._walk_touch(pillar)
         tmpl = WALK_ADDED if counted else WALK_DUP
         yield self._emit_text(tmpl.format(stored=stored, pillar=pillar))
 
@@ -353,6 +390,7 @@ class BaseAgent:
         counted = self._count_unshown("pillars", pillar)
         outcome = handlers.AddOutcome(action=action, pillar=pillar, level="pillar",
                                       counted=counted, source="user_spontaneous")
+        self._walk_touch(pillar)
         yield from self._render_outcome(outcome, name)
 
     def begin_analysis(self, *args, **kwargs):

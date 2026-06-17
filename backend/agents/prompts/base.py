@@ -69,9 +69,9 @@ Reply: "{reply}"
 """
 
 WALK_ADDED   = "✅ Added **{stored}** under **{pillar}**.\n\n"
-WALK_DUP     = "**{stored}** is already under **{pillar}** — leaving it as is.\n\n"
+WALK_DUP     = "**{stored}** is already under **{pillar}**, leaving it as is.\n\n"
 WALK_SKIPPED = "Skipped **{bullet}**.\n\n"
-WALK_DONE    = "That's all your points — here's where the framework plan stands.\n\n"
+WALK_DONE    = "That's all your points, here's the updated plan:\n\n"
 
 
 CLARIFICATION_SYSTEM_PROMPT = """

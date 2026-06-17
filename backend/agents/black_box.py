@@ -303,6 +303,10 @@ class BlackBoxAgent(BaseAgent):
             self._emit(msg); yield msg; return
         yield from self._ack_no_reprint()
 
+    def _walk_done_render(self, touched):
+        """After a multi-point walk: re-render the full framework (BB shows all)."""
+        yield from self._yield_rerender("")
+
     def render_add(self, o):
         if o.action == "ask_placement":
             msg = (f"Should **{o.text}** be its own area, or a point under one of the "

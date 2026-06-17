@@ -23,6 +23,7 @@ temperature is left untouched in Step 1 so prose style does not move.
 """
 
 import json
+import logging
 import os
 
 from google import genai
@@ -39,7 +40,10 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
 # duplicate checks (F-DET). It is gone — every classifier/matcher call now
 # resolves to CLASSIFIER_MODEL so all three arms classify identically.
 MAIN_MODEL       = "gemini-2.5-flash"        # persona generation / streamed prose
-CLASSIFIER_MODEL = "gemini-2.5-flash-lite"   # all intent / matching / duplicate / swap classifiers
+CLASSIFIER_MODEL = "gemini-3.1-flash-lite"   # all intent / matching / duplicate / swap classifiers
+# On a transient classifier failure (e.g. 503 high-demand) classify_json falls
+# through this chain in order rather than retrying the same overloaded model.
+CLASSIFIER_FALLBACKS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
 # ── Score thresholds (consolidated from the three modules) ──────────────────
 # black_box_agent.py
@@ -78,22 +82,38 @@ def _strip_fences(text: str) -> str:
 strip_fences = _strip_fences
 
 
-def classify_json(prompt: str, *, model: str = CLASSIFIER_MODEL) -> dict:
+def classify_json(prompt: str, *, model: str | None = None) -> dict:
     """Run one deterministic classifier/matcher call and return parsed JSON.
 
     The single funnel for every "ask Gemini, get JSON back" call. Pins
     ``temperature=0`` (I-7) and goes through the one shared client + model.
 
-    ERROR POLICY (deliberate): on a transport error (e.g. a 503) or a JSON
-    parse failure this RAISES rather than returning a silent default. Each
+    MODEL FALLBACK: when called for the default classifier (no explicit ``model``),
+    a transient failure on the primary (e.g. a 503 high-demand spike, or an
+    unavailable model id) falls through CLASSIFIER_FALLBACKS in order instead of
+    retrying the same overloaded model. An explicit ``model=`` uses that one model
+    only (no chain).
+
+    ERROR POLICY (deliberate): if EVERY model in the chain fails (transport error
+    or JSON parse failure) this RAISES rather than returning a silent default. Each
     caller keeps its own ``try/except`` and applies its own fallback, because
     "what to do when the classifier fails" is persona/handler policy, not
     plumbing. This also keeps the error out of the question/intent counts
     (F-I3: a 503 must not be logged as a genuine ``question``).
     """
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=_CLASSIFIER_CONFIG,
-    )
-    return json.loads(_strip_fences(response.text))
+    chain = [model] if model is not None else [CLASSIFIER_MODEL, *CLASSIFIER_FALLBACKS]
+    last_err = None
+    for i, m in enumerate(chain):
+        try:
+            response = client.models.generate_content(
+                model=m,
+                contents=prompt,
+                config=_CLASSIFIER_CONFIG,
+            )
+            return json.loads(_strip_fences(response.text))
+        except Exception as e:                       # transient/invalid-model/parse
+            last_err = e
+            if i + 1 < len(chain):
+                logging.warning(f"[classify_json] model {m!r} failed ({e}); "
+                                f"falling back to {chain[i + 1]!r}")
+    raise last_err

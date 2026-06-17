@@ -19,7 +19,6 @@ from backend.agents.prompts.hitl import (
     PROACTIVE_PROMPTS, JUSTIFICATION_ACKS, SUB_BULLET_FORMAT_PROMPT,
     HITL_CLARIFICATION_SYSTEM_PROMPT, HITL_MAIN_SYSTEM_PROMPT,
 )
-from backend.agents.prompts.base import ADD_ONE_AT_A_TIME, WALK_ADDED, WALK_DUP
 from backend.tools.concept_swap import ConceptSwap
 
 CASE_TYPE = "AI Implementation"
@@ -147,11 +146,10 @@ class HITLAgent(BaseAgent):
             f"✅ **Let's begin.**\n\n"
             f"I'll walk you through the framework one concept at a time. "
             f"For each one, use the buttons to **include** or **skip** it, "
-            f"**➕ add** your own points, or just type a question first.\n\n"
+            f"**➕ add** your own points (one at a time), or just type a question first.\n\n"
             f"---\n\n"
         )
         yield from self._stream_concept(is_first=True)
-        yield ADD_ONE_AT_A_TIME
 
     # Walkthrough state helpers
     def _build_walkthrough_concepts(self) -> list:
@@ -270,8 +268,7 @@ class HITLAgent(BaseAgent):
 
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text",
                          source: str = "user_spontaneous",
-                         *, resolved: str | None = None,
-                         count: bool = True) -> tuple[str, bool]:
+                         *, resolved: str | None = None) -> tuple[str, bool]:
         pillar  = self._normalize_pillar(pillar)
         if resolved is not None:
             # Caller already resolved the KB phrasing (e.g. the sub-point navigate
@@ -302,10 +299,9 @@ class HITLAgent(BaseAgent):
             logging.info(f"[SUB-POINT] duplicate skipped: '{stored}' under '{pillar}'")
             return stored, False
         existing.append(stored)
-        if count:   # walk fires its own count via the unified shown rule (count=False)
-            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
-                                   counted=True, text=stored, source=source),
-                      self._evctx(source=source, modality=modality), _sink)
+        ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
+                               counted=True, text=stored, source=source),
+                  self._evctx(source=source, modality=modality), _sink)
         logging.info(f"[SUB-POINT] '{item}' → '{stored}' under '{pillar}'")
         return stored, True
 
@@ -313,13 +309,6 @@ class HITLAgent(BaseAgent):
     def _stream_main(self, user_input: str):
         if self._pending:
             log_interruption(self.session_id, context=user_input)
-
-        # Multi-point safeguard: an open pillar offer takes priority over routing.
-        if self.pending_pillar_offer is not None:
-            log_user_message(self.session_id, user_input)
-            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-            yield from self._resolve_pillar_offer(user_input)
-            return
 
         if self.pending is not None:
             log_user_message(self.session_id, user_input)
@@ -404,13 +393,10 @@ class HITLAgent(BaseAgent):
                 last_agent=self._last_agent_text() or "(nothing yet)",
             )
 
-            # Multi-point safeguard (proactive reply): pillar offer or passive reminder.
-            if pres.multi and getattr(self, "pending_placement", None) is None:
+            # Multi-point: HITL is button-driven — nudge to add one at a time via buttons.
+            if pres.multi:
                 self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-                if pres.pillar_name:
-                    yield from self._offer_pillar(pres.pillar_name, pres.items)
-                else:
-                    yield from self._safeguard_multi(pres.items)
+                yield from self._nudge_multi()
                 return
 
             # Honour an explicit destination ("add X under Feasibility") only when
@@ -541,15 +527,11 @@ class HITLAgent(BaseAgent):
                 yield from self._reveal_suggested_pillar(_ps["item"])
                 return
 
-        # Multi-point safeguard: pillar offer or passive reminder.
-        if (res.multi and self.pending_suggestion is None
-                and getattr(self, "pending_placement", None) is None):
+        # Multi-point: HITL is button-driven — nudge to add one at a time via buttons.
+        if res.multi:
             log_user_message(self.session_id, user_input)
             self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-            if res.pillar_name:
-                yield from self._offer_pillar(res.pillar_name, res.items)
-            else:
-                yield from self._safeguard_multi(res.items)
+            yield from self._nudge_multi()
             return
 
         cs_detected = False
@@ -643,6 +625,16 @@ class HITLAgent(BaseAgent):
         log_agent_response(self.session_id, msg)
         yield msg
 
+    def _nudge_multi(self):
+        """A pasted multi-point message: HITL is button-driven, so add points one at a
+        time with the ➕ Add button rather than running EXP/BB's freetext walk."""
+        msg = ("Looks like a few points at once — in this mode we add them **one at a "
+               "time** so each lands in the right area. Use **➕ Add point to consider "
+               "in this pillar** below for each one, or name a single area to jump to.")
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
     def _stream_proactive_prompt(self):
         self.holding_after_justification = False
         self.awaiting_user_suggestion = True
@@ -702,54 +694,6 @@ class HITLAgent(BaseAgent):
                   self._evctx(modality="text"), _sink)
         logging.info(f"[REVEAL] agent-suggested pillar accepted: '{concept}'")
         yield from self._stream_concept(is_first=False)
-
-    def _commit_pillar(self, name: str, in_kb: bool):
-        """HITL override of the multi-point pillar commit: bring the confirmed pillar
-        into the walkthrough and count it by the unified shown rule (count iff it
-        wasn't already shown), then present it."""
-        target = self._normalize_pillar(name)
-        counted = self._count_unshown("pillars", target)
-        idx = self._locate_concept(target)
-        if idx is not None and idx < self.walkthrough_index:
-            # already covered earlier -> point there, no new count (it was shown)
-            yield self._emit_text(
-                f"**{target}** is already in your framework — let's add your points there.\n\n")
-            return
-        if idx is None:                                  # withheld KB or novel -> insert
-            self.walkthrough_concepts.insert(self.walkthrough_index, target)
-            if self.walkthrough_index <= self.swap_position:
-                self.swap_position += 1
-        elif idx != self.walkthrough_index:              # upcoming -> bring to front
-            self.walkthrough_concepts.pop(idx)
-            self.walkthrough_concepts.insert(self.walkthrough_index, target)
-        if counted:
-            self.navigated_pillars.add(target.lower())
-            ev.record(h.AddOutcome(action="added_new", pillar=target, level="pillar",
-                                   counted=True, source="user_spontaneous"),
-                      self._evctx(source="user_spontaneous", modality="text"), _sink)
-        yield from self._stream_concept(is_first=False)
-
-    def _commit_sub_bullet(self, bullet: str, pillar: str):
-        """HITL override of the walk's sub-bullet commit: store under `pillar` (KB
-        phrasing + dedup), surfacing the destination if needed, and count by the
-        unified shown rule (count iff not already shown). Yields a compact confirm."""
-        pillar = self._normalize_pillar(pillar)
-        if self._locate_concept(pillar) is None:
-            self.walkthrough_concepts.append(pillar)   # surface destination so it shows
-        stored, _ = self._store_sub_point(pillar, bullet, source="user_spontaneous", count=False)
-        counted = self._count_unshown("bullets", stored)
-        if counted:
-            ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
-                                   counted=True, text=stored, source="user_spontaneous"),
-                      self._evctx(source="user_spontaneous", modality="text"), _sink)
-        tmpl = WALK_ADDED if counted else WALK_DUP
-        yield self._emit_text(tmpl.format(stored=stored, pillar=pillar))
-
-    def _walk_answer(self, user_input: str):
-        """HITL override: answer a mid-walk question via the grounded concept Q&A
-        (HITL's render_question is intentionally a no-op seam)."""
-        ev.question(self._evctx(modality="text"), _sink)
-        yield from self._stream_concept_qa()
 
     # Streaming sub-methods
     def _add_sub_point(self, matched_concept: str, sub_point: str):

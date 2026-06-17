@@ -458,6 +458,18 @@ class ExplainableAgent(BaseAgent):
     _NEXT_AFFORD = ("\n\n*Add a point here, raise a new area, or question anything \u2014 "
                     "or say \"next\" to move on.*")
 
+    def _walk_done_render(self, touched):
+        """After a multi-point walk: show each pillar the points landed in (they were
+        surfaced during the walk, so render unconditionally), then the next-step
+        guidance affordance."""
+        seen = set()
+        for p in touched:
+            if not p or p.lower() in seen:
+                continue
+            seen.add(p.lower())
+            yield self._emit_text(self._render_pillar_block(p) + "\n\n")
+        yield self._emit_text(self._NEXT_AFFORD.strip())
+
     def render_add(self, o):
         if o.action == "navigated":
             target = o.pillar
@@ -816,12 +828,8 @@ class ExplainableAgent(BaseAgent):
                 # Fall back to concept-level lookup for user-added concepts
                 pillar = kb.get_pillar_for_concept_name(concept)
             if pillar is None:
-                # User-added concept not in KB
-                note = (
-                    "\n> *ℹ️ This concept isn't in my knowledge base "
-                    "— I can discuss it, but can't verify it with a source.*\n"
-                )
-                prefix = "**" + concept + "**\n" + note
+                # User-added concept not in KB — present plainly (no provenance note).
+                prefix = "**" + concept + "**\n"
             else:
                 description = pillar.get("description", "")
                 bullet_lines, named_sources = self._render_bullets_and_sources(concept)
