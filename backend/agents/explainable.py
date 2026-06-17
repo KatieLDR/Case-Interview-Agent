@@ -543,7 +543,10 @@ class ExplainableAgent(BaseAgent):
                 msg = (f"That's already covered under **{o.pillar}** as *{o.matched_text}*. "
                        f"Want to adjust it?" + self._NEXT_AFFORD)
             elif o.pillar:
-                msg = f"That's already covered under **{o.pillar}**." + self._NEXT_AFFORD
+                ref = o.matched_text or o.text
+                msg = ((f"That's already covered under **{o.pillar}** as *{ref}*."
+                        if ref else f"That's already covered under **{o.pillar}**.")
+                       + self._NEXT_AFFORD)
             else:
                 msg = "That's already in the framework."
             self._emit(msg); yield msg; return

@@ -433,6 +433,34 @@ async def on_add_to_concept(action: cl.Action):
     await _attach_buttons(agent)
 
 
+@cl.action_callback("proactive_add_pillar")
+async def on_proactive_add_pillar(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_proactive_add_pillar():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
+@cl.action_callback("proactive_suggest")
+async def on_proactive_suggest(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_proactive_suggest():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
 @cl.action_callback("done_adding")
 async def on_done_adding(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -670,6 +698,19 @@ async def _attach_buttons(agent):
                 actions=[
                     cl.Action(name="done_adding", label="✅ Done adding",
                               description="Finish adding points to this concept", payload={}),
+                ]
+            ).send()
+
+        elif agent.awaiting_user_suggestion:
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(name="proactive_add_pillar", label="➕ Add my own pillar",
+                              description="Name a pillar you'd like to add", payload={}),
+                    cl.Action(name="proactive_suggest", label="💡 Ask agent suggestion",
+                              description="Let the agent suggest the next pillar", payload={}),
+                    cl.Action(name="get_summary", label="‼️End Session",
+                              description="End your session", payload={}),
                 ]
             ).send()
 

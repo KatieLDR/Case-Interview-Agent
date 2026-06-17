@@ -83,6 +83,7 @@ class HITLAgent(BaseAgent):
         self.holding_after_justification = False
         self.awaiting_sub_point        = False
         self.awaiting_revisit_add      = False
+        self.awaiting_pillar_name      = False
         self.revisit_target            = None
         self.post_walkthrough_revisit  = False
         self.prompt_index              = 0
@@ -340,7 +341,7 @@ class HITLAgent(BaseAgent):
             lead = (
                 f"Added under **{concept}**. Here's how it looks now:"
                 if is_new else
-                f"You've already got that one under **{concept}**. Here's how it looks now:"
+                f"That's already covered under **{concept}** as *{stored}*. Here's how it looks now:"
             )
             yield (
                 f"{lead}\n\n"
@@ -355,7 +356,7 @@ class HITLAgent(BaseAgent):
             log_user_message(self.session_id, f"[REVISIT ADD] {user_input}")
             stored, is_new = self._store_sub_point(target, user_input, modality="button")
             lead = (f"Added to **{target}**." if is_new
-                    else f"You've already got that one under **{target}**.")
+                    else f"That's already covered under **{target}** as *{stored}*.")
             yield (
                 f"{lead}\n\n"
                 f"Anything else to add to **{target}**? "
@@ -379,6 +380,32 @@ class HITLAgent(BaseAgent):
                 self.walkthrough_index += 1
 
             yield from self._stream_justification_ack()
+            return
+
+        if self.awaiting_pillar_name:
+            self.awaiting_pillar_name = False
+            log_user_message(self.session_id, f"[PROACTIVE PILLAR] {user_input}")
+            pres = intents.classify_intent(
+                user_input,
+                current_pillar=self._current_concept() or "(none)",
+                current_bullets=self._ctx_bullets(),
+                walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+                last_agent=self._last_agent_text() or "(nothing yet)",
+            )
+            concept = pres.detail if (pres.intent == "add" and pres.detail) else None
+            if concept is None:
+                concept = self._mentioned_pillar(user_input)
+            if pres.multi or concept is None:
+                # Keep it one pillar at a time — re-prompt for a single name.
+                self.awaiting_pillar_name = True
+                msg = ("Let's add one pillar at a time — which single pillar would "
+                       "you like to add?")
+                self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+                log_agent_response(self.session_id, msg)
+                yield msg
+                return
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._go_to_pillar(concept)
             return
 
         if self.awaiting_user_suggestion:
@@ -413,18 +440,7 @@ class HITLAgent(BaseAgent):
                 return
 
             if pres.intent == "ask_agent_to_suggest":
-                # The index already points at the next, not-yet-presented concept
-                # (the preceding decision advanced it before this proactive prompt).
-                # Present it as the agent's suggestion WITHOUT advancing again —
-                # advancing here would skip that pending concept. Still log the
-                # elicited advance, since the user deferred the choice to the agent.
-                logging.info("[PROACTIVE] ask_agent_to_suggest -> present current (no advance)")
-                ev.record(h.AdvanceOutcome(passive=False, elicited=True),
-                          self._evctx(modality="text"), _sink)
-                if self._current_concept() is None:
-                    yield from self._walkthrough_complete_message()
-                else:
-                    yield from self._stream_concept(is_first=False)
+                yield from self._suggest_next()
                 return
 
             # Sub-bullet granularity (mirrors EXP/BB): the user may name a point
@@ -458,50 +474,7 @@ class HITLAgent(BaseAgent):
                 yield from self._stream_concept(is_first=False)
                 return
 
-            dup     = self._check_duplicate_proactive(concept)
-
-            if dup["is_duplicate"] and dup["matched_concept"]:
-                target           = dup["matched_concept"]
-                matched_withheld = None
-            else:
-                matched_withheld, _ = matching.match_pillar(concept)
-                target           = matched_withheld or concept
-
-            idx = self._locate_concept(target)
-            if idx is not None:
-                if idx >= self.walkthrough_index:
-                    if idx != self.walkthrough_index:
-                        self.walkthrough_concepts.pop(idx)
-                        self.walkthrough_concepts.insert(self.walkthrough_index, target)
-                    if target.lower() not in self.navigated_pillars:
-                        self.navigated_pillars.add(target.lower())
-                        ev.record(h.AddOutcome(action="added_new", pillar=target,
-                                               level="pillar", counted=True,
-                                               source="user_elicited"),
-                                  self._evctx(source="user_elicited", modality="text"), _sink)
-                    logging.info(f"[PROACTIVE] navigate to '{target}' (was idx={idx})")
-                    gist    = matching.pillar_gist(target)
-                    why_txt = f" {gist}" if gist else ""
-                    yield f"Sure — let's look at **{target}** now.{why_txt}\n\n"
-                    yield from self._stream_concept(is_first=False)
-                else:
-                    logging.info(f"[PROACTIVE] '{target}' already covered (idx={idx})")
-                    yield (
-                        f"We've already covered **{target}** — it's in your "
-                        f"framework.\n\n"
-                    )
-                    yield from self._stream_proactive_prompt()
-            else:
-                if matched_withheld:
-                    logging.info(f"[PROACTIVE] new area → withheld pillar '{matched_withheld}'")
-                    yield (
-                        f"Good call — **{matched_withheld}** is an important area. "
-                        f"Let's add it.\n\n"
-                    )
-                else:
-                    logging.info(f"[PROACTIVE] new user concept: '{target}'")
-                    yield f"Great suggestion — let's explore **{target}** now.\n\n"
-                yield from self._stream_user_contributed_concept(target)
+            yield from self._go_to_pillar(concept)
             return
 
         just_added_concept = None
@@ -629,11 +602,89 @@ class HITLAgent(BaseAgent):
         """A pasted multi-point message: HITL is button-driven, so add points one at a
         time with the ➕ Add button rather than running EXP/BB's freetext walk."""
         msg = ("Looks like a few points at once — in this mode we add them **one at a "
-               "time** so each lands in the right area. Use **➕ Add point to consider "
-               "in this pillar** below for each one, or name a single area to jump to.")
+               "time** so each lands in the right pillar. Use **➕ Add point to consider "
+               "in this pillar** below for each one, or name a single pillar to jump to.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg
+
+    def _suggest_next(self):
+        """Present the next, not-yet-shown concept as the agent's suggestion WITHOUT
+        advancing again — the index already points at it (the preceding decision
+        advanced it before this proactive prompt). Log the elicited advance, since the
+        user deferred the choice to the agent."""
+        logging.info("[PROACTIVE] ask_agent_to_suggest -> present current (no advance)")
+        ev.record(h.AdvanceOutcome(passive=False, elicited=True),
+                  self._evctx(modality="text"), _sink)
+        if self._current_concept() is None:
+            yield from self._walkthrough_complete_message()
+        else:
+            yield from self._stream_concept(is_first=False)
+
+    def _go_to_pillar(self, concept: str):
+        """Navigate the walkthrough to the pillar the user named: reorder an
+        already-listed pillar to the front (counting it once as a pillar add), report
+        an already-covered pillar in place, or surface a new/withheld one. Shared by
+        the freetext proactive path and the ➕ Add my own pillar button."""
+        dup = self._check_duplicate_proactive(concept)
+
+        if dup["is_duplicate"] and dup["matched_concept"]:
+            target           = dup["matched_concept"]
+            matched_withheld = None
+        else:
+            matched_withheld, _ = matching.match_pillar(concept)
+            target           = matched_withheld or concept
+
+        idx = self._locate_concept(target)
+        if idx is not None:
+            if idx >= self.walkthrough_index:
+                if idx != self.walkthrough_index:
+                    self.walkthrough_concepts.pop(idx)
+                    self.walkthrough_concepts.insert(self.walkthrough_index, target)
+                if target.lower() not in self.navigated_pillars:
+                    self.navigated_pillars.add(target.lower())
+                    ev.record(h.AddOutcome(action="added_new", pillar=target,
+                                           level="pillar", counted=True,
+                                           source="user_elicited"),
+                              self._evctx(source="user_elicited", modality="text"), _sink)
+                logging.info(f"[PROACTIVE] navigate to '{target}' (was idx={idx})")
+                gist    = matching.pillar_gist(target)
+                why_txt = f" {gist}" if gist else ""
+                yield f"Sure — let's look at **{target}** now.{why_txt}\n\n"
+                yield from self._stream_concept(is_first=False)
+            else:
+                logging.info(f"[PROACTIVE] '{target}' already covered (idx={idx})")
+                yield (
+                    f"We've already covered **{target}** — it's in your "
+                    f"framework.\n\n"
+                )
+                yield from self._stream_proactive_prompt()
+        else:
+            if matched_withheld:
+                logging.info(f"[PROACTIVE] new pillar → withheld pillar '{matched_withheld}'")
+                yield (
+                    f"Good call — **{matched_withheld}** is an important pillar. "
+                    f"Let's add it.\n\n"
+                )
+            else:
+                logging.info(f"[PROACTIVE] new user concept: '{target}'")
+                yield f"Great suggestion — let's explore **{target}** now.\n\n"
+            yield from self._stream_user_contributed_concept(target)
+
+    def on_proactive_add_pillar(self):
+        """➕ Add my own pillar (proactive prompt): ask for ONE pillar name, then
+        navigate so the per-concept buttons target the pillar the user raised."""
+        self.awaiting_user_suggestion = False
+        self.awaiting_pillar_name = True
+        msg = "Which pillar would you like to add? Tell me one at a time."
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
+    def on_proactive_suggest(self):
+        """💡 Ask agent suggestion (proactive prompt): present the agent's next pick."""
+        self.awaiting_user_suggestion = False
+        yield from self._suggest_next()
 
     def _stream_proactive_prompt(self):
         self.holding_after_justification = False
@@ -707,7 +758,7 @@ class HITLAgent(BaseAgent):
         if is_new:
             yield f"Got it — adding that under **{pillar}**:\n- {stored}\n\n"
         else:
-            yield f"You've already got that one under **{pillar}**.\n\n"
+            yield f"That's already covered under **{pillar}** as *{stored}*.\n\n"
 
     def _stream_concept(self, is_first: bool):
         concept = self._current_concept()
@@ -1450,6 +1501,7 @@ class HITLAgent(BaseAgent):
             and not self.awaiting_justification
             and not self.awaiting_sub_point
             and not self.awaiting_revisit_add
+            and not self.awaiting_pillar_name
             and (self._current_concept() not in self.user_contributed_concepts)
         )
 

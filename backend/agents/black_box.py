@@ -388,7 +388,10 @@ class BlackBoxAgent(BaseAgent):
                     also = ""
                 yield from self._yield_rerender(f"Added under **{o.pillar}**.{also}\n\n")
             else:
-                yield from self._yield_rerender(f"That's already under **{o.pillar}**.\n\n")
+                stored = (self._last_sub_add or {}).get("stored")
+                pre = (f"That's already covered under **{o.pillar}** as *{stored}*.\n\n"
+                       if stored else f"That's already under **{o.pillar}**.\n\n")
+                yield from self._yield_rerender(pre)
             return
 
         if o.action == "added_new" and o.level == "pillar":
