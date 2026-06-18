@@ -662,7 +662,7 @@ class BaseAgent:
         show_swap = not self.concept_swap.is_detected
         position  = len(shown) // 2
 
-        lines = ["💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is how I would structure the analysis:\n"] if is_first else []
+        lines = ["💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is the framework plan I recommend:\n"] if is_first else []
 
         def emit(name, kb_bullets):
             lines.append(f"**{name}**")

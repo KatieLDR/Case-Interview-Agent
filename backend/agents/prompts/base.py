@@ -4,9 +4,9 @@
 # Shown once, right after the framework is first presented (BB: after the full
 # framework stream; EXP/HITL: after the first pillar). Standalone tip bubble-tail.
 ADD_ONE_AT_A_TIME = (
-    "\n\n💡 *When you'd like to add your own ideas, please share the pillar or the "
-    "bullet below **one at a time**, that way I can place each point in the right "
-    "area and keep your analysis aligned with the best practice.*"
+    "\n\n💡 *When you'd like to add your own pillar or bullet, **share them one at a time**. "
+    "I'll map each point to the industry knowledge base and keep your framework aligned with best practices. "
+    "You could challenge it anytime.*"
 )
 
 # Pillar offer (a header/theme was detected). Placeholders:

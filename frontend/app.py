@@ -716,14 +716,14 @@ async def _attach_buttons(agent):
 
         elif agent.should_show_buttons():
             actions = [
-                cl.Action(name="approve_concept", label="✅ Include",
-                          description="Include this concept in the framework", payload={}),
-                cl.Action(name="reject_concept", label="❌ Skip",
-                          description="Skip this concept", payload={}),
-                cl.Action(name="add_to_concept", label="➕ Add point to consider in this pillar",
-                          description="Add your own point under this concept", payload={}),
-                cl.Action(name="remove_point_open", label="➖ Remove a point in this pillar",
-                          description="Remove one of the existing points", payload={}),
+                cl.Action(name="approve_concept", label="✅ Include this pillar",
+                          description="Include this pillar in the framework", payload={}),
+                cl.Action(name="reject_concept", label="❌ Exclude this pillar",
+                          description="Exclude this pillar from the framework", payload={}),
+                cl.Action(name="add_to_concept", label="➕ Add a bullet",
+                          description="Add your own bullet under this pillar", payload={}),
+                cl.Action(name="remove_point_open", label="➖ Remove a bullet",
+                          description="Remove one of the existing bullets", payload={}),
             ]
             if agent.past_pillars():
                 actions.append(

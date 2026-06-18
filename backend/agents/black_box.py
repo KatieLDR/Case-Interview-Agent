@@ -107,8 +107,9 @@ class BlackBoxAgent(BaseAgent):
         self._start_main_phase_setup()
 
         yield (
-            "⚠️ Your goal is to build a structured plan for this case. "
-            "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
+            "⚠️ Your goal is to build a structured framework plan for the GenAI rollout. "
+            "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
+            "It can only support you when you actively engage, **not just read through it.**"
         )
 
         yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
@@ -273,8 +274,8 @@ class BlackBoxAgent(BaseAgent):
                 msg = (f"I'll add *{stored}* under **{pillar}** — reply **yes** to confirm, or "
                        f"tell me a different wording or area.")
             elif status == "withheld":
-                msg = (f"It sounds like that belongs under **{pillar}** — want me to bring in "
-                       f"**{pillar}** and add *{stored}* there? *(yes — or name a different area)*")
+                msg = (f"It sounds like that belongs under **{pillar}**, want me to bring in "
+                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different area)*")
             else:  # novel — suggest, but the user decides wording / where
                 msg = (f"I don't see **{pillar}** in the framework yet — I'd add *{stored}* under a "
                        f"new pillar **{pillar}**. Reply **yes**, name an existing area to use "
@@ -425,6 +426,11 @@ class BlackBoxAgent(BaseAgent):
     # Outcome renderer
     def render_question(self, user_input):
         yield from self._stream_qa(user_input)
+        msg = (
+            "\n\nFeel free to **add**, **remove**, or refine anything in the framework, "
+            "ask more questions, or type **show framework** if you'd like to review the current state."
+        )
+        self._emit(msg); yield msg
 
     def render_framework(self, preamble=""):
         yield from self._yield_rerender(preamble)
@@ -445,8 +451,8 @@ class BlackBoxAgent(BaseAgent):
 
     def render_add(self, o):
         if o.action == "ask_placement":
-            msg = (f"Should **{o.text}** be its own area, or a point under one of the "
-                   f"existing areas? *(If under one, which?)*")
+            msg = (f"Should **{o.text}** be its own pillar, or a bullet under one of the "
+                   f"existing pillars? *(If under one, which?)*")
             self._emit(msg); yield msg; return
 
         if o.action == "navigate_offer":
@@ -508,7 +514,7 @@ class BlackBoxAgent(BaseAgent):
         if o.action == "revealed" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                yield from self._yield_rerender(f"Added **{o.pillar}** as a new area.\n\n")
+                yield from self._yield_rerender(f"Added **{o.pillar}** as a new pillar.\n\n")
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
             return
@@ -558,7 +564,7 @@ class BlackBoxAgent(BaseAgent):
 
         if stage == "abandoned":
             if pa and pa.type == "remove_sub_bullet":
-                msg = f"No problem — I'll keep that point in **{pa.pillar}**."
+                msg = f"No problem — I'll keep that bullet in **{pa.pillar}**."
             else:
                 msg = f"No problem — I'll keep **{o.target}**."
             self._emit(msg); yield msg; return
@@ -576,7 +582,7 @@ class BlackBoxAgent(BaseAgent):
             options = self.presented_pillars()
             opt = ("\n\nCurrently in the framework: "
                    + ", ".join(f"**{n}**" for n in options) + ".") if options else ""
-            msg = ("Which part would you like to remove? You can name the pillar or the point."
+            msg = ("Which part would you like to remove? You can name the pillar or the bullet."
                    + opt + "\n\n*(Or say **never mind** to keep everything as is.)*")
             self._emit(msg); yield msg; return
 
@@ -588,7 +594,7 @@ class BlackBoxAgent(BaseAgent):
                 msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
                 self._emit(msg); yield msg; return
             if self.pending and self.pending.type == "remove_sub_bullet":
-                msg = (f"Are you sure you want to remove this point from "
+                msg = (f"Are you sure you want to remove this bullet from "
                        f"**{self.pending.pillar}**?\n\n*\"{o.target}\"*\n\n"
                        f"*Reply **yes** to confirm, or **no** to keep it.*")
             else:
@@ -608,8 +614,8 @@ class BlackBoxAgent(BaseAgent):
                    "remove, or question any part of what's here.")
             self._emit(msg); yield msg; return
         why = (o.grounding or "").split("\n")[0].strip()
-        msg = (f"One area we haven't covered yet is **{o.suggested_item}**"
-               + (f" — {why}" if why else "")
+        msg = (f"One pillar we haven't covered yet is **{o.suggested_item}**"
+               + (f", {why}" if why else "")
                + "\n\nIt's worth considering whether it applies to your case.")
         self._emit(msg); yield msg
 

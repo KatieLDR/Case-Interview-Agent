@@ -112,13 +112,13 @@ class ExplainableAgent(BaseAgent):
             f"---\n"
             f"Take your time to read it. Feel free to ask any clarifying questions "
             f"before you begin. When you're ready, I'll walk you through the framework "
-            f"one concept at a time — you can ask questions at each step.\n\n"
+            f"one concept at a time, you can ask questions at each step.\n\n"
         )
 
     def get_pre_analysis_instruction(self) -> str:
         return (
             "📖 *After you click the button below, I'll walk you through "
-            "each concept one at a time — you can ask questions or suggest "
+            "each concept one at a time, you can ask questions or suggest "
             "changes at any step.*"
         )
 
@@ -126,8 +126,9 @@ class ExplainableAgent(BaseAgent):
         self._start_main_phase_setup()
 
         yield (
-            "⚠️ Your goal is to build a structured plan for this case. "
-            "Review each factor below, share your thoughts, and you **should not only read it** but also add or remove anything you think is missing."
+            "⚠️ Your goal is to build a structured framework plan for the GenAI rollout. "
+            "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
+            "It can only support you when you actively engage, **not just read through it.**"
         )
 
         yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
@@ -523,20 +524,20 @@ class ExplainableAgent(BaseAgent):
                             "stored": stored, "status": status}
         if kind == "sub_bullet":
             if status == "presented":
-                msg = (f"I'll add *{stored}* under **{pillar}** — reply **yes** to confirm, or "
+                msg = (f"I'll add *{stored}* under **{pillar}**, reply **yes** to confirm, or "
                        f"tell me a different wording or area.")
             elif status == "withheld":
-                msg = (f"It sounds like that belongs under **{pillar}** — want me to bring in "
-                       f"**{pillar}** and add *{stored}* there? *(yes — or name a different area)*")
+                msg = (f"It sounds like that belongs under **{pillar}**, want me to bring in "
+                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different area)*")
             else:  # novel — suggest, but the user decides wording / where
-                msg = (f"I don't see **{pillar}** in the framework yet — I'd add *{stored}* under a "
+                msg = (f"I don't see **{pillar}** in the framework yet, I'd add *{stored}* under a "
                        f"new pillar **{pillar}**. Reply **yes**, name an existing area to use "
                        f"instead, or reword.")
         elif status == "withheld":
-            msg = (f"**{pillar}** is part of the framework but not shown yet — want me to "
+            msg = (f"**{pillar}** is part of the framework but not shown yet, want me to "
                    f"bring it in? *(yes / no)*")
         else:  # novel pillar
-            msg = (f"I don't see **{pillar}** in the framework yet — I'd add it as a new pillar. "
+            msg = (f"I don't see **{pillar}** in the framework yet, I'd add it as a new pillar. "
                    f"Reply **yes**, name an existing area instead, or give a different name.")
         self._emit(msg); yield msg
 
@@ -553,7 +554,7 @@ class ExplainableAgent(BaseAgent):
                               level="pillar", counted=True, source="user_spontaneous"),
                               self._evctx(), _sink)
                 lead = (f"Brought in **{pa['pillar']}**." if pa.get("status") == "withheld"
-                        else f"Noted — I've added **{pa['pillar']}** as a separate area.")
+                        else f"Noted, I've added **{pa['pillar']}** as a separate area.")
                 msg = lead + "\n\n" + self._render_pillar_block(pa["pillar"])
             else:
                 if pa.get("status") != "presented":
@@ -563,14 +564,14 @@ class ExplainableAgent(BaseAgent):
                     ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
                               level="sub_bullet", counted=True, text=stored,
                               source="user_spontaneous"), self._evctx(), _sink)
-                lead = (f"Brought in **{pa['pillar']}** —" if pa.get("status") == "withheld"
-                        else f"Good point — I've added it under **{pa['pillar']}**.")
+                lead = (f"Brought in **{pa['pillar']}**, " if pa.get("status") == "withheld"
+                        else f"Good point, I've added it under **{pa['pillar']}**.")
                 msg = lead + " Here's how it looks now:\n\n" + self._render_pillar_block(pa["pillar"])
             self._emit(msg); yield msg
             return
         if decision == "decline":
             self.pending_add = None
-            msg = "No problem — I've left it out."
+            msg = "No problem, I've left it out."
             self._emit(msg); yield msg
             return
         # Anything else is an edit: re-classify the reply as the revised add and re-preview.
@@ -645,10 +646,10 @@ class ExplainableAgent(BaseAgent):
                             bucket.append(nb)
                         added = True
                 if added:
-                    yield f"Good point — I've added it under **{target}**. Here's where we are.\n\n"
+                    yield f"Good point, I've added it under **{target}**. Here's where we are.\n\n"
                 else:
                     lead = "Going back to" if back else "Let's look at"
-                    yield f"{lead} **{target}** — here's where we are.\n\n"
+                    yield f"{lead} **{target}**, here's where we are.\n\n"
                 yield from self._stream_concept(is_first=False)
             else:
                 ev.question(self._evctx(), _sink)   # revisit -> grounded Q&A (no turn outcome)
@@ -658,11 +659,11 @@ class ExplainableAgent(BaseAgent):
         if o.action == "ask_placement":
             cur = self.current_pillar()
             if cur:
-                msg = (f"Where should **{o.text}** go — its own area, or a point under "
-                       f"**{cur}**? *(Or name another area.)*")
+                msg = (f"Where should **{o.text}** go, its own pillar, or a point under "
+                       f"**{cur}**? *(Or name another pillar.)*")
             else:
-                msg = (f"Where should **{o.text}** go — its own area, or a point under one "
-                       f"of the existing areas? *(If under one, which?)*")
+                msg = (f"Where should **{o.text}** go, its own pillar, or a point under one "
+                       f"of the existing pillars? *(If under one, which?)*")
             self._emit(msg); yield msg; return
 
         if o.action == "navigate_offer":
@@ -670,13 +671,13 @@ class ExplainableAgent(BaseAgent):
             presented = {n.lower() for n in self.presented_pillars()}
             if o.matched_text:
                 msg = (f"That's already covered under **{o.pillar}** as *{o.matched_text}*"
-                       f"{gist} Want to go there, or keep it here?")
+                       f"{gist} Want to discuss it together with **{o.pillar}**, or put it here in **{cur}**?")
             elif o.pillar and o.pillar.lower() in presented:
-                msg = (f"**{o.pillar}** is already in the framework{gist} "
-                       f"Want to go back and add, change, or question anything there?")
+                msg = (f"We've already discussed **{o.pillar}** in the framework{gist}. "
+                       f"Do you want to revisit it and add anything there?")
             else:
-                msg = (f"**{o.pillar}** is an area I'll cover{gist} "
-                       f"Want to go there now, or keep going?")
+                msg = (f"**{o.pillar}** is a pillar I'll cover{gist} "
+                       f"Want to discuss it now, or shall we continue with the current pillar?")
             self._emit(msg); yield msg; return
 
         if o.action == "duplicate":
@@ -701,14 +702,14 @@ class ExplainableAgent(BaseAgent):
                 kbp = next((p for p in kb.get_all_pillars()
                             if p["name"].lower() == (o.pillar or "").lower()), None)
                 desc = (kbp.get("description", "").strip() if kbp else "")
-                parts = [f"Good call — **{o.pillar}** is an important area."]
+                parts = [f"Good call, **{o.pillar}** is an important pillar to consider."]
                 if desc:
                     parts.append(desc)
                 parts.append(self._render_pillar_block(o.pillar))
-                parts.append('Want to add a point under it, or move on?')
+                parts.append('Want to add a bullet to this pillar, or ready to move on to the next one?')
                 msg = "\n\n".join(parts)
             else:
-                msg = (f"**{o.pillar}** is already part of the framework — we'll get to it."
+                msg = (f"**{o.pillar}** is already part of the framework, we'll get to it."
                       )
             self._emit(msg); yield msg; return
 
@@ -721,14 +722,14 @@ class ExplainableAgent(BaseAgent):
                             f"Say the word if you'd rather it sit there.")
                 else:
                     also = ""
-                msg = (f"Good point — I've added it under **{o.pillar}**.{also} "
+                msg = (f"Good point, I've added it under **{o.pillar}**.{also} "
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(o.pillar)}")
             else:
                 matched = (self._last_sub_add or {}).get("matched")
                 if matched:
                     msg = (f"That looks like it's already covered under **{o.pillar}** as "
-                           f"*{matched}*. Want to add it as a separate point anyway, or "
+                           f"*{matched}*. Want to add it as a separate pillar anyway, or "
                            f"leave it as is?")
                 else:
                     msg = (f"That's already noted under **{o.pillar}**.")
@@ -737,7 +738,7 @@ class ExplainableAgent(BaseAgent):
         if o.action == "added_new" and o.level == "pillar":
             st = self._last_surface or {}
             if st.get("is_new"):
-                msg = (f"Noted — I've added **{o.pillar}** as a separate area. "
+                msg = (f"Noted, I've added **{o.pillar}** as a separate pillar. "
                        f"What points would you like under it? Add them one at a time."
                       )
             else:
@@ -758,11 +759,11 @@ class ExplainableAgent(BaseAgent):
                     yield from self._stream_concept(is_first=False)
                 return
             if pa and pa.type == "remove_sub_bullet":
-                msg = (f"Done — I've removed that point from **{pa.pillar}**. "
+                msg = (f"Done, I've removed that bullet from **{pa.pillar}**. "
                        f"Here's how it looks now:\n\n"
                        f"{self._render_pillar_block(pa.pillar)}")
                 self._emit(msg); yield msg; return
-            yield f"Understood — removing **{o.target}** from the framework. Let's continue.\n\n"
+            yield f"Understood, removing **{o.target}** from the framework. Let's continue.\n\n"
             if self.current_pillar() is None:
                 yield from self._stream_summary()
             else:
@@ -771,10 +772,10 @@ class ExplainableAgent(BaseAgent):
 
         if stage == "abandoned":
             if pa and pa.type == "remove_sub_bullet":
-                msg = f"No problem — I'll keep that point in **{pa.pillar}**."
+                msg = f"No problem, I'll keep that bullet in **{pa.pillar}**."
             else:
                 tgt = pa.target if pa else o.target
-                msg = f"No problem — I'll keep **{tgt}** in the framework."
+                msg = f"No problem, I'll keep **{tgt}** in the framework."
             self._emit(msg); yield msg; return
 
         if stage == "nothing_to_remove":
@@ -787,8 +788,8 @@ class ExplainableAgent(BaseAgent):
             self._emit(msg); yield msg; return
 
         if stage == "needs_disambiguation":
-            msg = ("Which part would you like to remove — the current concept, or a "
-                   "specific point within it? You can name it.\n\n"
+            msg = ("Which part would you like to remove, the current pillar, or a "
+                   "specific bullet within it? You can name it.\n\n"
                    "*(Or say **never mind** to keep everything as is.)*")
             self._emit(msg); yield msg; return
 
@@ -796,7 +797,7 @@ class ExplainableAgent(BaseAgent):
             if was_pending:
                 if self._reply_is_question(user_input):
                     yield from self._stream_concept_qa(); return
-                msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
+                msg = f"No rush, reply **yes** to remove **{o.target}**, or **no** to keep it."
                 self._emit(msg); yield msg; return
             if self.pending and self.pending.type == "remove_sub_bullet":
                 yield from self._stream_sub_bullet_pushback(self.pending.pillar, o.target)
@@ -804,7 +805,7 @@ class ExplainableAgent(BaseAgent):
                 yield from self._stream_pushback("concept", o.target)
             return
 
-        msg = f"No rush — reply **yes** to remove **{o.target}**, or **no** to keep it."
+        msg = f"No rush, reply **yes** to remove **{o.target}**, or **no** to keep it."
         self._emit(msg); yield msg
 
     def render_question(self, user_input):
@@ -815,23 +816,23 @@ class ExplainableAgent(BaseAgent):
 
     def render_next_steps(self, o):
         if getattr(o, "revealed", False):
-            msg = (f"Good point — I've brought in **{o.suggested_item}**; "
+            msg = (f"Good point, I've brought in **{o.suggested_item}**; "
                    f"we'll cover it in the walkthrough.")
             self._emit(msg); yield msg; return
         if not getattr(o, "suggested_item", None):
-            msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "
+            msg = ("You've surfaced the main pillars I'd flag, feel free to revisit, add, "
                    "remove, or question any part of the framework.")
             self._emit(msg); yield msg; return
         why = (o.grounding or "").split("\n")[0].strip()
-        msg = (f"One area we haven't covered yet is **{o.suggested_item}**"
-               + (f" — {why}" if why else "")
+        msg = (f"One pillar we haven't covered yet is **{o.suggested_item}**"
+               + (f", {why}" if why else "")
                + ".\n\nIt's worth considering whether it applies to your case. "
                  "Shall I bring it in?")
         self._emit(msg); yield msg
 
     def render_fallback(self, outcome=None):
         if outcome is None:
-            msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "
+            msg = ("You've surfaced the main pillars I'd flag, feel free to revisit, add, "
                    "remove, or question any part of the framework.")
             self._emit(msg); yield msg; return
         if isinstance(outcome, handlers.AdvanceOutcome) and not self.walkthrough_done:
@@ -861,7 +862,7 @@ class ExplainableAgent(BaseAgent):
                    "click **‼️End Session** above. Or if there's still something you'd like to "
                    "**add**, **remove**, or **question**, go ahead.")
             self._emit(msg); yield msg; return
-        msg = ("I want to make sure I help with the right thing. You can **add** a point, "
+        msg = ("I want to make sure I help with the right thing. You can **add** a bullet, "
                "**remove** something, **question** any part of the framework, ask me to "
                "**suggest** what else to consider, or say **move on** to continue.")
         self._emit(msg); yield msg
@@ -883,7 +884,7 @@ class ExplainableAgent(BaseAgent):
             if c.lower() == name.lower():
                 return c
         fallback = self._current_concept() or name
-        logging.info(f"[RESOLVE] '{name}' not in walkthrough_concepts — fallback: '{fallback}'")
+        logging.info(f"[RESOLVE] '{name}' not in walkthrough_concepts, fallback: '{fallback}'")
         return fallback
 
     # Addition placement flow
@@ -986,7 +987,7 @@ class ExplainableAgent(BaseAgent):
                     f"{description}\n\n"
                     f"{bullet_lines}"
                     f"{sources_line}\n\n"
-                    f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+                    f"*Would you like to add, remove, or question anything here? If you are happy with this pillar, shall we move on to the next one? Feel free to raise anything you think is important to consider.*"
                 )
         else:
             swap    = kb.get_swap_concept()
@@ -995,11 +996,11 @@ class ExplainableAgent(BaseAgent):
             prefix = (
                 f"**{concept}**\n\n"
                 f"{bullet_lines}\n\n"
-                f"*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+                f"*Would you like to add, remove, or question anything here? If you are happy with this pillar, shall we move on to the next pillar? Feel free to raise anything you think is important to consider.*"
             )
 
         if is_first:
-            prefix = "Here is how I would structure the analysis:\n\n" + prefix
+            prefix = "Here is the first pillar I recommend. Do you want to include it in your framework plan?\n\n" + prefix
 
         # Yield static text, append to history
         self.history.append(
@@ -1029,10 +1030,10 @@ class ExplainableAgent(BaseAgent):
 
         closing = (
             "End with exactly:\n"
-            "*I can see why you'd question this — shall we include it or move on without it?*"
+            "*I can see why you'd question this shall we include it or move on without it?*"
             if on_swap else
             "End with exactly:\n"
-            "*Would you like to add, change, or question anything here? Or shall we move on to the next pillar? Feel free to raise any pillar you think is important.*"
+            "*Would you like to add, remove, or question anything here? If you are happy with this pillar, shall we move on to the next one? Feel free to raise anything you think is important to consider.*"
         )
 
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
@@ -1054,7 +1055,7 @@ class ExplainableAgent(BaseAgent):
         added_note = ""
         if just_added:
             added_note = (
-                "Good idea — I'll add **" + just_added
+                "Good idea, I'll add **" + just_added
                 + "** after we finish **" + concept + "**.\n\n"
             )
 
@@ -1077,7 +1078,7 @@ class ExplainableAgent(BaseAgent):
 
     def _stream_swap_caught(self):
         wrong = self.concept_swap.config["wrong_concept"]
-        msg = f"Understood — we'll set **{wrong}** aside and continue."
+        msg = f"Understood, we'll set **{wrong}** aside and continue."
         self._emit(msg)
         yield msg
 

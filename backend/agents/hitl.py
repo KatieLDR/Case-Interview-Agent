@@ -27,9 +27,9 @@ _BUTTON_ACTION_INTENTS = frozenset(
     intents.intent_for_button(b) for b in intents.BUTTON_INTENT
 ) - {None}
 _HITL_BUTTON_LABELS = {
-    "advance": "**✅ Include** or **❌ Skip** (to move past this pillar)",
-    "remove":  "**❌ Skip** (whole pillar) or **➖ Remove a point**",
-    "add":     "**➕ Add point to consider in this pillar**",
+    "advance": "**✅ Include this pillar** or **❌ Exclude this pillar**",
+    "remove":  "**❌ Exclude this pillar** or **➖ Remove a bullet**",
+    "add":     "**➕ Add a bullet**",
     "revisit": "**↩️ Add point to a past pillar**",
 }
 _DEICTIC_PARENTS = frozenset({
@@ -114,16 +114,16 @@ class HITLAgent(BaseAgent):
             f"---\n"
             f"Take your time to read it. Feel free to ask any clarifying questions "
             f"about the case before you begin.\n\n"
-            f"When you're ready, I'll walk you through a framework one concept at a "
-            f"time. For each one, ask me a question before deciding or "
-            f"you can **include** it, **skip** it, **add** your own points.\n\n"
+            f"When you're ready, I'll walk you through the framework one pillar at a "
+            f"time. For each pillar, you could ask me a question before deciding or "
+            f"**include** or **exclude** the pillar in your framework plan, **add** a bullet you come up with, or **remove** a bullet you think doesn't belong to the pillar.\n\n"
         )
 
     def get_pre_analysis_instruction(self) -> str:
         return (
-            "📖 *After you click the button below, I'll walk you through each concept "
-            "one at a time. Use **Include**, **Skip**, or **➕ Add** for each concept, "
-            "or type a question first.*"
+            "📖 *After you click the button below, I'll walk you through each pillar "
+            "one at a time. Use button to **Include**, **Exclude**, **➕ Add**, or **➖ Remove** to make your decision on each pillar. "
+            "If you have any questions, feel free to ask first.*"
         )
 
     # Phase transition
@@ -131,9 +131,9 @@ class HITLAgent(BaseAgent):
         self._start_main_phase_setup()
 
         yield (
-            "⚠️ Your goal is to build a structured plan for this case. "
-            "Review each factor below, share your thoughts, and you **should not only "
-            "read it** but also add or remove anything you think is missing."
+            "⚠️ Your goal is to build a structured framework plan for the GenAI rollout. "
+            "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
+            "It can only support you when you actively engage, **not just read through it.**"
         )
 
         yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
@@ -145,9 +145,9 @@ class HITLAgent(BaseAgent):
 
         yield (
             f"✅ **Let's begin.**\n\n"
-            f"I'll walk you through the framework one concept at a time. "
-            f"For each one, use the buttons to **include** or **skip** it, "
-            f"**➕ add** your own points (one at a time), or just type a question first.\n\n"
+            f"I'll walk you through the framework one pillar at a time. "
+            f"For each one, use the buttons to **include** or **exclude** from current framework, "
+            f"**➕ add** your own bullet (one at a time) or **➖ remove** any bullet I suggested, or just type a question first.\n\n"
             f"---\n\n"
         )
         yield from self._stream_concept(is_first=True)
@@ -192,7 +192,7 @@ class HITLAgent(BaseAgent):
         if reopened:
             yield "✅ Updated. Here's the framework as it stands now:\n\n"
         else:
-            yield "✅ We've covered all the concepts. Here's the framework as it stands:\n\n"
+            yield "✅ We've covered all the pillars. Here's the framework as it stands:\n\n"
         yield from self._stream_summary()
         invite = (
             "\n\nThat's the full framework as it stands — want to revisit any area to "
@@ -329,7 +329,7 @@ class HITLAgent(BaseAgent):
             concept = self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[SUB-POINT ADD] {user_input}")
             if self._is_multi_entry(user_input, concept):
-                msg = (f"Let's add one point at a time — which single point would you like "
+                msg = (f"Let's add one bullet at a time, which single bullet would you like "
                        f"under **{concept}**? (Click **✅ Done adding** when finished.)")
                 self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
                 log_agent_response(self.session_id, msg)
@@ -354,7 +354,7 @@ class HITLAgent(BaseAgent):
                 f"{lead}\n\n"
                 f"{rerender}\n\n"
                 f"Anything else to add under **{concept}**? "
-                f"Click **✅ Done adding** when you're finished."
+                f"When you're done (or have a question) click ✅ Done to exit editing mode. "
             )
             return
 
@@ -362,7 +362,7 @@ class HITLAgent(BaseAgent):
             target = self.revisit_target or self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[REVISIT ADD] {user_input}")
             if self._is_multi_entry(user_input, target):
-                msg = (f"Let's add one point at a time — which single point would you like "
+                msg = (f"Let's add one bullet at a time, which single bullet would you like "
                        f"to add to **{target}**? (Click **✅ Done adding** when finished.)")
                 self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
                 log_agent_response(self.session_id, msg)
@@ -412,7 +412,7 @@ class HITLAgent(BaseAgent):
             if pres.multi or concept is None:
                 # Keep it one pillar at a time — re-prompt for a single name.
                 self.awaiting_pillar_name = True
-                msg = ("Let's add one pillar at a time — which single pillar would "
+                msg = ("Let's add one pillar at a time, which single pillar would "
                        "you like to add?")
                 self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
                 log_agent_response(self.session_id, msg)
@@ -556,8 +556,8 @@ class HITLAgent(BaseAgent):
             else:
                 yield from self._stream_concept(is_first=False)
             return
-        msg = ("You've surfaced the main areas I'd flag — use the buttons to add, "
-               "skip, or revisit any part of the framework.")
+        msg = ("You've surfaced the main pillars I'd flag. Use the buttons to add, "
+               "remove, or revisit any part of the framework.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg
@@ -654,8 +654,8 @@ class HITLAgent(BaseAgent):
             if matched_withheld:
                 logging.info(f"[PROACTIVE] new pillar → withheld pillar '{matched_withheld}'")
                 yield (
-                    f"Good call — **{matched_withheld}** is an important pillar. "
-                    f"Let's add it.\n\n"
+                    f"Good call, **{matched_withheld}** is an important pillar. "
+                    f"Let's include it.\n\n"
                 )
             else:
                 logging.info(f"[PROACTIVE] new user concept: '{target}'")
@@ -711,7 +711,7 @@ class HITLAgent(BaseAgent):
         self.ack_index += 1
         yield ack + "\n\n"
         yield (f"Anything else you'd add to **{concept}**? "
-               f"Say **move on** when you're ready for the next area.")
+               f"Say **move on** when you're ready for the next pillar.")
 
     def _stream_user_contributed_concept(self, concept: str):
         self.walkthrough_concepts.insert(self.walkthrough_index, concept)
@@ -747,7 +747,7 @@ class HITLAgent(BaseAgent):
         pillar = self._normalize_pillar(matched_concept)
         stored, is_new = self._store_sub_point(pillar, sub_point, source="user_elicited")
         if is_new:
-            yield f"Got it — adding that under **{pillar}**:\n- {stored}\n\n"
+            yield f"Got it! Adding that under **{pillar}**:\n- {stored}\n\n"
         else:
             yield f"That's already covered under **{pillar}** as *{stored}*.\n\n"
 
@@ -785,7 +785,7 @@ class HITLAgent(BaseAgent):
 
             prefix = f"**{concept}**\n{display}"
             if is_first:
-                prefix = "💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is how I would structure this analysis:\n\n" + prefix
+                prefix = "💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is the first pillar I recommend. Do you want to include it in your framework plan?\n\n" + prefix
 
             self.history.append(
                 types.Content(role="user",
@@ -807,7 +807,7 @@ class HITLAgent(BaseAgent):
             yield prefix
             return
 
-        heading = "Here is how I would structure this analysis:\n\n" if is_first else ""
+        heading = "Here is the first pillar I recommend. Do you want to include it in your framework plan?\n\n" if is_first else ""
         heading += f"**{concept}**\n"
         yield heading
 
@@ -899,8 +899,8 @@ class HITLAgent(BaseAgent):
         )
         if self.should_show_buttons():
             yield (
-                "\n\n*Would you like to **include** or **skip** this, "
-                "or **➕ add** a point? Just use the buttons below.*"
+                "\n\n*Would you like to **include** or **exclude** this, "
+                "or **➕ add** a bullet? Just use the buttons below.*"
             )
     def _concept_grounding(self, concept: str) -> str:
         return grounding.ground_pillar(concept)
@@ -1029,8 +1029,8 @@ class HITLAgent(BaseAgent):
         if idx is not None and idx < self.walkthrough_index:
             logging.info(f"[PROACTIVE] sub-point of already-covered '{pillar}'")
             self._store_sub_point(pillar, user_text, source="user_elicited", resolved=bullet)
-            yield (f"That point{pt} is part of **{pillar}**{why_txt} "
-                   f"We've already covered **{pillar}** — I've added it there.\n\n")
+            yield (f"That bullet{pt} is part of **{pillar}**{why_txt} "
+                   f"We've already covered **{pillar}**, I've added it there.\n\n")
             yield from self._stream_proactive_prompt()
             return
         if idx is None:
@@ -1047,7 +1047,7 @@ class HITLAgent(BaseAgent):
         self.navigated_pillars.add(pillar.lower())
         self._store_sub_point(pillar, user_text, source="user_elicited", resolved=bullet)
         logging.info(f"[PROACTIVE] sub-point '{point}' -> navigate to '{pillar}'")
-        yield (f"That point{pt} belongs under **{pillar}**{why_txt} "
+        yield (f"That bullet{pt} belongs under **{pillar}**{why_txt} "
                f"Let's look at **{pillar}**.\n\n")
         yield from self._stream_concept(is_first=False)
 
@@ -1087,7 +1087,7 @@ class HITLAgent(BaseAgent):
                 # framework so _revisit_pillar_full can navigate to it.
                 self.walkthrough_concepts.append(pillar)
             self._store_sub_point(pillar, user_input, source="user_elicited", resolved=bullet)
-            yield f"That point{pt} belongs under **{pillar}**{why_txt}\n\n"
+            yield f"That bullet{pt} belongs under **{pillar}**{why_txt}\n\n"
             yield from self._revisit_pillar_full(pillar, answer_question=is_question)
             return
 
@@ -1224,12 +1224,12 @@ class HITLAgent(BaseAgent):
         logging.info(f"[REJECT] parked pending concept='{concept}' (swap={is_swap}, req_just={req})")
         if req:
             yield (
-                f"Before we skip **{concept}** — what's your reasoning for leaving it "
+                f"Before we exclude **{concept}** — what's your reasoning for leaving it "
                 f"out? A sentence is plenty."
             )
         else:
             yield (
-                f"Are you sure you want to skip **{concept}**?\n\n"
+                f"Are you sure you want to exclude **{concept}**?\n\n"
                 f"*Use the buttons below to confirm.*"
             )
 
@@ -1259,24 +1259,24 @@ class HITLAgent(BaseAgent):
             if pa.is_swap:
                 logging.info(f"[SWAP] detected via Reject button — concept='{pa.target}'")
                 self.walkthrough_index += 1
-                yield f"Got it — removing **{pa.target}** from the framework.\n\n"
+                yield f"Got it! Removing **{pa.target}** from the framework.\n\n"
                 yield from self._after_removal_continue(pa.target, was_reject=True)
                 return
             if pa.type == "remove_sub_bullet":
                 self._apply_sub_bullet_removal(pa.pillar, pa.target)
                 logging.info(f"[REMOVE POINT CONFIRMED] '{pa.target}' from '{pa.pillar}'")
-                yield f"Done — removed that point from **{pa.pillar}**.\n\n"
+                yield f"Done — removed that bullet from **{pa.pillar}**.\n\n"
                 return
             logging.info(f"[REJECT CONFIRMED] concept='{pa.target}'")
             self.walkthrough_index += 1
-            yield f"Got it — removing **{pa.target}** from the framework.\n\n"
+            yield f"Got it! Removing **{pa.target}** from the framework.\n\n"
             yield from self._after_removal_continue(pa.target, was_reject=True)
             return
 
         if stage == "abandoned":
             if pa.type == "remove_sub_bullet":
                 logging.info(f"[REMOVE POINT CANCELLED] keeping point under '{pa.pillar}'")
-                yield f"No problem — keeping that point in **{pa.pillar}**.\n\n"
+                yield f"No problem — keeping that bullet in **{pa.pillar}**.\n\n"
                 return
             if pa.target and pa.target not in self.approved_concepts:
                 self.approved_concepts.append(pa.target)
@@ -1355,7 +1355,7 @@ class HITLAgent(BaseAgent):
         self.revisit_target       = None
         concept = self._current_concept() or "this concept"
         logging.info(f"[ADD] add-mode closed for concept='{concept}'")
-        yield f"Got it. Back to **{concept}** — include it, skip it, or add more.\n\n"
+        yield f"Got it. Back to **{concept}**, do you want to include it or exclude it from current plan?\n\n Feel free to discuss your concerns regarding the pillar or bullet .\n\n"
 
     def on_remove_point(self, bullet: str):
         concept = self._current_concept()
@@ -1366,7 +1366,7 @@ class HITLAgent(BaseAgent):
             pillar=concept, requires_justification=False)
         logging.info(f"[REMOVE POINT] parked: '{bullet}' under '{concept}'")
         yield (
-            f"Remove this point from **{concept}**?\n\n- {bullet}\n\n"
+            f"Remove this bullet from **{concept}**?\n\n- {bullet}\n\n"
             f"*Use the buttons below to confirm.*"
         )
 
