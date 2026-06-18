@@ -195,7 +195,7 @@ class HITLAgent(BaseAgent):
             yield "✅ We've covered all the pillars. Here's the framework as it stands:\n\n"
         yield from self._stream_summary()
         invite = (
-            "\n\nThat's the full framework as it stands — want to revisit any area to "
+            "\n\nThat's the full framework as it stands — want to revisit any pillar to "
             "add, change, or question something? Just mention the pillar name. Otherwise, click **‼️End Session** "
             "to finish. **Note: this cannot be undone**.\n\n"
         )
@@ -591,8 +591,8 @@ class HITLAgent(BaseAgent):
     def _nudge_multi(self):
         """A pasted multi-point message: HITL is button-driven, so add points one at a
         time with the ➕ Add button rather than running EXP/BB's freetext walk."""
-        msg = ("Looks like a few points at once — in this mode we add them **one at a "
-               "time**. **➕ Add point to consider in this pillar** adds under the pillar "
+        msg = ("Looks like a few bullets at once — in this mode we add them **one at a "
+               "time**. **➕ Add bullet to consider in this pillar** adds under the pillar "
                "we're on now; to add elsewhere, jump there first or use **➕ Add my own "
                "pillar** at the next prompt.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
@@ -1265,7 +1265,7 @@ class HITLAgent(BaseAgent):
             if pa.type == "remove_sub_bullet":
                 self._apply_sub_bullet_removal(pa.pillar, pa.target)
                 logging.info(f"[REMOVE POINT CONFIRMED] '{pa.target}' from '{pa.pillar}'")
-                yield f"Done — removed that bullet from **{pa.pillar}**.\n\n"
+                yield f"Done! Removed that bullet from **{pa.pillar}**.\n\n"
                 return
             logging.info(f"[REJECT CONFIRMED] concept='{pa.target}'")
             self.walkthrough_index += 1
@@ -1344,8 +1344,8 @@ class HITLAgent(BaseAgent):
         self.awaiting_sub_point = True
         logging.info(f"[ADD] add-mode opened for concept='{concept}'")
         yield (
-            f"What point would you like to add under **{concept}**? "
-            f"You can add as many as you like — just type each one, and "
+            f"What bullet would you like to add under **{concept}**? "
+            f"You can add as many as you like, just type each one, and "
             f"click **✅ Done adding** when you're finished."
         )
 
@@ -1391,7 +1391,7 @@ class HITLAgent(BaseAgent):
         self.awaiting_revisit_add = True
         logging.info(f"[REVISIT] add-mode opened for past pillar='{self.revisit_target}'")
         yield (
-            f"Sure — what point would you like to add to **{self.revisit_target}**? "
+            f"Sure! What bullet would you like to add to **{self.revisit_target}**? "
             f"Type it, and click **✅ Done adding** when you're finished."
         )
 

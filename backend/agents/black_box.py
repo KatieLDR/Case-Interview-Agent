@@ -98,7 +98,7 @@ class BlackBoxAgent(BaseAgent):
 
     def get_pre_analysis_instruction(self) -> str:
         return (
-            "📖 *After you click the button below, read each concept carefully — "
+            "📖 *After you click the button below, read each pillar carefully, "
             "add any ideas or questions that come to mind as we go.*"
         )
 
@@ -119,8 +119,8 @@ class BlackBoxAgent(BaseAgent):
 
         yield (
             "\n\n---\n\n"
-            "📖 *Now it's your turn — do you have any questions about the framework "
-            "presented? Add, remove, or update anything as you like. Once you've shared "
+            "📖 *Now it's your turn, do you have any questions about the framework "
+            "presented? Add, remove anything as you like. Once you've shared "
             "your first thoughts, an **‼️End Session** button will appear so you can "
             "finish whenever you're ready.*"
         )
@@ -271,21 +271,21 @@ class BlackBoxAgent(BaseAgent):
                             "stored": stored, "status": status}
         if kind == "sub_bullet":
             if status == "presented":
-                msg = (f"I'll add *{stored}* under **{pillar}** — reply **yes** to confirm, or "
-                       f"tell me a different wording or area.")
+                msg = (f"I'll add *{stored}* under **{pillar}**, reply **yes** to confirm, or "
+                       f"tell me a different wording or pillar.")
             elif status == "withheld":
                 msg = (f"It sounds like that belongs under **{pillar}**, want me to bring in "
-                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different area)*")
+                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different pillar)*")
             else:  # novel — suggest, but the user decides wording / where
                 msg = (f"I don't see **{pillar}** in the framework yet — I'd add *{stored}* under a "
-                       f"new pillar **{pillar}**. Reply **yes**, name an existing area to use "
+                       f"new pillar **{pillar}**. Reply **yes**, name an existing pillar to use "
                        f"instead, or reword.")
         elif status == "withheld":
             msg = (f"**{pillar}** is part of the framework but not shown yet — want me to "
                    f"bring it in? *(yes / no)*")
         else:  # novel pillar
             msg = (f"I don't see **{pillar}** in the framework yet — I'd add it as a new pillar. "
-                   f"Reply **yes**, name an existing area instead, or give a different name.")
+                   f"Reply **yes**, name an existing pillar instead, or give a different name.")
         self._emit(msg); yield msg
 
     def _resolve_add_confirm(self, user_input: str, res):
@@ -440,7 +440,7 @@ class BlackBoxAgent(BaseAgent):
 
     def render_fallback(self, outcome=None):
         if outcome is None:
-            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
+            msg = ("You've surfaced the main pillars I'd flag, feel free to add, "
                    "remove, or question any part of what's here.")
             self._emit(msg); yield msg; return
         yield from self._ack_no_reprint()
@@ -540,7 +540,7 @@ class BlackBoxAgent(BaseAgent):
             st = self._last_surface or {}
             if st.get("is_new"):
                 yield from self._yield_rerender(
-                    f"Added **{o.pillar}** as a new area. What points would you "
+                    f"Added **{o.pillar}** as a new pillar. What bullets would you "
                     f"like under it? Add them one at a time.\n\n")
             else:
                 yield from self._yield_rerender(f"**{o.pillar}** is already in the framework.\n\n")
@@ -557,7 +557,7 @@ class BlackBoxAgent(BaseAgent):
                 return
             if pa and pa.type == "remove_sub_bullet":
                 yield from self._yield_rerender(
-                    f"Done — I've removed that point from **{pa.pillar}**.\n\n")
+                    f"Done — I've removed that bullet from **{pa.pillar}**.\n\n")
                 return
             yield from self._yield_rerender(f"Done — I've removed **{o.target}**.\n\n")
             return
@@ -610,7 +610,7 @@ class BlackBoxAgent(BaseAgent):
             yield from self._yield_rerender(f"Good point — I've included **{o.suggested_item}**.\n\n")
             return
         if not getattr(o, "suggested_item", None):
-            msg = ("You've surfaced the main areas I'd flag — feel free to add, "
+            msg = ("You've surfaced the main pillars I'd flag — feel free to add, "
                    "remove, or question any part of what's here.")
             self._emit(msg); yield msg; return
         why = (o.grounding or "").split("\n")[0].strip()

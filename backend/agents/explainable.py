@@ -112,13 +112,13 @@ class ExplainableAgent(BaseAgent):
             f"---\n"
             f"Take your time to read it. Feel free to ask any clarifying questions "
             f"before you begin. When you're ready, I'll walk you through the framework "
-            f"one concept at a time, you can ask questions at each step.\n\n"
+            f"one pillar at a time, you can ask questions at each step.\n\n"
         )
 
     def get_pre_analysis_instruction(self) -> str:
         return (
             "📖 *After you click the button below, I'll walk you through "
-            "each concept one at a time, you can ask questions or suggest "
+            "each pillar one at a time, you can ask questions or suggest "
             "changes at any step.*"
         )
 
@@ -599,7 +599,7 @@ class ExplainableAgent(BaseAgent):
         return (self.swap_presented and not self.concept_swap.is_detected
                 and self._on_swap_now())
 
-    _NEXT_AFFORD = ("\n\n*Add a point here, raise a new area, or question anything \u2014 "
+    _NEXT_AFFORD = ("\n\n*Add a bullet here, raise a new area, or question anything \u2014 "
                     "or say \"next\" to move on.*")
 
     def _walk_done_render(self, touched):
@@ -659,10 +659,10 @@ class ExplainableAgent(BaseAgent):
         if o.action == "ask_placement":
             cur = self.current_pillar()
             if cur:
-                msg = (f"Where should **{o.text}** go, its own pillar, or a point under "
+                msg = (f"Where should **{o.text}** go, its own pillar, or a bullet under "
                        f"**{cur}**? *(Or name another pillar.)*")
             else:
-                msg = (f"Where should **{o.text}** go, its own pillar, or a point under one "
+                msg = (f"Where should **{o.text}** go, its own pillar, or a bullet under one "
                        f"of the existing pillars? *(If under one, which?)*")
             self._emit(msg); yield msg; return
 
@@ -739,7 +739,7 @@ class ExplainableAgent(BaseAgent):
             st = self._last_surface or {}
             if st.get("is_new"):
                 msg = (f"Noted, I've added **{o.pillar}** as a separate pillar. "
-                       f"What points would you like under it? Add them one at a time."
+                       f"What bullets would you like under it? Add them one at a time."
                       )
             else:
                 msg = f"**{o.pillar}** is already part of the framework."
