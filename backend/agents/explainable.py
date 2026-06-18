@@ -88,6 +88,7 @@ class ExplainableAgent(BaseAgent):
         self.swap_position        = 0
         self._seen_concepts       = set()
         self.user_added_pillars = []
+        self.pending_add          = None
 
         self.history = [
             types.Content(
@@ -305,6 +306,13 @@ class ExplainableAgent(BaseAgent):
             yield from self._resolve_pillar_offer(user_input)
             return
 
+        # Confirm-before-commit: an open add preview takes priority over routing.
+        if self.pending_add is not None:
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._resolve_add_confirm(user_input)
+            return
+
         _cur    = self.current_pillar() or "(none)"
         _pillar = next((p for p in kb.get_all_pillars()
                         if p["name"].lower() == _cur.lower()), None)
@@ -351,6 +359,15 @@ class ExplainableAgent(BaseAgent):
                 else:
                     yield from self._stream_concept(is_first=False)
                 return
+
+        # Confirm-before-commit: a single add is previewed first; commit on "yes".
+        if (intent == "add" and not res.multi and self.pending is None
+                and self.pending_suggestion is None
+                and getattr(self, "pending_placement", None) is None):
+            log_user_message(self.session_id, user_input)
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+            yield from self._preview_add(res, user_input)
+            return
 
         # Log + append the user turn
         log_user_message(self.session_id, user_input)
@@ -414,23 +431,48 @@ class ExplainableAgent(BaseAgent):
         self.user_added_pillars.append(name)
         self._last_surface = {"name": name, "is_new": True}
 
-    def add_sub_point(self, pillar: str, text: str) -> None:
-        match = self._match_key_question(text, pillar)
-        if match:
-            stored = match["question"]
+    def _surface_at_current(self, name: str) -> None:
+        """Bring a withheld/novel pillar in AT the current walkthrough position (vs
+        appending to the end). It then sits inside presented_pillars() — so counting
+        reads its bullets as shown — and is marked seen so it isn't re-walked at the
+        end. The current concept is unchanged."""
+        if (name.lower() in [c.lower() for c in self.walkthrough_concepts]
+                or name.lower() in [p.lower() for p in self.user_added_pillars]):
+            self._last_surface = {"name": name, "is_new": False}
+            return
+        idx = self.walkthrough_index
+        self.walkthrough_concepts.insert(idx, name)
+        if idx <= self.swap_position:
+            self.swap_position += 1
+        self.walkthrough_index = idx + 1
+        self.user_added_pillars.append(name)
+        self._seen_concepts.add(name.lower())
+        self._last_surface = {"name": name, "is_new": True}
+
+    def add_sub_point(self, pillar: str, text: str, *,
+                      dry_run: bool = False, resolved: str | None = None):
+        if resolved is not None:
+            stored = resolved
         else:
-            cb = matching.canonical_add_bullet(text, refs=True)
-            stored = cb if cb else self._format_sub_bullet(text)
+            match = self._match_key_question(text, pillar)
+            if match:
+                stored = match["question"]
+            else:
+                cb = matching.canonical_add_bullet(text, refs=True)
+                stored = cb if cb else self._format_sub_bullet(text)
         kbp = next((p for p in kb.get_all_pillars()
                     if p["name"].lower() == pillar.lower()), None)
         _norm_ref = lambda b: _INLINE_REF_RE.sub("", b).strip().lower()
         static_hit = next((b for b in (kbp.get("sub_bullets", []) if kbp else [])
                            if _norm_ref(b) == _norm_ref(stored)), None)
         already_static = static_hit is not None
-        self.user_sub_points.setdefault(pillar, [])
+        existing = self.user_sub_points.get(pillar, [])
         is_new = (not already_static
-                  and stored not in self.user_sub_points[pillar]
+                  and stored not in existing
                   and not self._is_excluded_bullet(pillar, stored))
+        if dry_run:
+            return stored, is_new
+        self.user_sub_points.setdefault(pillar, [])
         if is_new:
             self.user_sub_points[pillar].append(stored)
         matched = None
@@ -440,6 +482,107 @@ class ExplainableAgent(BaseAgent):
             matched = _INLINE_REF_RE.sub("", matched).strip()
         self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text,
                               "is_new": is_new, "matched": matched}
+        return stored, is_new
+
+    # Confirm-before-commit: EXP previews every add and only commits + counts on "yes".
+    def _resolve_add_dest(self, text: str, parent: str | None):
+        """Read-only: where would this add land? Returns
+        (kind, pillar, stored, is_dup, status); status is presented/withheld/novel."""
+        presented = {n.lower() for n in self.presented_pillars()}
+        kb_names  = {p["name"].lower() for p in kb.get_all_pillars()}
+
+        def _status(name: str) -> str:
+            n = (name or "").lower()
+            return "presented" if n in presented else ("withheld" if n in kb_names else "novel")
+
+        if parent:
+            matched, _ = matching.match_pillar(parent)
+            pillar     = matched or matching.normalize_name(parent)
+            status     = _status(pillar)
+            stored, is_new = self.add_sub_point(pillar, text, dry_run=True)
+            return "sub_bullet", pillar, stored, (not is_new and status == "presented"), status
+        km = matching.locate(text)
+        if km.level == "concept" and km.pillar:
+            status = _status(km.pillar)
+            stored, is_new = self.add_sub_point(km.pillar, text, dry_run=True)
+            return "sub_bullet", km.pillar, stored, (not is_new and status == "presented"), status
+        if km.level == "pillar" and km.pillar:
+            return "pillar", km.pillar, None, (km.pillar.lower() in presented), _status(km.pillar)
+        name = matching.normalize_name(text)
+        return "pillar", name, None, (name.lower() in presented), _status(name)
+
+    def _preview_add(self, res, user_input: str):
+        text   = res.detail or user_input
+        parent = (res.parent if (res.parent and handlers._parent_is_explicit(res.parent, user_input))
+                  else None)
+        kind, pillar, stored, is_dup, status = self._resolve_add_dest(text, parent)
+        if is_dup:
+            msg = f"That's already covered under **{pillar}** as *{stored}*."
+            self._emit(msg); yield msg; return
+        self.pending_add = {"kind": kind, "pillar": pillar, "raw": text,
+                            "stored": stored, "status": status}
+        if kind == "sub_bullet":
+            if status == "presented":
+                msg = (f"I'll add *{stored}* under **{pillar}** — reply **yes** to confirm, or "
+                       f"tell me a different wording or area.")
+            elif status == "withheld":
+                msg = (f"It sounds like that belongs under **{pillar}** — want me to bring in "
+                       f"**{pillar}** and add *{stored}* there? *(yes — or name a different area)*")
+            else:  # novel — suggest, but the user decides wording / where
+                msg = (f"I don't see **{pillar}** in the framework yet — I'd add *{stored}* under a "
+                       f"new pillar **{pillar}**. Reply **yes**, name an existing area to use "
+                       f"instead, or reword.")
+        elif status == "withheld":
+            msg = (f"**{pillar}** is part of the framework but not shown yet — want me to "
+                   f"bring it in? *(yes / no)*")
+        else:  # novel pillar
+            msg = (f"I don't see **{pillar}** in the framework yet — I'd add it as a new pillar. "
+                   f"Reply **yes**, name an existing area instead, or give a different name.")
+        self._emit(msg); yield msg
+
+    def _resolve_add_confirm(self, user_input: str):
+        pa       = self.pending_add
+        decision = handlers._classify_confirmation(user_input)
+        if decision == "confirm":
+            self.pending_add = None
+            counted = self._counts_as_new(pa["pillar"], pa.get("stored") or pa["raw"])
+            if pa["kind"] == "pillar":
+                self._surface_at_current(pa["pillar"])
+                if counted and (self._last_surface or {}).get("is_new"):
+                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
+                              level="pillar", counted=True, source="user_spontaneous"),
+                              self._evctx(), _sink)
+                lead = (f"Brought in **{pa['pillar']}**." if pa.get("status") == "withheld"
+                        else f"Noted — I've added **{pa['pillar']}** as a separate area.")
+                msg = lead + "\n\n" + self._render_pillar_block(pa["pillar"])
+            else:
+                if pa.get("status") != "presented":
+                    self._surface_at_current(pa["pillar"])
+                stored, _ = self.add_sub_point(pa["pillar"], pa["raw"], resolved=pa.get("stored"))
+                if counted:
+                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
+                              level="sub_bullet", counted=True, text=stored,
+                              source="user_spontaneous"), self._evctx(), _sink)
+                lead = (f"Brought in **{pa['pillar']}** —" if pa.get("status") == "withheld"
+                        else f"Good point — I've added it under **{pa['pillar']}**.")
+                msg = lead + " Here's how it looks now:\n\n" + self._render_pillar_block(pa["pillar"])
+            self._emit(msg); yield msg
+            return
+        if decision == "decline":
+            self.pending_add = None
+            msg = "No problem — I've left it out."
+            self._emit(msg); yield msg
+            return
+        # Anything else is an edit: re-classify the reply as the revised add and re-preview.
+        self.pending_add = None
+        new_res = intents.classify_intent(
+            user_input,
+            current_pillar=self.current_pillar() or "(none)",
+            current_bullets="(none)",
+            walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+            last_agent=self._last_agent_message() or "(nothing yet)",
+        )
+        yield from self._preview_add(new_res, user_input)
 
     # swap channel
     def _on_swap_now(self) -> bool:
@@ -538,15 +681,15 @@ class ExplainableAgent(BaseAgent):
 
         if o.action == "duplicate":
             if o.level == "pillar" and o.pillar:
-                msg = f"**{o.pillar}** is already part of the framework." + self._NEXT_AFFORD
+                msg = f"**{o.pillar}** is already part of the framework."
             elif o.pillar and o.matched_text:
                 msg = (f"That's already covered under **{o.pillar}** as *{o.matched_text}*. "
-                       f"Want to adjust it?" + self._NEXT_AFFORD)
+                       f"Want to adjust it?")
             elif o.pillar:
                 ref = o.matched_text or o.text
                 msg = ((f"That's already covered under **{o.pillar}** as *{ref}*."
                         if ref else f"That's already covered under **{o.pillar}**.")
-                       + self._NEXT_AFFORD)
+                      )
             else:
                 msg = "That's already in the framework."
             self._emit(msg); yield msg; return
@@ -566,7 +709,7 @@ class ExplainableAgent(BaseAgent):
                 msg = "\n\n".join(parts)
             else:
                 msg = (f"**{o.pillar}** is already part of the framework — we'll get to it."
-                       + self._NEXT_AFFORD)
+                      )
             self._emit(msg); yield msg; return
 
         if o.action == "added_new" and o.level == "sub_bullet":
@@ -580,15 +723,15 @@ class ExplainableAgent(BaseAgent):
                     also = ""
                 msg = (f"Good point — I've added it under **{o.pillar}**.{also} "
                        f"Here's how it looks now:\n\n"
-                       f"{self._render_pillar_block(o.pillar)}" + self._NEXT_AFFORD)
+                       f"{self._render_pillar_block(o.pillar)}")
             else:
                 matched = (self._last_sub_add or {}).get("matched")
                 if matched:
                     msg = (f"That looks like it's already covered under **{o.pillar}** as "
                            f"*{matched}*. Want to add it as a separate point anyway, or "
-                           f"leave it as is?" + self._NEXT_AFFORD)
+                           f"leave it as is?")
                 else:
-                    msg = (f"That's already noted under **{o.pillar}**." + self._NEXT_AFFORD)
+                    msg = (f"That's already noted under **{o.pillar}**.")
             self._emit(msg); yield msg; return
 
         if o.action == "added_new" and o.level == "pillar":
@@ -596,7 +739,7 @@ class ExplainableAgent(BaseAgent):
             if st.get("is_new"):
                 msg = (f"Noted — I've added **{o.pillar}** as a separate area. "
                        f"What points would you like under it? Add them one at a time."
-                       + self._NEXT_AFFORD)
+                      )
             else:
                 msg = f"**{o.pillar}** is already part of the framework."
             self._emit(msg); yield msg; return
@@ -617,7 +760,7 @@ class ExplainableAgent(BaseAgent):
             if pa and pa.type == "remove_sub_bullet":
                 msg = (f"Done — I've removed that point from **{pa.pillar}**. "
                        f"Here's how it looks now:\n\n"
-                       f"{self._render_pillar_block(pa.pillar)}" + self._NEXT_AFFORD)
+                       f"{self._render_pillar_block(pa.pillar)}")
                 self._emit(msg); yield msg; return
             yield f"Understood — removing **{o.target}** from the framework. Let's continue.\n\n"
             if self.current_pillar() is None:
@@ -628,10 +771,10 @@ class ExplainableAgent(BaseAgent):
 
         if stage == "abandoned":
             if pa and pa.type == "remove_sub_bullet":
-                msg = f"No problem — I'll keep that point in **{pa.pillar}**." + self._NEXT_AFFORD
+                msg = f"No problem — I'll keep that point in **{pa.pillar}**."
             else:
                 tgt = pa.target if pa else o.target
-                msg = f"No problem — I'll keep **{tgt}** in the framework." + self._NEXT_AFFORD
+                msg = f"No problem — I'll keep **{tgt}** in the framework."
             self._emit(msg); yield msg; return
 
         if stage == "nothing_to_remove":
@@ -673,7 +816,7 @@ class ExplainableAgent(BaseAgent):
     def render_next_steps(self, o):
         if getattr(o, "revealed", False):
             msg = (f"Good point — I've brought in **{o.suggested_item}**; "
-                   f"we'll cover it in the walkthrough." + self._NEXT_AFFORD)
+                   f"we'll cover it in the walkthrough.")
             self._emit(msg); yield msg; return
         if not getattr(o, "suggested_item", None):
             msg = ("You've surfaced the main areas I'd flag — feel free to revisit, add, "

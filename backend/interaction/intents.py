@@ -85,6 +85,28 @@ def _split_inline(s: str) -> list[str]:
     return [p.strip() for p in _INLINE_SPLIT_RE.split(s or "") if p.strip()]
 
 
+# "(add) a new pillar/area NAME with/containing/: point[, point]" — a new pillar the
+# user names together with its point(s). Deterministic floor so this always routes
+# through the pillar-offer-then-walk flow (same as any multi-point add), even with one
+# point. Requires the pillar/area keyword so a plain "add X with Y" never misfires.
+_PILLAR_CREATE_RE = re.compile(
+    r"^\s*(?:add|create|include|make|set\s+up)?\s*(?:a|an|the)?\s*(?:new|another)?\s*"
+    r"(?:pillar|area|section|category)\s+(?P<name>.+?)"
+    r"(?:\s+(?:with|containing|including|that\s+has|holding|covering)\s+|\s*:\s*)"
+    r"(?P<items>.+)$",
+    re.I)
+
+
+def _pillar_creation(text: str) -> tuple[str | None, list[str]]:
+    """(pillar_name, items) for 'add a new pillar X with a, b', else (None, [])."""
+    m = _PILLAR_CREATE_RE.match((text or "").strip())
+    if not m:
+        return None, []
+    name  = m.group("name").strip().strip(":,-• ").strip()
+    items = _split_inline(m.group("items"))
+    return (name, items) if (name and items) else (None, [])
+
+
 def _looks_like_point(line: str) -> bool:
     t = (line or "").strip()
     return bool(t) and not t.endswith("?") and len(t.split()) <= 10
@@ -199,9 +221,12 @@ def classify_intent(
     if intent != "add" or _is_filler_detail(parent):
         parent = None
 
-    # Multi is only meaningful for an add with ≥2 separable items; otherwise drop it
-    # (and its pillar hint) so downstream never treats a single point as a block.
-    multi = multi_raw and intent == "add" and len(items) >= 2
+    # Multi is meaningful for an add with ≥2 separable items, OR a NEW pillar named
+    # by the user together with ≥1 point to put under it ("add a pillar X with Y") —
+    # both go through the same pillar-offer-then-walk flow. Otherwise drop the hints
+    # so downstream never treats a single point as a block.
+    multi = multi_raw and intent == "add" and (
+        len(items) >= 2 or (bool(pillar_name) and len(items) >= 1))
     if not multi:
         items = []
         pillar_name = None
@@ -216,6 +241,17 @@ def classify_intent(
                 items = s_items
             if not pillar_name and s_header:
                 pillar_name = s_header
+
+    # Structural floor: an explicit "new pillar X with point(s)" always fires multi
+    # with X as the pillar and the listed point(s) as items — even a single point.
+    if intent != "remove" and not multi:
+        p_name, p_items = _pillar_creation(user_text)
+        if p_name and p_items:
+            intent, multi = "add", True
+            pillar_name = p_name
+            items = p_items
+            if not detail:
+                detail = p_items[0]
 
     logging.info(f"[INTENT] '{user_text[:60]}' -> {intent} "
                  f"(detail={detail!r}, parent={parent!r}, conf={confidence:.2f}, "

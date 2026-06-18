@@ -77,21 +77,28 @@ KEY DISAMBIGUATION:
 - doubt vs remove: doubt is hesitation with NO command; remove is a clear instruction.
 
 ─── MULTIPLE ADDITIONS (safeguard) ────────────────────────────────────────────
-Also detect when an ADD message proposes MORE THAN ONE separable thing to add, so
-the session can take them one at a time.
-- "multi": true ONLY when intent is "add" AND the message lists ≥2 DISTINCT,
-  separable additions. false in every other case.
+Also detect when an ADD message proposes MORE THAN ONE separable thing to add, OR
+proposes a NEW area/pillar by name together with point(s) to put under it, so the
+session can take them one at a time.
+- "multi": true when intent is "add" AND EITHER (a) the message lists ≥2 DISTINCT,
+  separable additions, OR (b) the user proposes a NEW area/pillar BY NAME with one or
+  more points under it ("add a new pillar Sustainability with carbon footprint
+  tracking", "create a Risk area covering compliance and audits", "new section ESG:
+  emissions") — true even when there is only ONE point. false in every other case.
 - A fixed multi-word term is ONE item, never split it: "research and development",
   "go-to-market", "profit and loss", "mergers and acquisitions", "health and safety",
   "look and feel". A clause that merely ELABORATES one idea is ONE item:
   "retention, especially among new users" = 1 item.
-- "items": the distinct additions in the user's own short wording, e.g.
-  ["culture fit", "culture alignment"]. [] when multi is false.
-- "pillar": when the items clearly belong under ONE area — named explicitly as a
-  header (e.g. "Culture: culture fit, alignment" -> "Culture"; a bare line "Risk"
-  above bulleted points -> "Risk"), OR obviously a single shared theme — give that
-  area's name. null when the items do NOT cohere under one area, and null for any
-  non-add or non-multi message. Do NOT invent an area for unrelated items.
+- "items": the distinct additions / the point(s) under the named pillar, in the user's
+  own short wording, e.g. ["culture fit", "culture alignment"] or
+  ["carbon footprint tracking"]. [] when multi is false.
+- "pillar": the area the items belong under — named explicitly as a header
+  ("Culture: culture fit, alignment" -> "Culture"; a bare line "Risk" above bullets ->
+  "Risk"), as a NEW pillar the user is creating ("add a new pillar Sustainability
+  with …" -> "Sustainability" — the NAME ONLY, never include "a new pillar"/"with …"),
+  OR an obvious single shared theme. null when the items do NOT cohere under one area,
+  and null for any non-add or non-multi message. Do NOT invent an area for unrelated
+  items.
 
 ─── CURRENT PILLAR ───────────────────────────────────────────────────────────
 {current_pillar}

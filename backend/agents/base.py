@@ -132,6 +132,28 @@ class BaseAgent:
         snap[kind].add(key)
         return True
 
+    def _counts_as_new(self, pillar: str, stored: str) -> bool:
+        """Single-add count rule, fired once at confirm: count iff the contribution was
+        not yet shown to the user. A point already on screen under a presented pillar
+        doesn't count. Otherwise (a withheld/novel pillar's points were never shown) it
+        counts once — a per-contribution seen-set guards repeats, since a freshly
+        surfaced pillar isn't in presented_pillars() yet."""
+        presented = {n.lower() for n in self.presented_pillars()}
+        if (pillar or "").lower() in presented:
+            shown = {self._norm_bullet(b)
+                     for b in self.presented_sub_bullets().get(pillar, [])}
+            if self._norm_bullet(stored) in shown:
+                return False
+        seen = getattr(self, "_agency_contribs", None)
+        if seen is None:
+            seen = set()
+            self._agency_contribs = seen
+        key = ((pillar or "").lower(), self._norm_bullet(stored))
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
     _PLACE_SEPARATELY = ("one at a time", "one by one", "separately", "individually",
                          "each on", "on its own", "one at time")
     _SKIP_WORDS = ("skip", "skip it", "skip this", "move on", "later", "neither",
@@ -202,7 +224,8 @@ class BaseAgent:
             handlers._classify_confirmation(user_input)
         if decision == "confirm":
             yield from self._commit_pillar(st["name"], st["in_kb"])
-            yield from self._start_walk(st["name"], bullets, shown=st.get("shown"))
+            yield from self._start_walk(st["name"], bullets, shown=st.get("shown"),
+                                        from_commit=True)
             return
         if decision == "decline":
             st["stage"] = "decline_where"           # don't strand the points
@@ -228,12 +251,16 @@ class BaseAgent:
         yield from self._start_walk(area, bullets, shown=st.get("shown"))
 
     # ── Per-bullet walk: keep / relocate / skip, each point KB-resolved ──────────
-    def _start_walk(self, home: str | None, items: list[str], shown: dict | None = None):
+    def _start_walk(self, home: str | None, items: list[str], shown: dict | None = None,
+                    from_commit: bool = False):
         self.pending_pillar_offer = {"stage": "walk", "home": home,
                                      "queue": list(items), "rounds": 0, "cur": None,
                                      "touched": [],
                                      "shown": shown if shown is not None else self._capture_shown()}
-        yield self._emit_text(WALK_INTRO)
+        # When the walk directly follows a pillar commit, the commit message already
+        # introduced "add these one at a time" — don't repeat WALK_INTRO.
+        if not from_commit:
+            yield self._emit_text(WALK_INTRO)
         yield from self._walk_present()
 
     def _walk_touch(self, name: str) -> None:

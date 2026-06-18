@@ -328,6 +328,13 @@ class HITLAgent(BaseAgent):
         if self.awaiting_sub_point:
             concept = self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[SUB-POINT ADD] {user_input}")
+            if self._is_multi_entry(user_input, concept):
+                msg = (f"Let's add one point at a time — which single point would you like "
+                       f"under **{concept}**? (Click **✅ Done adding** when finished.)")
+                self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+                log_agent_response(self.session_id, msg)
+                yield msg
+                return
             stored, is_new = self._store_sub_point(concept, user_input, modality="button")
 
             block  = self.concept_blocks.get(concept, "").strip()
@@ -354,6 +361,13 @@ class HITLAgent(BaseAgent):
         if self.awaiting_revisit_add:
             target = self.revisit_target or self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[REVISIT ADD] {user_input}")
+            if self._is_multi_entry(user_input, target):
+                msg = (f"Let's add one point at a time — which single point would you like "
+                       f"to add to **{target}**? (Click **✅ Done adding** when finished.)")
+                self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+                log_agent_response(self.session_id, msg)
+                yield msg
+                return
             stored, is_new = self._store_sub_point(target, user_input, modality="button")
             lead = (f"Added to **{target}**." if is_new
                     else f"That's already covered under **{target}** as *{stored}*.")
@@ -409,9 +423,11 @@ class HITLAgent(BaseAgent):
             return
 
         if self.awaiting_user_suggestion:
-            self.awaiting_user_suggestion = False
+            # Proactive prompt is button-driven: only the buttons act. A genuine
+            # question is answered (Q&A) and the prompt re-shows; anything else is
+            # nudged back to the buttons so the next step stays an explicit choice.
             log_user_message(self.session_id, f"[PROACTIVE RESPONSE] {user_input}")
-
+            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
             pres = intents.classify_intent(
                 user_input,
                 current_pillar=self._current_concept() or "(none)",
@@ -419,62 +435,18 @@ class HITLAgent(BaseAgent):
                 walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
                 last_agent=self._last_agent_text() or "(nothing yet)",
             )
-
-            # Multi-point: HITL is button-driven — nudge to add one at a time via buttons.
-            if pres.multi:
-                self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-                yield from self._nudge_multi()
-                return
-
-            # Honour an explicit destination ("add X under Feasibility") only when
-            # the user actually named it. The classifier often infers the *current*
-            # pillar as parent for a bare "how about X" — trusting that would file a
-            # point under the wrong pillar (e.g. "how about ROI" while on Strategic
-            # Fit). When the parent isn't explicit, drop it and fall through to
-            # _locate_subpoint, which resolves the concept to its real KB home.
-            if (pres.intent == "add" and pres.detail and pres.parent
-                    and h._parent_is_explicit(pres.parent, user_input)):
-                logging.info(f"[PROACTIVE] sub-point: '{pres.detail}' → '{pres.parent}'")
-                yield from self._add_sub_point(pres.parent, pres.detail)
+            if pres.intent in ("question", "doubt") and not pres.multi:
+                self.awaiting_user_suggestion = False
+                ev.question(self._evctx(modality="text"), _sink)
                 yield from self._stream_concept_qa()
+                yield from self._stream_proactive_prompt()
                 return
-
-            if pres.intent == "ask_agent_to_suggest":
-                yield from self._suggest_next()
-                return
-
-            # Sub-bullet granularity (mirrors EXP/BB): the user may name a point
-            # that belongs to a pillar rather than the pillar itself. Tell them
-            # where it lives and why, then navigate there so the buttons show.
-            if pres.intent != "advance":
-                sub = self._locate_subpoint(user_input)
-                if sub is not None:
-                    yield from self._navigate_for_subpoint(*sub, user_text=user_input)
-                    return
-
-            # Resolve which concept the user is pointing at. Prefer an explicit
-            # add-detail, but also navigate when the raw text verbatim names a
-            # known walkthrough pillar (e.g. a bare "Feasibility") that the
-            # classifier didn't tag "add" — otherwise such a turn falls through
-            # to guidance and we wrongly show the current (next) pillar.
-            concept = pres.detail if (pres.intent == "add" and pres.detail) else None
-            if concept is None and pres.intent != "advance":
-                concept = self._mentioned_pillar(user_input)
-
-            if concept is None:
-                if pres.intent == "advance":
-                    logging.info("[PROACTIVE] move-on -> passive_advance + advance")
-                    ev.record(h.AdvanceOutcome(passive=True), self._evctx(modality="text"), _sink)
-                    if self._current_concept() is None:
-                        yield from self._walkthrough_complete_message()
-                    else:
-                        yield from self._stream_concept(is_first=False)
-                    return
-                logging.info(f"[PROACTIVE] guidance/continue (intent={pres.intent})")
-                yield from self._stream_concept(is_first=False)
-                return
-
-            yield from self._go_to_pillar(concept)
+            # Keep awaiting_user_suggestion True so the proactive buttons re-render.
+            msg = ("In this mode the next step is a button — use **➕ Add my own pillar** "
+                   "or **💡 Ask agent suggestion** below (or **‼️ End Session**).")
+            self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+            log_agent_response(self.session_id, msg)
+            yield msg
             return
 
         just_added_concept = None
@@ -598,12 +570,31 @@ class HITLAgent(BaseAgent):
         log_agent_response(self.session_id, msg)
         yield msg
 
+    def _is_multi_entry(self, text: str, pillar: str) -> bool:
+        """True when the user typed several points at once (so we gate to one at a
+        time). Cheap structural check first; only consult the classifier when there's
+        a separator hint, so a plain single point costs no extra call."""
+        _, items = intents._structural_list(text)
+        if len(items) > 1:
+            return True
+        if not re.search(r"[,;\n]|\band\b", text or ""):
+            return False
+        res = intents.classify_intent(
+            text,
+            current_pillar=pillar,
+            current_bullets=self._ctx_bullets(),
+            walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
+            last_agent=self._last_agent_text() or "(nothing yet)",
+        )
+        return bool(res.multi)
+
     def _nudge_multi(self):
         """A pasted multi-point message: HITL is button-driven, so add points one at a
         time with the ➕ Add button rather than running EXP/BB's freetext walk."""
         msg = ("Looks like a few points at once — in this mode we add them **one at a "
-               "time** so each lands in the right pillar. Use **➕ Add point to consider "
-               "in this pillar** below for each one, or name a single pillar to jump to.")
+               "time**. **➕ Add point to consider in this pillar** adds under the pillar "
+               "we're on now; to add elsewhere, jump there first or use **➕ Add my own "
+               "pillar** at the next prompt.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg

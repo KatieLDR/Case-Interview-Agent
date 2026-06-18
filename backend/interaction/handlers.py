@@ -346,15 +346,21 @@ def add_handler(intent: str, km: m.KBMatch, source: str, session: HandlerSession
                               counted=False, text=text, matched_text=km.matched_text,
                               source=source)
         if parent.lower() not in presented:
-            parent = m.normalize_name(parent)
-            session.surface_pillar(parent)
+            matched, _ = m.match_pillar(parent)
+            parent = matched or m.normalize_name(parent)
+            if parent.lower() not in presented:
+                session.surface_pillar(parent)
         slot = m.place_sub_point(text, parent)
         session.add_sub_point(slot.pillar, text)
+        # Count only when the point is genuinely new to the pillar (the agent's
+        # add_sub_point dedups + records is_new). A repeat "add X under Y" must not
+        # re-count.
+        is_new = (getattr(session, "_last_sub_add", None) or {}).get("is_new", True)
         also = (km.pillar if (km.level == "concept" and km.pillar
                               and km.pillar.lower() != slot.pillar.lower()
                               and km.pillar.lower() in presented) else None)
         return AddOutcome(action="added_new", pillar=slot.pillar, level="sub_bullet",
-                          counted=True, text=text, also_covered=also,
+                          counted=bool(is_new), text=text, also_covered=also,
                           explanation=(m.pillar_gist(also) if also else None), source=source)
 
     if km.level == "concept":
