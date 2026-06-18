@@ -5,7 +5,7 @@
 # framework stream; EXP/HITL: after the first pillar). Standalone tip bubble-tail.
 ADD_ONE_AT_A_TIME = (
     "\n\n💡 *When you'd like to add your own pillar or bullet, **share them one at a time**. "
-    "I'll map each point to the industry knowledge base and keep your framework aligned with best practices. "
+    "I'll map each bullet to the industry knowledge base and keep your framework aligned with best practices. "
     "You could challenge it anytime.*"
 )
 
@@ -14,9 +14,9 @@ ADD_ONE_AT_A_TIME = (
 #   {bullets}   — the mentioned points as a markdown list
 #   {pillar}    — the candidate pillar name
 PILLAR_OFFER_TEMPLATE = (
-    "It looks like you'd like to add a few points{kb_clause}:\n"
+    "It looks like you'd like to add a few bullets{kb_clause}:\n"
     "{bullets}\n\n"
-    "Want me to add **{pillar}** to the framework plan? Then we'll add these points one at "
+    "Want me to add **{pillar}** to the framework plan? Then we'll add these bullets one at "
     "a time so each lands in the right place. *(yes / no — or say **skip**)*\n\n"
 )
 PILLAR_OFFER_REASK = (
@@ -24,7 +24,7 @@ PILLAR_OFFER_REASK = (
     "*(yes / no — or say **skip**)*\n\n"
 )
 PILLAR_OFFER_DROP = (
-    "No problem, I'll hold off on that. You can add points one at a time, or ask me "
+    "No problem, I'll hold off on that. You can add bullets one at a time, or ask me "
     "anything about the framework plan.\n\n"
 )
 # Shown when the user declines the pillar — ask where the points should go instead.
@@ -35,7 +35,7 @@ PILLAR_DECLINE_PLACEMENT = (
 )
 # ── Per-bullet walk: each listed point is KB-resolved, then kept / relocated / skipped.
 # Framed as a placement choice (not yes/no) so "no, elsewhere" never drops the point.
-WALK_INTRO = "Let's go through your points one at a time.\n\n"
+WALK_INTRO = "Let's go through your bullets one at a time.\n\n"
 # A KB-matched bullet, or one defaulting to the chosen pillar. {bullet},{pillar}
 WALK_ASK_UNDER = (
     "I'd put **{bullet}** under **{pillar}** — do you want to keep my suggestion, feel free to name another pillar you think is better, "
@@ -54,11 +54,11 @@ Proposed area: {pillar}
 Classify the user's reply into exactly ONE action:
 - "keep": accept the proposal as-is (yes, keep it, sounds good, leave it there,
   that's fine, agreed, perfect).
-- "relocate": put the point under a DIFFERENT pillar — set "pillar" to that pillar's name
+- "relocate": put the bullet under a DIFFERENT pillar — set "pillar" to that pillar's name
   ("no, under Feasibility", "put it in risk instead", "rather Strategic Fit").
-- "own_area": make the point its OWN new pillar ("its own pillar", "separate pillar",
+- "own_area": make the bullet its OWN new pillar ("its own pillar", "separate pillar",
   "make it a new section").
-- "skip": do NOT add this point ("no", "skip", "drop it", "not this one", "remove it").
+- "skip": do NOT add this bullet ("no", "skip", "drop it", "not this one", "remove it").
 - "question": the user is asking something or wants clarification rather than deciding
   ("why is this here?", "what does that mean?", "how does it relate to X?").
 
@@ -71,7 +71,7 @@ Reply: "{reply}"
 WALK_ADDED   = "✅ Added **{stored}** under **{pillar}**.\n\n"
 WALK_DUP     = "**{stored}** is already under **{pillar}**, leaving it as is.\n\n"
 WALK_SKIPPED = "Skipped **{bullet}**.\n\n"
-WALK_DONE    = "That's all your points, here's the updated plan:\n\n"
+WALK_DONE    = "That's all your bullets, here's the updated plan:\n\n"
 
 
 CLARIFICATION_SYSTEM_PROMPT = """
