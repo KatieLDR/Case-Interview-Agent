@@ -29,22 +29,22 @@ PILLAR_OFFER_DROP = (
 )
 # Shown when the user declines the pillar — ask where the points should go instead.
 PILLAR_DECLINE_PLACEMENT = (
-    "No problem, I won't add **{pillar}** as its own area. Where should these points "
-    "go instead — under an existing area (just name it), or shall we add them one at a "
-    "time and place each as we go?\n\n"
+    "No problem, I won't add **{pillar}** as its own pillar. Where should these bullets "
+    "go instead, under an existing pillar (just name it)? We can add them one at a "
+    "time and place each as you want?\n\n"
 )
 # ── Per-bullet walk: each listed point is KB-resolved, then kept / relocated / skipped.
 # Framed as a placement choice (not yes/no) so "no, elsewhere" never drops the point.
 WALK_INTRO = "Let's go through your points one at a time.\n\n"
 # A KB-matched bullet, or one defaulting to the chosen pillar. {bullet},{pillar}
 WALK_ASK_UNDER = (
-    "I'd put **{bullet}** under **{pillar}** — keep it there, name another area, "
-    "or say **skip**?\n\n"
+    "I'd put **{bullet}** under **{pillar}** — do you want to keep my suggestion, feel free to name another pillar you think is better, "
+    "or **skip** this bullet\n\n"
 )
 # A novel bullet with no chosen home. {bullet}
 WALK_ASK_PLACE = (
-    "Where should **{bullet}** go — its **own area**, or under an existing area "
-    "(just name it)? Or say **skip**.\n\n"
+    "Where should **{bullet}** placed? Should it be its **own pillar**, or add it to an existing pillar "
+    "(just name it)? Or **skip** this bullet.\n\n"
 )
 WALK_REPLY_PROMPT = """\
 During a point-by-point review, the agent proposed handling ONE point.
@@ -54,9 +54,9 @@ Proposed area: {pillar}
 Classify the user's reply into exactly ONE action:
 - "keep": accept the proposal as-is (yes, keep it, sounds good, leave it there,
   that's fine, agreed, perfect).
-- "relocate": put the point under a DIFFERENT area — set "area" to that area's name
+- "relocate": put the point under a DIFFERENT pillar — set "pillar" to that pillar's name
   ("no, under Feasibility", "put it in risk instead", "rather Strategic Fit").
-- "own_area": make the point its OWN new area ("its own area", "separate area",
+- "own_area": make the point its OWN new pillar ("its own pillar", "separate pillar",
   "make it a new section").
 - "skip": do NOT add this point ("no", "skip", "drop it", "not this one", "remove it").
 - "question": the user is asking something or wants clarification rather than deciding
