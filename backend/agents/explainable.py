@@ -131,7 +131,7 @@ class ExplainableAgent(BaseAgent):
             "It can only support you when you actively engage, **not just read through it.**"
         )
 
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
+        yield "⏱️ Your 15-minute session has started. The timer is shown on the left."
         self.walkthrough_concepts = self._build_walkthrough_concepts()
         self.walkthrough_active   = True
         self.walkthrough_index    = 0
