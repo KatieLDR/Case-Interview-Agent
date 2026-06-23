@@ -1549,8 +1549,9 @@ class HITLAgent(BaseAgent):
 
         try:
             from firebase_admin import firestore as fs
+            from backend.logger import SESSIONS_COLLECTION
             db = fs.client()
-            db.collection("sessions").document(self.session_id).update({
+            db.collection(SESSIONS_COLLECTION).document(self.session_id).update({
                 "final_framework":       final_framework,
                 "concept_swap_detected": self.concept_swap.is_detected,
                 "swap_detected_at_end":  self.concept_swap.is_detected,

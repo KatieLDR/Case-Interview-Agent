@@ -17,6 +17,12 @@ def _init_firebase():
 _init_firebase()
 db = firestore.client()
 
+# Group isolation: test deployments set SESSIONS_COLLECTION=sessions_test so pilot
+# data never mixes into the official "sessions" dataset. Default keeps current
+# behavior. GROUP is stored on each session doc for convenience in analysis.
+SESSIONS_COLLECTION = os.getenv("SESSIONS_COLLECTION", "sessions")
+GROUP = os.getenv("GROUP", "official")
+
 # §3.6 headline counters live in ONE place (events.py). logger -> events is cycle-free
 # (events imports nothing heavy; sink imports logger for `db`, never the reverse).
 from backend.logging import events as _ev
@@ -26,9 +32,13 @@ _HEADLINE_COUNTERS = _ev.HEADLINE_COUNTERS
 # ── Session ────────────────────────────────────────────────────────────────
 def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> str:
     session_id = str(uuid.uuid4())
-    db.collection("sessions").document(session_id).set({
+    db.collection(SESSIONS_COLLECTION).document(session_id).set({
         "user_id": user_id,
         "agent_type": agent_type,
+        "group": GROUP,
+        # Qualtrics linkage: set later via set_participant_id() once the JS hook
+        # forwards the pid from the survey redirect URL.
+        "participant_id": None,
         "created_at": datetime.now(timezone.utc),
         "started_at": None,
         "ended_at": None,
@@ -59,14 +69,14 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
 
 
 def save_original_case(session_id: str, case_text: str) -> None:
-    db.collection("sessions").document(session_id).update({
+    db.collection(SESSIONS_COLLECTION).document(session_id).update({
         "original_case": case_text,
     })
 
 
 def get_original_case(session_id: str) -> str | None:
     try:
-        doc = db.collection("sessions").document(session_id).get()
+        doc = db.collection(SESSIONS_COLLECTION).document(session_id).get()
         if doc.exists:
             return doc.to_dict().get("original_case")
     except Exception as e:
@@ -76,16 +86,27 @@ def get_original_case(session_id: str) -> str | None:
 
 def end_session(session_id: str) -> None:
     try:
-        db.collection("sessions").document(session_id).update({
+        db.collection(SESSIONS_COLLECTION).document(session_id).update({
             "ended_at": datetime.now(timezone.utc),
         })
         print(f"[SESSION] ended_at stamped for session: {session_id}")
     except Exception as e:
         print(f"[SESSION] failed to stamp ended_at: {e}")
 
+def set_participant_id(session_id: str, participant_id: str) -> None:
+    """Link this agent session to a Qualtrics survey response (pid)."""
+    try:
+        db.collection(SESSIONS_COLLECTION).document(session_id).update({
+            "participant_id": participant_id,
+        })
+        print(f"[QUALTRICS] participant_id={participant_id} for session={session_id}")
+    except Exception as e:
+        print(f"[QUALTRICS] failed to set participant_id: {e}")
+
+
 def stamp_started_at(session_id: str) -> None:
     try:
-        db.collection("sessions").document(session_id).update({
+        db.collection(SESSIONS_COLLECTION).document(session_id).update({
             "started_at": datetime.now(timezone.utc),
         })
         print(f"[SESSION] started_at stamped for session: {session_id}")
@@ -107,7 +128,7 @@ _COUNTER_MAP = {
 
 # ── Event helpers ──────────────────────────────────────────────────────────
 def _log_event(session_id: str, event_type: str, payload: dict) -> None:
-    session_ref = db.collection("sessions").document(session_id)
+    session_ref = db.collection(SESSIONS_COLLECTION).document(session_id)
     session_ref.collection("events").add({
         "type": event_type,
         "timestamp": datetime.now(timezone.utc),
@@ -121,7 +142,7 @@ def _log_event(session_id: str, event_type: str, payload: dict) -> None:
 
 
 def update_answer(session_id: str, answer: str) -> None:
-    session_ref = db.collection("sessions").document(session_id)
+    session_ref = db.collection(SESSIONS_COLLECTION).document(session_id)
     try:
         doc = session_ref.get()
         is_first_write = doc.to_dict().get("original_answer") is None
@@ -145,7 +166,7 @@ def log_warmup_response(session_id: str, response: str) -> None:
     Change log: 2026-05-01 — added for warm-up phase.
     """
     try:
-        db.collection("sessions").document(session_id).update({
+        db.collection(SESSIONS_COLLECTION).document(session_id).update({
             "warmup_response": response,
         })
         _log_event(session_id, "warmup_response", {

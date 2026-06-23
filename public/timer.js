@@ -153,6 +153,26 @@
     console.log("[BA Timer] started — 20 minutes");
   }
 
+  // ── Qualtrics linkage ─────────────────────────────────────────────────────
+  // Qualtrics appends ?qrid=<ResponseID> when redirecting to the agent link.
+  // We forward it to Python via the Chainlit window_message channel so it gets
+  // stored on the Firestore session doc as participant_id.
+  // Analysis join: Qualtrics ResponseID = Firestore session.participant_id.
+  //
+  // window.postMessage fires before Chainlit's React listener is registered, so
+  // we retry at 1 s and 3 s — cl.user_session.set is idempotent for same value.
+  const qrid = new URLSearchParams(window.location.search).get("qrid");
+  if (qrid) {
+    sessionStorage.setItem("ba_qrid", qrid);
+    function _sendQrid() {
+      window.postMessage({ type: "ba_pid", value: qrid }, "*");
+    }
+    _sendQrid();
+    setTimeout(_sendQrid, 1000);
+    setTimeout(_sendQrid, 3000);
+    console.log("[BA Qualtrics] qrid forwarded to backend:", qrid);
+  }
+
   // ── MutationObserver ────────────────────────────────────────────────────
 
   const observer = new MutationObserver((mutations) => {

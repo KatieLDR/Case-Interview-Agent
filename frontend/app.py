@@ -1,3 +1,4 @@
+import os
 import uuid
 import chainlit as cl
 import asyncio
@@ -9,6 +10,12 @@ from backend.agents.hitl import HITLAgent
 
 # Security caps
 MAX_INPUT_CHARS = 6000
+
+# Arm pinning: when ARM is set to a valid arm, this deployment is locked to that
+# single agent and the agent-selection screen is skipped. Unset/invalid → fall
+# back to the 3-button selector (keeps local dev working).
+VALID_ARMS = ("black_box", "explainable", "hitl")
+PINNED_ARM = os.getenv("ARM") if os.getenv("ARM") in VALID_ARMS else None
 
 
 # Session startup
@@ -40,6 +47,11 @@ async def on_chat_start():
 
 @cl.action_callback("readme_confirmed")
 async def on_readme_confirmed(action: cl.Action):
+    # Arm-pinned deployment: skip the selector and launch the assigned agent.
+    if PINNED_ARM is not None:
+        await _init_agent(PINNED_ARM)
+        return
+
     await cl.Message(
         content="Great! Please select an agent to get started:",
         actions=[
@@ -63,6 +75,17 @@ async def on_readme_confirmed(action: cl.Action):
             ),
         ]
     ).send()
+
+
+# Qualtrics pid capture: JS sends window.postMessage({type:"ba_pid", value:pid})
+# on page load. Chainlit relays it here before any agent is created, so we park
+# it in user_session; _init_agent writes it to Firestore once session_id exists.
+@cl.on_window_message
+async def on_window_message(data):
+    if isinstance(data, dict) and data.get("type") == "ba_pid":
+        pid = str(data.get("value", "")).strip()
+        if pid:
+            cl.user_session.set("participant_id", pid)
 
 
 # Agent selection callbacks
@@ -118,6 +141,12 @@ async def _init_agent(agent_type: str):
 
     cl.user_session.set("agent", agent)
     cl.user_session.set("agent_type", agent_type)
+
+    # Write Qualtrics pid to Firestore now that the session doc exists.
+    pid = cl.user_session.get("participant_id")
+    if pid:
+        from backend.logger import set_participant_id
+        set_participant_id(agent.session_id, pid)
 
     await cl.Message(content=intro).send()
     await cl.Message(content=agent.get_warmup_message()).send()
