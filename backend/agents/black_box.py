@@ -112,7 +112,7 @@ class BlackBoxAgent(BaseAgent):
             "It can only support you when you actively engage, **not just read through it.**"
         )
 
-        yield "⏱️ Your 20-minute session has started. The timer is shown on the left."
+        yield "⏱️ Your 15-minute session has started. The timer is shown on the left."
 
         yield from self._stream_framework_presentation()
         yield ADD_ONE_AT_A_TIME

@@ -1,7 +1,7 @@
 (function () {
   // ── Config ──────────────────────────────────────────────────────────────
-  const DURATION_SECONDS = 20 * 60;
-  const TRIGGER_TEXT     = "Your 20-minute session has started";
+  const DURATION_SECONDS = 15* 60;
+  const TRIGGER_TEXT     = "Your 15-minute session has started";
   const END_TEXT         = "Session Ended";
 
   // ── State ───────────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@
       }
     }, 1000);
 
-    console.log("[BA Timer] started — 20 minutes");
+    console.log("[BA Timer] started — 15 minutes");
   }
 
   // ── Qualtrics linkage ─────────────────────────────────────────────────────
