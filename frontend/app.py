@@ -117,26 +117,23 @@ async def _init_agent(agent_type: str):
     if agent_type == "black_box":
         agent = BlackBoxAgent(user_id=user_id)
         intro = (
-            f"✅ **Agent 1 selected!**\n\n"
-            f"🪪 **Your Session ID:** `{agent.session_id}`\n"
-            f"📝 Note this ID for future reference or support.\n\n"
-            f"---\n"
+            f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
+            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"\n---\n"
         )
     elif agent_type == "explainable":
         agent = ExplainableAgent(user_id=user_id)
         intro = (
-            f"✅ **Agent 2 selected!**\n\n"
-            f"🪪 **Your Session ID:** `{agent.session_id}`\n"
-            f"📝 Note this ID for future reference or support.\n\n"
-            f"---\n"
+            f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
+            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"\n---\n"
         )
     elif agent_type == "hitl":
         agent = HITLAgent(user_id=user_id)
         intro = (
-            f"✅ **Agent 3 selected!**\n\n"
-            f"🪪 **Your Session ID:** `{agent.session_id}`\n"
-            f"📝 Note this ID for future reference or support.\n\n"
-            f"---\n"
+            f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
+            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"\n---\n"
         )
 
     cl.user_session.set("agent", agent)
