@@ -490,6 +490,20 @@ async def on_proactive_suggest(action: cl.Action):
     await _attach_buttons(agent)
 
 
+@cl.action_callback("cancel_add_pillar")
+async def on_cancel_add_pillar(action: cl.Action):
+    agent = cl.user_session.get("agent")
+    ended = cl.user_session.get("ended", False)
+    if agent is None or ended:
+        return
+    msg = cl.Message(content="")
+    await msg.send()
+    for token in agent.on_cancel_add_pillar():
+        await msg.stream_token(token)
+    await msg.update()
+    await _attach_buttons(agent)
+
+
 @cl.action_callback("done_adding")
 async def on_done_adding(action: cl.Action):
     agent = cl.user_session.get("agent")
@@ -718,6 +732,15 @@ async def _attach_buttons(agent):
                         description="Confirm removal of this concept",
                         payload={}
                     ),
+                ]
+            ).send()
+
+        elif agent.awaiting_pillar_name:
+            await cl.Message(
+                content="",
+                actions=[
+                    cl.Action(name="cancel_add_pillar", label="↩️ Cancel",
+                              description="Go back to the previous choice", payload={}),
                 ]
             ).send()
 

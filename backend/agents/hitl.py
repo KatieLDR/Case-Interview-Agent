@@ -672,6 +672,16 @@ class HITLAgent(BaseAgent):
         log_agent_response(self.session_id, msg)
         yield msg
 
+    def on_cancel_add_pillar(self):
+        """↩️ Cancel 'Add my own pillar': reset state, re-offer the proactive choice
+        WITHOUT advancing prompt_index (so no proactive prompt is consumed)."""
+        self.awaiting_pillar_name = False
+        self.awaiting_user_suggestion = True
+        msg = "No problem — what would you like to do next?"
+        self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
+        log_agent_response(self.session_id, msg)
+        yield msg
+
     def on_proactive_suggest(self):
         """💡 Ask agent suggestion (proactive prompt): present the agent's next pick."""
         self.awaiting_user_suggestion = False
