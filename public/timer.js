@@ -193,7 +193,25 @@
     }
   });
 
+  // ── Disable browser translation ──────────────────────────────────────────
+  // Browser auto-translation (notably Edge's built-in translator) rewrites
+  // React's text nodes, which crashes Chainlit's frontend with
+  // "Failed to execute 'insertBefore' on 'Node' ... not a child of this node"
+  // during token streaming. Marking the page notranslate prevents it.
+  function disableTranslation() {
+    document.documentElement.setAttribute("lang", "en"); // no mismatch → no auto-translate prompt
+    document.documentElement.setAttribute("translate", "no");
+    document.documentElement.classList.add("notranslate");
+    document.body.classList.add("notranslate");
+    const meta = document.createElement("meta");
+    meta.name = "google";
+    meta.content = "notranslate";
+    document.head.appendChild(meta);
+    console.log("[BA Timer] page marked notranslate");
+  }
+
   function init() {
+    disableTranslation();
     observer.observe(document.body, { childList: true, subtree: true });
     console.log("[BA Timer] observer active");
     activateGuard();
