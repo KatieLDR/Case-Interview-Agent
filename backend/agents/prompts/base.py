@@ -38,8 +38,8 @@ PILLAR_DECLINE_PLACEMENT = (
 WALK_INTRO = "Let's go through your bullets one at a time.\n\n"
 # A KB-matched bullet, or one defaulting to the chosen pillar. {bullet},{pillar}
 WALK_ASK_UNDER = (
-    "I'd put **{bullet}** under **{pillar}** — do you want to keep my suggestion, feel free to name another pillar you think is better, "
-    "or **skip** this bullet\n\n"
+    "I originally suggested **{bullet}** belongs under **{pillar}**. Do you want to keep it there, "
+    "or put it in another pillar (just name it)? Or **skip** and don't add this bullet.\n\n"
 )
 # A novel bullet with no chosen home. {bullet}
 WALK_ASK_PLACE = (

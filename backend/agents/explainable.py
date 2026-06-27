@@ -820,8 +820,9 @@ class ExplainableAgent(BaseAgent):
                    f"we'll cover it in the walkthrough.")
             self._emit(msg); yield msg; return
         if not getattr(o, "suggested_item", None):
-            msg = ("You've surfaced the main pillars I'd flag, feel free to revisit, add, "
-                   "remove, or question any part of the framework.")
+            msg = ("These are the main pillars I'd flag. There are more things we could consider, "
+                   "but I need your input to iterate — feel free to revisit, add, remove, or "
+                   "question anything you think is missing.")
             self._emit(msg); yield msg; return
         why = (o.grounding or "").split("\n")[0].strip()
         msg = (f"One pillar we haven't covered yet is **{o.suggested_item}**"
@@ -832,8 +833,9 @@ class ExplainableAgent(BaseAgent):
 
     def render_fallback(self, outcome=None):
         if outcome is None:
-            msg = ("You've surfaced the main pillars I'd flag, feel free to revisit, add, "
-                   "remove, or question any part of the framework.")
+            msg = ("These are the main pillars I'd flag. There are more things we could consider, "
+                   "but I need your input to iterate — feel free to revisit, add, remove, or "
+                   "question anything you think is missing.")
             self._emit(msg); yield msg; return
         if isinstance(outcome, handlers.AdvanceOutcome) and not self.walkthrough_done:
             if self._advance_to_next_unseen():

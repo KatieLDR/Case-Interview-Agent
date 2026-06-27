@@ -556,8 +556,9 @@ class HITLAgent(BaseAgent):
             else:
                 yield from self._stream_concept(is_first=False)
             return
-        msg = ("You've surfaced the main pillars I'd flag. Use the buttons to add, "
-               "remove, or revisit any part of the framework.")
+        msg = ("These are the main pillars I'd flag. There are more things we could consider, "
+               "but I need your input to iterate — use the buttons to add, remove, or revisit "
+               "anything you think is missing.")
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
         log_agent_response(self.session_id, msg)
         yield msg

@@ -440,8 +440,9 @@ class BlackBoxAgent(BaseAgent):
 
     def render_fallback(self, outcome=None):
         if outcome is None:
-            msg = ("You've surfaced the main pillars I'd flag, feel free to add, "
-                   "remove, or question any part of what's here.")
+            msg = ("These are the main pillars I'd flag. There are more things we could consider, "
+                   "but I need your input to iterate — feel free to add, remove, or question "
+                   "anything you think is missing.")
             self._emit(msg); yield msg; return
         yield from self._ack_no_reprint()
 
@@ -610,8 +611,9 @@ class BlackBoxAgent(BaseAgent):
             yield from self._yield_rerender(f"Good point — I've included **{o.suggested_item}**.\n\n")
             return
         if not getattr(o, "suggested_item", None):
-            msg = ("You've surfaced the main pillars I'd flag — feel free to add, "
-                   "remove, or question any part of what's here.")
+            msg = ("These are the main pillars I'd flag. There are more things we could consider, "
+                   "but I need your input to iterate — feel free to add, remove, or question "
+                   "anything you think is missing.")
             self._emit(msg); yield msg; return
         why = (o.grounding or "").split("\n")[0].strip()
         msg = (f"One pillar we haven't covered yet is **{o.suggested_item}**"
