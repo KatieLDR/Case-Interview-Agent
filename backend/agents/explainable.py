@@ -508,8 +508,8 @@ class ExplainableAgent(BaseAgent):
         return (self.swap_presented and not self.concept_swap.is_detected
                 and self._on_swap_now())
 
-    _NEXT_AFFORD = ("\n\n*Add a bullet here, raise a new area, or question anything \u2014 "
-                    "or say \"next\" to move on.*")
+    _NEXT_AFFORD = ("\n\n*Would you like to add, remove, or question anything here? "
+                    "If you're happy, say \"next\" to move on.*")
 
     def _walk_done_render(self, touched):
         """After a multi-point walk: show each pillar the points landed in (they were
@@ -939,13 +939,20 @@ class ExplainableAgent(BaseAgent):
                    and current is not None
                    and self._is_wrong_concept(current))
 
-        closing = (
-            "End with exactly:\n"
-            "*I can see why you'd question this shall we include it or move on without it?*"
-            if on_swap else
-            "End with exactly:\n"
-            "*Would you like to add, remove, or question anything here? If you are happy with this pillar, shall we move on to the next one? Feel free to raise anything you think is important to consider.*"
-        )
+        if self.pending_pillar_offer is not None:
+            # Mid-add question: the add flow re-presents its own prompt next, so don't
+            # tack on the walkthrough "move on to the next pillar" closing here.
+            closing = "End with your answer — do NOT add any closing or follow-up question."
+        elif on_swap:
+            closing = (
+                "End with exactly:\n"
+                "*I can see why you'd question this shall we include it or move on without it?*"
+            )
+        else:
+            closing = (
+                "End with exactly:\n"
+                "*Would you like to add, remove, or question anything here? If you are happy with this pillar, shall we move on to the next one? Feel free to raise anything you think is important to consider.*"
+            )
 
         qa_prompt = CONCEPT_QA_PROMPT.format(on_swap=on_swap)
 

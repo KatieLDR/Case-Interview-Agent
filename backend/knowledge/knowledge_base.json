@@ -87,11 +87,8 @@
       "order": 4,
       "ppt_mapping": "Crosses all three PPT buckets — People (training cost), Process (governance cost), Technology (infrastructure cost)",
       "description": "This pillar assesses the balance between investment and expected business value. It covers costs, value creation, and payback period. A GenAI rollout that cannot demonstrate a clear financial case is difficult to justify internally.",
-      "sub_bullets": [
-        "One-time costs: governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
-        "Ongoing costs: maintenance, monitoring, model updates, tool ownership time [b]"
-      ],
-      "sub_bullets_sources": "Sources: [a](https://www.mckinsey.com/capabilities/mckinsey-technology/our-insights/recalibrating-technology-budgets-for-the-ai-era) · [b](https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/the-new-economics-of-enterprise-technology-in-an-ai-world)",
+      "sub_bullets": [],
+      "sub_bullets_sources": "",
       "key_questions": [
         "One-time costs: governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
         "Ongoing costs: maintenance, monitoring, model updates, tool ownership time [b]",
@@ -107,11 +104,8 @@
       "order": 5,
       "ppt_mapping": "People (over-reliance, change resistance), Process (approval gaps, escalation), Technology (model drift, security)",
       "description": "This pillar identifies what could fail during and after rollout. It covers regulatory compliance, reputational risk, user over-reliance, operational risk from model deprecation, and security vulnerabilities specific to GenAI tools. Risk management is commonly underprioritized or engaged too late in enterprise GenAI rollouts.",
-      "sub_bullets": [
-        "EU AI Act classification check: risk level assessment required even for lower-risk tools [a][b]",
-        "Approval gate: does broad rollout require internal sign-off through the organization's approval process before going live, and has the plan accounted for it? [b][c]"
-      ],
-      "sub_bullets_sources": "Sources: [a](https://artificialintelligenceact.eu/article/6/) · [b](https://www.bcg.com/publications/2026/ai-risk-management-needs-a-better-model) · [c](https://kpmg.com/ch/en/insights/artificial-intelligence/iso-iec-42001.html)",
+      "sub_bullets": [],
+      "sub_bullets_sources": "",
       "key_questions": [
         "EU AI Act classification check: risk level assessment required even for lower-risk tools [a][b]",
         "Approval gate: does broad rollout require internal sign-off through the organization's approval process before going live, and has the plan accounted for it? [b][c]",

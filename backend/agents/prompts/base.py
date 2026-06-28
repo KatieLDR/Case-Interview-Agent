@@ -108,8 +108,8 @@ ASK_WORDING = (
 )
 # Concept placement loop: propose a parent, let the user accept / redirect / ask / drop.
 CONCEPT_PLACE = (
-    "I'd put **{item}** under **{pillar}**. **Accept**, name a **different pillar**, "
-    "**ask** me something, or **drop** it?\n\n"
+    "I'd originally suggest putting **{item}** under **{pillar}** — you can **accept** the "
+    "original plan, name a **different pillar**, **ask** me something, or **drop** it.\n\n"
 )
 # Confirm bringing in a withheld/novel parent pillar before adding the point. {pillar}
 BRING_IN = (
