@@ -161,7 +161,9 @@ class BlackBoxAgent(BaseAgent):
             items = res.items if res.multi else [res.detail or user_input]
             parent = (res.parent if (res.parent
                       and handlers._parent_is_explicit(res.parent, user_input)) else None)
-            yield from self._start_add_flow(items, default_parent=parent or res.pillar_name)
+            yield from self._start_add_flow(
+                items, default_parent=parent or res.pillar_name,
+                parent_from_header=parent is None and bool(res.pillar_name))
             return
 
         was_pending = self.pending is not None

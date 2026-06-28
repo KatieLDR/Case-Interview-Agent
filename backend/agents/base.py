@@ -542,13 +542,17 @@ class BaseAgent:
             logging.warning(f"[ADD-FLOW] pc classifier error: {e} -> sub_point")
             return {"branch": "sub_point", "parent": None}
 
-    def _start_add_flow(self, items: list[str], default_parent: str | None = None):
+    def _start_add_flow(self, items: list[str], default_parent: str | None = None,
+                        parent_from_header: bool = False):
         """Arm the per-item add resolver. default_parent (an explicit 'under X' / new
-        'pillar X with …') skips ask_pc straight to the sub-point branch for every item."""
+        'pillar X with …') skips ask_pc straight to the sub-point branch for every item.
+        parent_from_header marks a default_parent that came from a structural header (vs an
+        explicit 'under X'); only a header is eligible for semantic KB matching."""
         self.pending_pillar_offer = {
             "stage": "ask_pc", "queue": [i for i in items if i and i.strip()],
             "cur": None, "home": None, "rounds": 0, "touched": [], "kb": None,
-            "default_parent": default_parent, "shown": self._capture_shown(),
+            "default_parent": default_parent, "parent_from_header": parent_from_header,
+            "shown": self._capture_shown(),
         }
         yield from self._af_start_item()
 
@@ -562,8 +566,13 @@ class BaseAgent:
         item = st["queue"][0]
         st["cur"] = None; st["kb"] = None; st["rounds"] = 0; st["stage"] = "ask_pc"
         dp = st.get("default_parent")
-        if dp:                                   # explicit parent → skip ask_pc
-            st["cur"] = self._resolve_area_strict(dp)
+        if dp:                                   # explicit parent / header → skip ask_pc
+            resolved = self._known_pillar(dp)
+            if not resolved and st.get("parent_from_header"):
+                resolved = matching.locate(dp).pillar      # header only: semantic KB match
+            resolved = resolved or matching.normalize_name(self._strip_to_area(dp) or dp)
+            st["default_parent"] = resolved      # cache: later items match by name, no re-LLM
+            st["cur"] = resolved
             yield from self._af_present_concept_loop(); return
         yield self._emit_text(ASK_PC.format(item=item))
 
@@ -683,6 +692,9 @@ class BaseAgent:
         if decision == "decline":
             st["cur"] = None                              # don't drop — ask where instead
             yield from self._af_present_concept_loop(); return
+        # neither yes/no: a question about the pillar → answer it (counts) then re-ask.
+        if self._classify_walk_reply(user_input, st["queue"][0], st["cur"])["action"] == "question":
+            yield from self._walk_answer(user_input)
         yield self._emit_text(BRING_IN.format(pillar=st["cur"]))
 
     def _af_wording_step(self):
