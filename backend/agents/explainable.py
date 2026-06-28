@@ -88,7 +88,6 @@ class ExplainableAgent(BaseAgent):
         self.swap_position        = 0
         self._seen_concepts       = set()
         self.user_added_pillars = []
-        self.pending_add          = None
 
         self.history = [
             types.Content(
@@ -300,18 +299,11 @@ class ExplainableAgent(BaseAgent):
         # Gate flag — flips True on the user's FIRST main-phase message
         self.has_main_contribution = True
 
-        # Multi-point safeguard: an open pillar offer takes priority over routing.
+        # Add flow (single + multi) in progress takes priority over routing.
         if self.pending_pillar_offer is not None:
             log_user_message(self.session_id, user_input)
             self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
             yield from self._resolve_pillar_offer(user_input)
-            return
-
-        # Confirm-before-commit: an open add preview takes priority over routing.
-        if self.pending_add is not None:
-            log_user_message(self.session_id, user_input)
-            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-            yield from self._resolve_add_confirm(user_input)
             return
 
         _cur    = self.current_pillar() or "(none)"
@@ -329,18 +321,6 @@ class ExplainableAgent(BaseAgent):
         )
         intent = res.intent
         logging.info(f"[INTENT] {intent} — detail={res.detail!r} parent={res.parent!r}")
-
-        # Multi-point safeguard: ≥2 separable additions in one message. With a
-        # candidate pillar -> offer to add it (pending); otherwise -> passive reminder.
-        if (res.multi and self.pending is None and self.pending_suggestion is None
-                and getattr(self, "pending_placement", None) is None):
-            log_user_message(self.session_id, user_input)
-            self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-            if res.pillar_name:
-                yield from self._offer_pillar(res.pillar_name, res.items)
-            else:
-                yield from self._safeguard_multi(res.items)
-            return
 
         if (self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None
@@ -361,13 +341,15 @@ class ExplainableAgent(BaseAgent):
                     yield from self._stream_concept(is_first=False)
                 return
 
-        # Confirm-before-commit: a single add is previewed first; commit on "yes".
-        if (intent == "add" and not res.multi and self.pending is None
-                and self.pending_suggestion is None
+        # Add → the unified per-item resolver (single = 1-item queue; multi splits).
+        if (intent == "add" and self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None):
             log_user_message(self.session_id, user_input)
             self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
-            yield from self._preview_add(res, user_input)
+            items = res.items if res.multi else [res.detail or user_input]
+            parent = (res.parent if (res.parent
+                      and handlers._parent_is_explicit(res.parent, user_input)) else None)
+            yield from self._start_add_flow(items, default_parent=parent or res.pillar_name)
             return
 
         # Log + append the user turn
@@ -450,6 +432,47 @@ class ExplainableAgent(BaseAgent):
         self._seen_concepts.add(name.lower())
         self._last_surface = {"name": name, "is_new": True}
 
+    def _insert_pillar_next(self, name: str) -> None:
+        """Show-NEXT placement for a user-added top-level pillar: insert at
+        `walkthrough_index + 1` so the next advance lands on it; drop any later duplicate
+        (e.g. a withheld KB pillar scheduled ahead) so it shows once; do NOT bump
+        `walkthrough_index` (stay on the current pillar) and do NOT mark it seen — else
+        `_advance_to_next_unseen` would skip it forever. Sets `_last_surface`."""
+        low = name.lower()
+        existing_idx = next((i for i, c in enumerate(self.walkthrough_concepts)
+                             if c.lower() == low), None)
+        if existing_idx is not None and existing_idx <= self.walkthrough_index:
+            self._last_surface = {"name": name, "is_new": False}   # already shown/current
+            return
+        if existing_idx is not None:                               # later dup → pop it
+            self.walkthrough_concepts.pop(existing_idx)
+            if existing_idx <= self.swap_position:
+                self.swap_position -= 1
+        insert_at = self.walkthrough_index + 1
+        self.walkthrough_concepts.insert(insert_at, name)
+        if insert_at <= self.swap_position:
+            self.swap_position += 1
+        if low not in [p.lower() for p in self.user_added_pillars]:
+            self.user_added_pillars.append(name)
+        self._last_surface = {"name": name, "is_new": True}
+
+    # Add-flow seams (override base): bring-in shows NOW, new pillar shows NEXT.
+    def _surface_pillar_for_add(self, name: str) -> None:
+        self._surface_at_current(name)
+
+    def _commit_new_pillar_for_add(self, name: str):
+        self._insert_pillar_next(name)
+        is_new = bool((self._last_surface or {}).get("is_new"))
+        counted = is_new and self._count_unshown("pillars", name)
+        if counted:
+            self._fire_turn(handlers.AddOutcome(action="added_new", pillar=name,
+                            level="pillar", counted=True, source="user_spontaneous"),
+                            name, False)
+        self._walk_touch(name)
+        msg = (f"Good call — I've added **{name}**; we'll get to it next." if is_new
+               else f"**{name}** is already part of the framework.")
+        yield self._emit_text(msg)
+
     def add_sub_point(self, pillar: str, text: str, *,
                       dry_run: bool = False, resolved: str | None = None):
         if resolved is not None:
@@ -484,106 +507,6 @@ class ExplainableAgent(BaseAgent):
         self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text,
                               "is_new": is_new, "matched": matched}
         return stored, is_new
-
-    # Confirm-before-commit: EXP previews every add and only commits + counts on "yes".
-    def _resolve_add_dest(self, text: str, parent: str | None):
-        """Read-only: where would this add land? Returns
-        (kind, pillar, stored, is_dup, status); status is presented/withheld/novel."""
-        presented = {n.lower() for n in self.presented_pillars()}
-        kb_names  = {p["name"].lower() for p in kb.get_all_pillars()}
-
-        def _status(name: str) -> str:
-            n = (name or "").lower()
-            return "presented" if n in presented else ("withheld" if n in kb_names else "novel")
-
-        if parent:
-            matched, _ = matching.match_pillar(parent)
-            pillar     = matched or matching.normalize_name(parent)
-            status     = _status(pillar)
-            stored, is_new = self.add_sub_point(pillar, text, dry_run=True)
-            return "sub_bullet", pillar, stored, (not is_new and status == "presented"), status
-        km = matching.locate(text)
-        if km.level == "concept" and km.pillar:
-            status = _status(km.pillar)
-            stored, is_new = self.add_sub_point(km.pillar, text, dry_run=True)
-            return "sub_bullet", km.pillar, stored, (not is_new and status == "presented"), status
-        if km.level == "pillar" and km.pillar:
-            return "pillar", km.pillar, None, (km.pillar.lower() in presented), _status(km.pillar)
-        name = matching.normalize_name(text)
-        return "pillar", name, None, (name.lower() in presented), _status(name)
-
-    def _preview_add(self, res, user_input: str):
-        text   = res.detail or user_input
-        parent = (res.parent if (res.parent and handlers._parent_is_explicit(res.parent, user_input))
-                  else None)
-        kind, pillar, stored, is_dup, status = self._resolve_add_dest(text, parent)
-        if is_dup:
-            msg = f"That's already covered under **{pillar}** as *{stored}*."
-            self._emit(msg); yield msg; return
-        self.pending_add = {"kind": kind, "pillar": pillar, "raw": text,
-                            "stored": stored, "status": status}
-        if kind == "sub_bullet":
-            if status == "presented":
-                msg = (f"I'll add *{stored}* under **{pillar}**, reply **yes** to confirm, or "
-                       f"tell me a different wording or area.")
-            elif status == "withheld":
-                msg = (f"It sounds like that belongs under **{pillar}**, want me to bring in "
-                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different area)*")
-            else:  # novel — suggest, but the user decides wording / where
-                msg = (f"I don't see **{pillar}** in the framework yet, I'd add *{stored}* under a "
-                       f"new pillar **{pillar}**. Reply **yes**, name an existing area to use "
-                       f"instead, or reword.")
-        elif status == "withheld":
-            msg = (f"**{pillar}** is part of the framework but not shown yet, want me to "
-                   f"bring it in? *(yes / no)*")
-        else:  # novel pillar
-            msg = (f"I don't see **{pillar}** in the framework yet, I'd add it as a new pillar. "
-                   f"Reply **yes**, name an existing area instead, or give a different name.")
-        self._emit(msg); yield msg
-
-    def _resolve_add_confirm(self, user_input: str):
-        pa       = self.pending_add
-        decision = handlers._classify_confirmation(user_input)
-        if decision == "confirm":
-            self.pending_add = None
-            counted = self._counts_as_new(pa["pillar"], pa.get("stored") or pa["raw"])
-            if pa["kind"] == "pillar":
-                self._surface_at_current(pa["pillar"])
-                if counted and (self._last_surface or {}).get("is_new"):
-                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
-                              level="pillar", counted=True, source="user_spontaneous"),
-                              self._evctx(), _sink)
-                lead = (f"Brought in **{pa['pillar']}**." if pa.get("status") == "withheld"
-                        else f"Noted, I've added **{pa['pillar']}** as a separate area.")
-                msg = lead + "\n\n" + self._render_pillar_block(pa["pillar"])
-            else:
-                if pa.get("status") != "presented":
-                    self._surface_at_current(pa["pillar"])
-                stored, _ = self.add_sub_point(pa["pillar"], pa["raw"], resolved=pa.get("stored"))
-                if counted:
-                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
-                              level="sub_bullet", counted=True, text=stored,
-                              source="user_spontaneous"), self._evctx(), _sink)
-                lead = (f"Brought in **{pa['pillar']}**, " if pa.get("status") == "withheld"
-                        else f"Good point, I've added it under **{pa['pillar']}**.")
-                msg = lead + " Here's how it looks now:\n\n" + self._render_pillar_block(pa["pillar"])
-            self._emit(msg); yield msg
-            return
-        if decision == "decline":
-            self.pending_add = None
-            msg = "No problem, I've left it out."
-            self._emit(msg); yield msg
-            return
-        # Anything else is an edit: re-classify the reply as the revised add and re-preview.
-        self.pending_add = None
-        new_res = intents.classify_intent(
-            user_input,
-            current_pillar=self.current_pillar() or "(none)",
-            current_bullets="(none)",
-            walkthrough_pillars=", ".join(self.walkthrough_concepts) or "(none)",
-            last_agent=self._last_agent_message() or "(nothing yet)",
-        )
-        yield from self._preview_add(new_res, user_input)
 
     # swap channel
     def _on_swap_now(self) -> bool:

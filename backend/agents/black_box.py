@@ -40,7 +40,6 @@ class BlackBoxAgent(BaseAgent):
         self.original_case = get_case("black_box")
         self.has_main_contribution = False
         self.user_added_pillars = []
-        self.pending_add        = None
         self._ack_index         = 0
         self.clarification_facts = get_clarification_facts("black_box")
 
@@ -134,7 +133,7 @@ class BlackBoxAgent(BaseAgent):
         log_user_message(self.session_id, user_input)
         self.history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
 
-        # Multi-point safeguard: an open pillar offer takes priority over routing.
+        # Add flow (single + multi) in progress takes priority over routing.
         if self.pending_pillar_offer is not None:
             yield from self._resolve_pillar_offer(user_input)
             return
@@ -149,22 +148,6 @@ class BlackBoxAgent(BaseAgent):
         )
         intent = res.intent
 
-        # Confirm-before-commit: an open add preview takes priority over routing.
-        if self.pending_add is not None:
-            yield from self._resolve_add_confirm(user_input, res)
-            return
-
-        # Multi-point safeguard: ≥2 separable additions. With a candidate pillar ->
-        # offer to add it (pending); otherwise -> passive reminder. (User turn already
-        # logged above.)
-        if (res.multi and self.pending is None and self.pending_suggestion is None
-                and getattr(self, "pending_placement", None) is None):
-            if res.pillar_name:
-                yield from self._offer_pillar(res.pillar_name, res.items)
-            else:
-                yield from self._safeguard_multi(res.items)
-            return
-
         if (self.pending is None and self.pending_suggestion is None
                 and getattr(self, "pending_placement", None) is None
                 and self.concept_swap.is_injected and intent not in ("add", "remove", "question")):
@@ -172,10 +155,13 @@ class BlackBoxAgent(BaseAgent):
                 yield from self._yield_rerender("Understood — I've taken that out.\n\n")
                 return
 
-        # Confirm-before-commit: a single add is previewed first; commit happens on confirm.
+        # Add → the unified per-item resolver (single = 1-item queue; multi splits).
         if (intent == "add" and self.pending is None and self.pending_suggestion is None
-                and getattr(self, "pending_placement", None) is None and not res.multi):
-            yield from self._preview_add(res, user_input)
+                and getattr(self, "pending_placement", None) is None):
+            items = res.items if res.multi else [res.detail or user_input]
+            parent = (res.parent if (res.parent
+                      and handlers._parent_is_explicit(res.parent, user_input)) else None)
+            yield from self._start_add_flow(items, default_parent=parent or res.pillar_name)
             return
 
         was_pending = self.pending is not None
@@ -227,118 +213,6 @@ class BlackBoxAgent(BaseAgent):
         existing.append(stored)
 
         return stored, True
-
-    # Confirm-before-commit: BB previews every add and only commits + counts on confirm.
-    # ("new pillar X with point(s)" is recognized upstream as multi and handled by the
-    # pillar-offer-then-walk flow, so it never reaches the single-add preview below.)
-    def _resolve_add_dest(self, text: str, parent: str | None):
-        """Read-only: where would this add land? Returns
-        (kind, pillar, stored, is_dup, status) where kind is 'pillar'|'sub_bullet'
-        and status is 'presented'|'withheld'|'novel'."""
-        presented = {n.lower() for n in self.presented_pillars()}
-        kb_names  = {p["name"].lower() for p in kb.get_all_pillars()}
-
-        def _status(name: str) -> str:
-            n = (name or "").lower()
-            return "presented" if n in presented else ("withheld" if n in kb_names else "novel")
-
-        if parent:
-            matched, _ = matching.match_pillar(parent)
-            pillar     = matched or matching.normalize_name(parent)
-            status     = _status(pillar)
-            stored, is_new = self._store_sub_point(pillar, text, dry_run=True)
-            return "sub_bullet", pillar, stored, (not is_new and status == "presented"), status
-        km = matching.locate(text)
-        if km.level == "concept" and km.pillar:
-            status = _status(km.pillar)
-            stored, is_new = self._store_sub_point(km.pillar, text, dry_run=True)
-            return "sub_bullet", km.pillar, stored, (not is_new and status == "presented"), status
-        if km.level == "pillar" and km.pillar:
-            return "pillar", km.pillar, None, (km.pillar.lower() in presented), _status(km.pillar)
-        name = matching.normalize_name(text)
-        return "pillar", name, None, (name.lower() in presented), _status(name)
-
-    def _preview_add(self, res, user_input: str):
-        text   = res.detail or user_input
-        parent = (res.parent if (res.parent and handlers._parent_is_explicit(res.parent, user_input))
-                  else None)
-        kind, pillar, stored, is_dup, status = self._resolve_add_dest(text, parent)
-        if is_dup:
-            yield from self._yield_rerender(
-                f"That's already covered under **{pillar}** as *{stored}*.\n\n")
-            return
-        self.pending_add = {"kind": kind, "pillar": pillar, "raw": text,
-                            "stored": stored, "status": status}
-        if kind == "sub_bullet":
-            if status == "presented":
-                msg = (f"I'll add *{stored}* under **{pillar}**, reply **yes** to confirm, or "
-                       f"tell me a different wording or pillar.")
-            elif status == "withheld":
-                msg = (f"It sounds like that belongs under **{pillar}**, want me to bring in "
-                       f"**{pillar}** and add *{stored}* there? *(yes, or name a different pillar)*")
-            else:  # novel — suggest, but the user decides wording / where
-                msg = (f"I don't see **{pillar}** in the framework yet — I'd add *{stored}* under a "
-                       f"new pillar **{pillar}**. Reply **yes**, name an existing pillar to use "
-                       f"instead, or reword.")
-        elif status == "withheld":
-            msg = (f"**{pillar}** is part of the framework but not shown yet — want me to "
-                   f"bring it in? *(yes / no)*")
-        else:  # novel pillar
-            msg = (f"I don't see **{pillar}** in the framework yet — I'd add it as a new pillar. "
-                   f"Reply **yes**, name an existing pillar instead, or give a different name.")
-        self._emit(msg); yield msg
-
-    def _resolve_add_confirm(self, user_input: str, res):
-        pa       = self.pending_add
-        decision = handlers._classify_confirmation(user_input)
-        if decision == "confirm":
-            self.pending_add = None
-            if pa["kind"] == "pillar":
-                self.surface_pillar(pa["pillar"])
-                if (self._last_surface or {}).get("is_new"):
-                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
-                              level="pillar", counted=True, source="user_spontaneous"),
-                              self._evctx(), _sink)
-                    lead = (f"Brought in **{pa['pillar']}**." if pa.get("status") == "withheld"
-                            else f"Added **{pa['pillar']}** as a new pillar.")
-                    yield from self._yield_rerender(lead + "\n\n")
-                else:
-                    yield from self._yield_rerender(
-                        f"**{pa['pillar']}** is already in the framework.\n\n")
-            else:
-                # Count iff not yet shown to the user (a withheld pillar's bullets were
-                # never shown, so contributing one counts even if it matches hidden KB).
-                counted = self._counts_as_new(pa["pillar"], pa.get("stored") or pa["raw"])
-                if pa.get("status") != "presented":
-                    self.surface_pillar(pa["pillar"])
-                stored, is_new = self._store_sub_point(pa["pillar"], pa["raw"],
-                                                       resolved=pa.get("stored"))
-                if counted:
-                    ev.record(handlers.AddOutcome(action="added_new", pillar=pa["pillar"],
-                              level="sub_bullet", counted=True, text=stored,
-                              source="user_spontaneous"), self._evctx(), _sink)
-                    lead = (f"Brought in **{pa['pillar']}**." if pa.get("status") == "withheld"
-                            else f"Added under **{pa['pillar']}**.")
-                    yield from self._yield_rerender(lead + "\n\n")
-                else:
-                    yield from self._yield_rerender(
-                        f"That's already covered under **{pa['pillar']}** as *{stored}*.\n\n")
-            return
-        if decision == "decline":
-            self.pending_add = None
-            yield from self._yield_rerender("No problem — I've left it out.\n\n")
-            return
-        # Anything else is an edit: re-classify the reply as the revised add and re-preview.
-        self.pending_add = None
-        new_res = intents.classify_intent(
-            user_input,
-            current_pillar="(none)",
-            current_bullets="(none)",
-            walkthrough_pillars=", ".join(self.kg_context["concepts"])
-                or "Strategic Fit, Solution Design & Scope, Feasibility",
-            last_agent=self._last_agent_text() or "(nothing yet)",
-        )
-        yield from self._preview_add(new_res, user_input)
 
     def _normalize_pillar(self, name: str) -> str:
         for p in kb.get_all_pillars():
@@ -419,9 +293,16 @@ class BlackBoxAgent(BaseAgent):
         self.user_added_pillars.append(name)
         self._last_surface = {"name": name, "is_new": True}
 
-    def add_sub_point(self, pillar: str, text: str) -> None:
-        stored, is_new = self._store_sub_point(pillar, text, "text")
-        self._last_sub_add = {"pillar": pillar, "stored": stored, "raw": text, "is_new": is_new}
+    def add_sub_point(self, pillar: str, text: str, *, dry_run: bool = False,
+                      resolved: str | None = None):
+        """Store (or, with dry_run, probe) a sub-point. Returns (stored, is_new) — unified
+        with EXP's signature so the shared add-flow can call one API on both agents."""
+        stored, is_new = self._store_sub_point(pillar, text, "text",
+                                               dry_run=dry_run, resolved=resolved)
+        if not dry_run:
+            self._last_sub_add = {"pillar": pillar, "stored": stored,
+                                  "raw": text, "is_new": is_new}
+        return stored, is_new
 
     # Outcome renderer
     def render_question(self, user_input):

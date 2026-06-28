@@ -74,6 +74,50 @@ WALK_SKIPPED = "Skipped **{bullet}**.\n\n"
 WALK_DONE    = "That's all your bullets, here's the updated plan:\n\n"
 
 
+# ── Add-flow (BB + EXP) per-item resolver ───────────────────────────────────────
+# Asked once per item: is this a top-level pillar, or a point under an existing pillar?
+ASK_PC = (
+    "Is **{item}** a new **pillar** (a top-level area of the framework), or a **bullet** "
+    "under an existing pillar?\n\n"
+    "*Reply **pillar**, name the pillar it belongs under, or say **bullet** if you're not "
+    "sure which pillar yet.*\n\n"
+)
+# Classify the user's reply to ASK_PC. {item},{reply}
+PC_CLASSIFIER = """\
+A user is adding "{item}" to a consulting framework. They were asked whether it is a
+new top-level PILLAR (a major area) or a BULLET (a detail) under an existing pillar.
+
+Classify their reply into exactly ONE branch:
+- "pillar": a new top-level area / pillar ("pillar", "new pillar", "its own area",
+  "a section", "make it top-level").
+- "bullet": a detail under a pillar — this INCLUDES a bare "bullet" / "point" / "a detail"
+  even when they DON'T name a pillar. If they name a pillar to file it under, put that
+  name in "parent".
+
+When in doubt, prefer "bullet".
+
+Respond ONLY with JSON, no markdown:
+{{"branch": "pillar|bullet", "parent": "pillar name or null"}}
+
+Reply: "{reply}"
+"""
+# Wording choice when the user's words match a standard KB phrasing. {user},{kb}
+ASK_WORDING = (
+    "Your bullet **{user}** matches a standard framework bullet, usually phrased as "
+    "**{kb}**. Reply **yes** to use the standard wording, or **no** to keep your own.\n\n"
+)
+# Concept placement loop: propose a parent, let the user accept / redirect / ask / drop.
+CONCEPT_PLACE = (
+    "I'd put **{item}** under **{pillar}**. **Accept**, name a **different pillar**, "
+    "**ask** me something, or **drop** it?\n\n"
+)
+# Confirm bringing in a withheld/novel parent pillar before adding the point. {pillar}
+BRING_IN = (
+    "**{pillar}** isn't in your framework yet. Reply **yes** to bring it in and add your "
+    "point there, or **no** to choose another pillar.\n\n"
+)
+
+
 CLARIFICATION_SYSTEM_PROMPT = """
 You are a BCG case interviewer conducting the clarification round before the
 candidate begins their structured analysis.

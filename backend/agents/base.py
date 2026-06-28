@@ -22,6 +22,7 @@ from backend.agents.prompts.base import (
     PILLAR_OFFER_DROP, PILLAR_DECLINE_PLACEMENT,
     WALK_INTRO, WALK_ASK_UNDER, WALK_ASK_PLACE, WALK_ADDED, WALK_DUP,
     WALK_SKIPPED, WALK_DONE, WALK_REPLY_PROMPT,
+    ASK_PC, PC_CLASSIFIER, ASK_WORDING, CONCEPT_PLACE, BRING_IN,
 )
 
 from dotenv import load_dotenv
@@ -111,6 +112,13 @@ class BaseAgent:
     @staticmethod
     def _norm_bullet(b: str) -> str:
         return grounding._strip_source_refs(b or "").strip().lower()
+
+    @staticmethod
+    def _user_wording(text: str) -> str:
+        """The user's own words, lightly tidied — strip + capitalize first letter + drop a
+        trailing '.'. No rewrite (used when the user keeps their phrasing over the KB's)."""
+        s = (text or "").strip().rstrip(".").strip()
+        return (s[:1].upper() + s[1:]) if s else s
 
     def _capture_shown(self) -> dict:
         return {
@@ -212,6 +220,18 @@ class BaseAgent:
         """Dispatch the pending multi-point state by stage."""
         st = self.pending_pillar_offer
         stage = st.get("stage")
+        # New add-flow stages (BB + EXP).
+        if stage == "ask_pc":
+            yield from self._af_ask_pc_reply(user_input); return
+        if stage == "pillar_wording":
+            yield from self._af_pillar_wording_reply(user_input); return
+        if stage == "concept_loop":
+            yield from self._af_concept_loop_reply(user_input); return
+        if stage == "concept_bring_in":
+            yield from self._af_concept_bring_in_reply(user_input); return
+        if stage == "concept_wording":
+            yield from self._af_concept_wording_reply(user_input); return
+        # Legacy multi-point walk (still used by HITL / other entries).
         if stage in ("walk", "walk_place"):
             yield from self._walk_reply(user_input); return
         if stage == "decline_where":
@@ -382,17 +402,22 @@ class BaseAgent:
         return
         yield   # pragma: no cover  (make this a generator)
 
-    def _commit_sub_bullet(self, bullet: str, pillar: str):
+    def _commit_sub_bullet(self, bullet: str, pillar: str, *, chosen: str | None = None,
+                           count_text: str | None = None):
         """EXP/BB: store `bullet` under `pillar` via add_sub_point (which canonicalizes
         to the KB phrasing + dedups), then count by the unified shown rule and fire a
-        clean sub_bullet event. Using add_sub_point (not add_handler) means the stored
-        text matches the snapshot's KB phrasing — so paraphrases of a shown bullet are
-        recognized — and avoids add_handler's concept/duplicate outcome. HITL overrides."""
+        clean sub_bullet event. `chosen` (if given) is stored verbatim (the user's kept
+        wording); `count_text` (if given) is the canonical phrasing used for the COUNT, so
+        a kept-own-words point still dedups/counts against the shown snapshot — never the
+        post-store text. Both default to today's behavior. HITL overrides."""
         if pillar and pillar.lower() not in {p.lower() for p in self.presented_pillars()}:
             self.surface_pillar(pillar)                 # surface a relocate target (uncounted)
-        self.add_sub_point(pillar, bullet)
+        if chosen is not None:
+            self.add_sub_point(pillar, bullet, resolved=chosen)
+        else:
+            self.add_sub_point(pillar, bullet)
         stored = (getattr(self, "_last_sub_add", None) or {}).get("stored") or bullet
-        counted = self._count_unshown("bullets", stored)
+        counted = self._count_unshown("bullets", count_text or stored)
         if counted:
             self._fire_turn(handlers.AddOutcome(action="added_new", pillar=pillar,
                             level="sub_bullet", counted=True, text=stored,
@@ -419,6 +444,275 @@ class BaseAgent:
                                       counted=counted, source="user_spontaneous")
         self._walk_touch(pillar)
         yield from self._render_outcome(outcome, name)
+
+    # ── Add flow (BB + EXP): one per-item resolver over pending_pillar_offer ───────
+    # Reuses the walk's queue/snapshot/_walk_touch/_walk_done_render. Single = a 1-item
+    # queue. Two commit seams differ per agent: _surface_pillar_for_add (bring-in a
+    # parent so a sub-point shows now) and _commit_new_pillar_for_add (a new top-level
+    # pillar). Defaults below are BB-shaped; EXP overrides both for walkthrough placement.
+
+    def _surface_pillar_for_add(self, name: str) -> None:
+        """Bring a withheld/novel parent in so a sub-point renders. BB: surface_pillar
+        (append to user_added). EXP overrides → _surface_at_current (show now)."""
+        self.surface_pillar(name)
+
+    def _commit_new_pillar_for_add(self, name: str):
+        """Commit a user-added top-level pillar (no full re-render here — _walk_done_render
+        handles display). Count once iff newly surfaced. EXP overrides for show-next
+        placement in the walkthrough."""
+        self.surface_pillar(name)
+        is_new = bool((self._last_surface or {}).get("is_new"))
+        counted = is_new and self._count_unshown("pillars", name)
+        if counted:
+            self._fire_turn(handlers.AddOutcome(action="added_new", pillar=name,
+                            level="pillar", counted=True, source="user_spontaneous"),
+                            name, False)
+        self._walk_touch(name)
+        msg = (f"Added **{name}** as a new pillar." if is_new
+               else f"**{name}** is already in the framework.")
+        yield self._emit_text(msg)
+
+    def _pillar_status(self, name: str) -> str:
+        n = (name or "").lower()
+        if n in {p.lower() for p in self.presented_pillars()}:
+            return "presented"
+        if n in {p["name"].lower() for p in kb.get_all_pillars()}:
+            return "withheld"
+        return "novel"
+
+    def _known_pillar(self, text: str) -> str | None:
+        """Return a KB/presented pillar name if `text` clearly names one (exact or
+        longest substring, both directions), else None — NO LLM coercion."""
+        probe = self._strip_to_area(text) or (text or "")
+        low = probe.lower().strip()
+        if not low:
+            return None
+        names = [p["name"] for p in kb.get_all_pillars()]
+        names += [p for p in self.presented_pillars()
+                  if p.lower() not in {n.lower() for n in names}]
+        hit = None
+        for name in names:
+            nl = name.lower()
+            if (low in nl or nl in low) and (hit is None or len(name) > len(hit)):
+                hit = name
+        return hit
+
+    def _resolve_area_strict(self, area: str) -> str:
+        """Relocate-target resolver that NEVER coerces to a nearby KB pillar via the LLM:
+        a clear KB/presented hit wins; otherwise take the user's words literally as a new
+        pillar. Always returns a name."""
+        return self._known_pillar(area) or matching.normalize_name(
+            self._strip_to_area(area) or area)
+
+    # Pillar-intent and sub-point-intent keyword fast-paths for ask_pc.
+    _PC_PILLAR_WORDS = ("new pillar", "own pillar", "its own", "a pillar", "as a pillar",
+                        "new area", "new section", "separate pillar", "top level",
+                        "top-level", "make it a pillar", "category", "theme")
+    _PC_SUBPOINT_WORDS = ("point", "bullet", "sub-point", "subpoint", "sub point",
+                          "detail", "under ", "below ")
+
+    def _classify_pc(self, reply: str, item: str) -> dict:
+        """Map the ask_pc reply to pillar | sub_point (+ optional parent). Deterministic
+        fast-paths first; LLM only when ambiguous. NEVER returns 'unclear' — anything we
+        can't pin to a pillar becomes a sub_point, which converges at the place-ask
+        (which itself offers 'its own pillar'), so ask_pc can't loop."""
+        low = (reply or "").strip().lower().strip("?.! ")
+        # A named existing pillar (not phrased as a NEW one) -> a point under it.
+        known = self._known_pillar(reply)
+        if known and not any(w in low for w in
+                             ("new pillar", "own pillar", "its own", "separate", "as a new")):
+            return {"branch": "sub_point", "parent": known}
+        # Explicit pillar intent (and not also calling it a point/under).
+        if (any(w in low for w in self._PC_PILLAR_WORDS)
+                and not any(w in low for w in ("point", "bullet", "under "))):
+            return {"branch": "pillar", "parent": None}
+        if any(w in low for w in self._PC_SUBPOINT_WORDS):
+            return {"branch": "sub_point", "parent": None}
+        # Ambiguous -> LLM, folded to pillar-or-sub_point (sub_point is the safe default).
+        try:
+            p = classify_json(PC_CLASSIFIER.format(item=item, reply=reply))
+            if p.get("branch") == "pillar":
+                return {"branch": "pillar", "parent": None}
+            par = p.get("parent")
+            par = par.strip() if isinstance(par, str) and par.strip() else None
+            return {"branch": "sub_point", "parent": par}
+        except Exception as e:
+            logging.warning(f"[ADD-FLOW] pc classifier error: {e} -> sub_point")
+            return {"branch": "sub_point", "parent": None}
+
+    def _start_add_flow(self, items: list[str], default_parent: str | None = None):
+        """Arm the per-item add resolver. default_parent (an explicit 'under X' / new
+        'pillar X with …') skips ask_pc straight to the sub-point branch for every item."""
+        self.pending_pillar_offer = {
+            "stage": "ask_pc", "queue": [i for i in items if i and i.strip()],
+            "cur": None, "home": None, "rounds": 0, "touched": [], "kb": None,
+            "default_parent": default_parent, "shown": self._capture_shown(),
+        }
+        yield from self._af_start_item()
+
+    def _af_start_item(self):
+        st = self.pending_pillar_offer
+        if not st["queue"]:
+            touched = list(st.get("touched", []))
+            self.pending_pillar_offer = None
+            yield from self._walk_done_render(touched)
+            return
+        item = st["queue"][0]
+        st["cur"] = None; st["kb"] = None; st["rounds"] = 0; st["stage"] = "ask_pc"
+        dp = st.get("default_parent")
+        if dp:                                   # explicit parent → skip ask_pc
+            st["cur"] = self._resolve_area_strict(dp)
+            yield from self._af_present_concept_loop(); return
+        yield self._emit_text(ASK_PC.format(item=item))
+
+    def _af_advance(self):
+        st = self.pending_pillar_offer
+        if st and st["queue"]:
+            st["queue"].pop(0)
+        yield from self._af_start_item()
+
+    def _af_ask_pc_reply(self, user_input: str):
+        st = self.pending_pillar_offer
+        item = st["queue"][0]
+        res = self._classify_pc(user_input, item)
+        if res["branch"] == "pillar":
+            yield from self._af_pillar_branch(item); return
+        # sub_point (incl. the safe default): resolve a home, else fall to the place-ask.
+        proposed = self._resolve_area_strict(res["parent"]) if res["parent"] else None
+        if not proposed:
+            proposed = matching.locate(item).pillar
+        st["cur"] = proposed
+        yield from self._af_present_concept_loop()
+
+    def _af_pillar_branch(self, item: str):
+        """User says this item is a top-level pillar. If it maps to a KB pillar — via a
+        pillar OR a concept match, both of which carry `km.pillar` — offer the wording
+        choice (KB pillar name vs the user's words); else create a novel pillar. Uses
+        `km.pillar` (the pillar), never `km.matched_text` (a concept name)."""
+        st = self.pending_pillar_offer
+        km = matching.locate(item)
+        if km.pillar:
+            kb_name = km.pillar
+            st["kb"] = kb_name; st["cur"] = kb_name
+            if self._norm_bullet(kb_name) != self._norm_bullet(self._user_wording(item)):
+                st["stage"] = "pillar_wording"
+                yield self._emit_text(
+                    ASK_WORDING.format(user=self._user_wording(item), kb=kb_name))
+                return
+            yield from self._commit_new_pillar_for_add(kb_name)
+        else:
+            yield from self._commit_new_pillar_for_add(matching.normalize_name(item))
+        yield from self._af_advance()
+
+    def _af_pillar_wording_reply(self, user_input: str):
+        st = self.pending_pillar_offer
+        item = st["queue"][0]
+        decision = handlers._classify_confirmation(user_input)
+        if decision == "confirm":
+            chosen = st["kb"]
+        elif decision == "decline":
+            chosen = self._user_wording(item)
+        else:
+            yield self._emit_text(
+                ASK_WORDING.format(user=self._user_wording(item), kb=st["kb"])); return
+        yield from self._commit_new_pillar_for_add(chosen)
+        yield from self._af_advance()
+
+    def _af_present_concept_loop(self):
+        st = self.pending_pillar_offer
+        item = st["queue"][0]
+        st["stage"] = "concept_loop"
+        if st.get("cur"):
+            yield self._emit_text(CONCEPT_PLACE.format(item=item, pillar=st["cur"]))
+        else:
+            yield self._emit_text(WALK_ASK_PLACE.format(bullet=item))
+
+    def _af_concept_loop_reply(self, user_input: str):
+        st = self.pending_pillar_offer
+        item = st["queue"][0]
+        pillar = st.get("cur")
+        low = (user_input or "").lower().strip("?.! ")
+        if pillar and low in self._WALK_KEEP_FAST:
+            yield from self._af_accept(); return
+        if low in self._WALK_SKIP_FAST:
+            yield self._emit_text(WALK_SKIPPED.format(bullet=item))
+            yield from self._af_advance(); return
+        if pillar is None:                       # the place-ask: resolve in one step
+            if any(w in low for w in ("own pillar", "its own", "separate", "new pillar",
+                                      "own area")):
+                yield from self._commit_new_pillar_for_add(matching.normalize_name(item))
+                yield from self._af_advance(); return
+            known = self._known_pillar(user_input)
+            if known:
+                st["cur"] = known
+                yield from self._af_accept(); return
+        res = self._classify_walk_reply(user_input, item, pillar)
+        action, area = res["action"], res["area"]
+        if action == "keep" and pillar:
+            yield from self._af_accept(); return
+        if action == "relocate" and area:
+            st["cur"] = self._resolve_area_strict(area)
+            yield from self._af_present_concept_loop(); return
+        if action == "own_area":
+            yield from self._commit_new_pillar_for_add(matching.normalize_name(item))
+            yield from self._af_advance(); return
+        if action == "skip":
+            yield self._emit_text(WALK_SKIPPED.format(bullet=item))
+            yield from self._af_advance(); return
+        if action == "question":
+            yield from self._walk_answer(user_input)
+            yield from self._af_present_concept_loop(); return
+        yield from self._af_present_concept_loop()         # unclear → re-ask, never default
+
+    def _af_accept(self):
+        st = self.pending_pillar_offer
+        status = self._pillar_status(st["cur"])
+        if status == "presented":
+            yield from self._af_wording_step(); return
+        st["stage"] = "concept_bring_in"
+        yield self._emit_text(BRING_IN.format(pillar=st["cur"]))
+
+    def _af_concept_bring_in_reply(self, user_input: str):
+        st = self.pending_pillar_offer
+        decision = handlers._classify_confirmation(user_input)
+        if decision == "confirm":
+            self._surface_pillar_for_add(st["cur"])       # bring it in (now)
+            yield from self._af_wording_step(); return    # …and still add the point
+        if decision == "decline":
+            st["cur"] = None                              # don't drop — ask where instead
+            yield from self._af_present_concept_loop(); return
+        yield self._emit_text(BRING_IN.format(pillar=st["cur"]))
+
+    def _af_wording_step(self):
+        """Decide the count on the canonical phrasing (dry-run) BEFORE commit. Duplicate →
+        no add/no count. Same wording → commit. Differs → ask the wording choice."""
+        st = self.pending_pillar_offer
+        item = st["queue"][0]; pillar = st["cur"]
+        stored, is_new = self.add_sub_point(pillar, item, dry_run=True)
+        if not is_new:
+            yield self._emit_text(WALK_DUP.format(stored=stored, pillar=pillar))
+            yield from self._af_advance(); return
+        st["kb"] = stored
+        if self._norm_bullet(stored) == self._norm_bullet(self._user_wording(item)):
+            yield from self._commit_sub_bullet(item, pillar, chosen=stored, count_text=stored)
+            yield from self._af_advance(); return
+        st["stage"] = "concept_wording"
+        yield self._emit_text(
+            ASK_WORDING.format(user=self._user_wording(item), kb=stored))
+
+    def _af_concept_wording_reply(self, user_input: str):
+        st = self.pending_pillar_offer
+        item = st["queue"][0]; pillar = st["cur"]; kb = st["kb"]
+        decision = handlers._classify_confirmation(user_input)
+        if decision == "confirm":
+            chosen = kb
+        elif decision == "decline":
+            chosen = self._user_wording(item)
+        else:
+            yield self._emit_text(
+                ASK_WORDING.format(user=self._user_wording(item), kb=kb)); return
+        yield from self._commit_sub_bullet(item, pillar, chosen=chosen, count_text=kb)
+        yield from self._af_advance()
 
     def begin_analysis(self, *args, **kwargs):
         raise NotImplementedError(
