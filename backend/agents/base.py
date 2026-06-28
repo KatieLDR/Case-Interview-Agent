@@ -392,8 +392,10 @@ class BaseAgent:
                 else WALK_ASK_PLACE.format(bullet=bullet))
 
     def _walk_answer(self, user_input: str):
-        """Answer a question raised mid-walk, in context. Default uses the arm's
-        grounded Q&A renderer (EXP/BB); HITL overrides to use _stream_concept_qa."""
+        """Answer a question raised mid-walk/mid-add, in context. Default uses the arm's
+        grounded Q&A renderer (EXP/BB); HITL overrides to use _stream_concept_qa. A mid-flow
+        question is a real user question, so tally it (parity with questions elsewhere)."""
+        ev.question(self._evctx(), _sink)
         yield from self.render_question(user_input)
 
     def _walk_done_render(self, touched: list[str]):
@@ -684,13 +686,21 @@ class BaseAgent:
         yield self._emit_text(BRING_IN.format(pillar=st["cur"]))
 
     def _af_wording_step(self):
-        """Decide the count on the canonical phrasing (dry-run) BEFORE commit. Duplicate →
-        no add/no count. Same wording → commit. Differs → ask the wording choice."""
+        """Decide the count on the canonical phrasing (dry-run) BEFORE commit. A KB-default
+        match (is_new=False) only counts as an already-covered duplicate when the pillar was
+        SHOWN to the user at arm time; under a not-yet-shown (withheld) pillar the user never
+        saw that default, so it's their reveal → commit + count. Same wording → commit.
+        Differs → ask the wording choice."""
         st = self.pending_pillar_offer
         item = st["queue"][0]; pillar = st["cur"]
         stored, is_new = self.add_sub_point(pillar, item, dry_run=True)
         if not is_new:
-            yield self._emit_text(WALK_DUP.format(stored=stored, pillar=pillar))
+            pillar_shown = pillar.lower() in (st.get("shown") or {}).get("pillars", set())
+            if pillar_shown:
+                yield self._emit_text(WALK_DUP.format(stored=stored, pillar=pillar))
+                yield from self._af_advance(); return
+            # withheld pillar's KB-default the user never saw → counts (snapshot didn't have it)
+            yield from self._commit_sub_bullet(item, pillar, chosen=stored, count_text=stored)
             yield from self._af_advance(); return
         st["kb"] = stored
         if self._norm_bullet(stored) == self._norm_bullet(self._user_wording(item)):

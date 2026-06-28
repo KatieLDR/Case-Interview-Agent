@@ -415,36 +415,19 @@ class ExplainableAgent(BaseAgent):
         self._last_surface = {"name": name, "is_new": True}
 
     def _surface_at_current(self, name: str) -> None:
-        """Bring a withheld/novel pillar in AT the current walkthrough position (vs
-        appending to the end). It then sits inside presented_pillars() — so counting
-        reads its bullets as shown — and is marked seen so it isn't re-walked at the
-        end. The current concept is unchanged."""
-        if (name.lower() in [c.lower() for c in self.walkthrough_concepts]
-                or name.lower() in [p.lower() for p in self.user_added_pillars]):
-            self._last_surface = {"name": name, "is_new": False}
-            return
-        idx = self.walkthrough_index
-        self.walkthrough_concepts.insert(idx, name)
-        if idx <= self.swap_position:
-            self.swap_position += 1
-        self.walkthrough_index = idx + 1
-        self.user_added_pillars.append(name)
-        self._seen_concepts.add(name.lower())
-        self._last_surface = {"name": name, "is_new": True}
-
-    def _insert_pillar_next(self, name: str) -> None:
-        """Show-NEXT placement for a user-added top-level pillar: insert at
-        `walkthrough_index + 1` so the next advance lands on it; drop any later duplicate
-        (e.g. a withheld KB pillar scheduled ahead) so it shows once; do NOT bump
-        `walkthrough_index` (stay on the current pillar) and do NOT mark it seen — else
-        `_advance_to_next_unseen` would skip it forever. Sets `_last_surface`."""
+        """Pull a not-yet-shown (withheld/novel) pillar in NEXT TO the current one and make
+        it the current concept: if it already sits at/before the current index it's already
+        shown (no-op, is_new=False); otherwise remove any later occurrence (so it shows
+        once), insert at `walkthrough_index + 1`, point the index ONTO it, mark it seen (its
+        block is rendered now by the add flow's _walk_done_render) and record it. So a later
+        bullet in the same batch sees it as presented."""
         low = name.lower()
         existing_idx = next((i for i, c in enumerate(self.walkthrough_concepts)
                              if c.lower() == low), None)
         if existing_idx is not None and existing_idx <= self.walkthrough_index:
             self._last_surface = {"name": name, "is_new": False}   # already shown/current
             return
-        if existing_idx is not None:                               # later dup → pop it
+        if existing_idx is not None:                               # later dup → remove original
             self.walkthrough_concepts.pop(existing_idx)
             if existing_idx <= self.swap_position:
                 self.swap_position -= 1
@@ -452,16 +435,19 @@ class ExplainableAgent(BaseAgent):
         self.walkthrough_concepts.insert(insert_at, name)
         if insert_at <= self.swap_position:
             self.swap_position += 1
+        self.walkthrough_index = insert_at                         # point there directly
         if low not in [p.lower() for p in self.user_added_pillars]:
             self.user_added_pillars.append(name)
+        self._seen_concepts.add(low)
         self._last_surface = {"name": name, "is_new": True}
 
-    # Add-flow seams (override base): bring-in shows NOW, new pillar shows NEXT.
+    # Add-flow seams (override base): both bring-in and a new pillar pull it in next to
+    # the current concept and point the index there (one placement, _surface_at_current).
     def _surface_pillar_for_add(self, name: str) -> None:
         self._surface_at_current(name)
 
     def _commit_new_pillar_for_add(self, name: str):
-        self._insert_pillar_next(name)
+        self._surface_at_current(name)
         is_new = bool((self._last_surface or {}).get("is_new"))
         counted = is_new and self._count_unshown("pillars", name)
         if counted:
@@ -469,7 +455,7 @@ class ExplainableAgent(BaseAgent):
                             level="pillar", counted=True, source="user_spontaneous"),
                             name, False)
         self._walk_touch(name)
-        msg = (f"Good call — I've added **{name}**; we'll get to it next." if is_new
+        msg = (f"Good call — I've added **{name}**." if is_new
                else f"**{name}** is already part of the framework.")
         yield self._emit_text(msg)
 
