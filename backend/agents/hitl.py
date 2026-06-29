@@ -502,6 +502,10 @@ class HITLAgent(BaseAgent):
             if pres.intent in ("question", "doubt") and not pres.multi:
                 self.awaiting_user_suggestion = False
                 ev.question(self._evctx(modality="text"), _sink)
+                current = self._current_concept()
+                if (self.swap_presented and not self.concept_swap.is_detected
+                        and current is not None and self._is_wrong_concept(current)):
+                    ev.swap_questioned(self._evctx(modality="text"), _sink)
                 yield from self._stream_concept_qa()
                 yield from self._stream_proactive_prompt()
                 return

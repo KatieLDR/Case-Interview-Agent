@@ -679,6 +679,11 @@ async def _attach_buttons(agent):
     if cl.user_session.get("ended", False):
         return
 
+    # During the wording-choice question (KB phrasing vs the user's own words) the reply is
+    # a plain yes/no — don't attach any action button.
+    if getattr(agent, "awaiting_wording_choice", False):
+        return
+
     # HITL-specific button logic
     if isinstance(agent, HITLAgent):
         if agent.phase == "clarification":
