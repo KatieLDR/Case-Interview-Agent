@@ -173,7 +173,7 @@ async def on_lets_go(action: cl.Action):
     await asyncio.sleep(3)
     await cl.Message(content=agent.get_opening_message()).send()
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(8)
     await cl.Message(
         content=(
             "💬 **Before we begin:** Feel free to ask any questions about the case, "
