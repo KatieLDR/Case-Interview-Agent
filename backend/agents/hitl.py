@@ -883,6 +883,7 @@ class HITLAgent(BaseAgent):
             prefix = f"**{concept}**\n{display}"
             if is_first:
                 prefix = "💡 When you're finished, click ‼️End Session to close your session. Note: this cannot be undone. \n\n Here is the first pillar I recommend. Do you want to include it in your framework plan?\n\n" + prefix
+            prefix += "\n\n*Ask any questions about this pillar or bullet if anything is unclear.*"
 
             self.history.append(
                 types.Content(role="user",
@@ -1313,12 +1314,22 @@ class HITLAgent(BaseAgent):
         concept = self._current_concept()
         if concept is None:
             return
-        is_swap = self._is_wrong_concept(concept)
-        req = (concept in self.justification_pillars) or is_swap
+        if self._is_wrong_concept(concept):
+            # Excluding the wrong concept via the button IS the catch — confirm immediately
+            # (no typed-justification gate), mirroring the text-detection path, so it always
+            # records swap_detected.
+            self.pending = h.PendingAction(type="remove_pillar", target=concept,
+                                           level="pillar", is_swap=True)
+            pa = self.pending
+            logging.info(f"[REJECT] swap caught via button — concept='{concept}'")
+            outcome = h.resolve_pending(self, "", decision="confirm")
+            yield from self.render_removal(outcome, pa=pa)
+            return
+        req = concept in self.justification_pillars
         self.pending = h.PendingAction(
             type="remove_pillar", target=concept, level="pillar",
-            is_swap=is_swap, requires_justification=req)
-        logging.info(f"[REJECT] parked pending concept='{concept}' (swap={is_swap}, req_just={req})")
+            is_swap=False, requires_justification=req)
+        logging.info(f"[REJECT] parked pending concept='{concept}' (swap=False, req_just={req})")
         if req:
             yield (
                 f"Before we exclude **{concept}** — what's your reasoning for leaving it "
