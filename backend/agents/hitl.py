@@ -19,6 +19,7 @@ from backend.agents.prompts.hitl import (
     PROACTIVE_PROMPTS, JUSTIFICATION_ACKS, SUB_BULLET_FORMAT_PROMPT,
     HITL_CLARIFICATION_SYSTEM_PROMPT, HITL_MAIN_SYSTEM_PROMPT,
 )
+from backend.agents.prompts.base import ASK_WORDING
 from backend.tools.concept_swap import ConceptSwap
 
 CASE_TYPE = "AI Implementation"
@@ -84,6 +85,9 @@ class HITLAgent(BaseAgent):
         self.awaiting_sub_point        = False
         self.awaiting_revisit_add      = False
         self.awaiting_pillar_name      = False
+        self.awaiting_wording_choice   = False
+        self._wording_ctx              = None
+        self._sub_canon                = {}   # pillar(norm) -> {canonical bullet keys}
         self.revisit_target            = None
         self.post_walkthrough_revisit  = False
         self.prompt_index              = 0
@@ -269,7 +273,8 @@ class HITLAgent(BaseAgent):
 
     def _store_sub_point(self, pillar: str, item: str, modality: str = "text",
                          source: str = "user_spontaneous",
-                         *, resolved: str | None = None) -> tuple[str, bool]:
+                         *, resolved: str | None = None, count_as: str | None = None,
+                         dry_run: bool = False) -> tuple[str, bool]:
         pillar  = self._normalize_pillar(pillar)
         if resolved is not None:
             # Caller already resolved the KB phrasing (e.g. the sub-point navigate
@@ -282,6 +287,12 @@ class HITLAgent(BaseAgent):
             if not matched:
                 matched = matching.canonical_add_bullet(item, refs=False)
             stored  = matched if matched else self._format_sub_bullet(item)
+        # `stored` is the display text; `key` is the canonical phrasing the dedup
+        # decision and count key on. For a kept-own-words point the caller passes
+        # count_as=<KB phrasing>, so it still dedups against the shown snapshot and
+        # counts once (never the user's verbatim text).
+        key  = count_as if count_as is not None else stored
+        kkey = self._norm_bullet(key)
         # Dedup against what the pillar already shows: the streamed block (if the
         # pillar has been presented) AND its canonical KB sub-bullets, so a
         # KB-matched bullet for a not-yet-streamed pillar isn't duplicated on render.
@@ -293,18 +304,67 @@ class HITLAgent(BaseAgent):
         if kb_pillar:
             shown_lines.update(grounding._strip_source_refs(b).strip().lower()
                                for b in kb_pillar.get("sub_bullets", []))
-        if stored.lower() in shown_lines:
+        if kkey in shown_lines or kkey in self._sub_canon.get(pillar, set()):
             return stored, False
-        existing = self.user_sub_points.setdefault(pillar, [])
-        if any(s.lower() == stored.lower() for s in existing):
+        existing = self.user_sub_points.get(pillar, [])
+        if any(self._norm_bullet(s) == kkey for s in existing):
             logging.info(f"[SUB-POINT] duplicate skipped: '{stored}' under '{pillar}'")
             return stored, False
-        existing.append(stored)
+        if dry_run:
+            return stored, True
+        self.user_sub_points.setdefault(pillar, []).append(stored)
+        self._sub_canon.setdefault(pillar, set()).add(kkey)
         ev.record(h.AddOutcome(action="added_new", pillar=pillar, level="sub_bullet",
                                counted=True, text=stored, source=source),
                   self._evctx(source=source, modality=modality), _sink)
         logging.info(f"[SUB-POINT] '{item}' → '{stored}' under '{pillar}'")
         return stored, True
+
+    def _maybe_ask_wording(self, pillar: str, user_input: str, *, revisit: bool):
+        """If the user's NEW sub-bullet maps to a KB point phrased differently, arm the
+        wording choice (yield ASK_WORDING) and return True so the caller stops; else
+        return False so the caller commits as usual. Probes via a dry-run store (no
+        mutation, no event)."""
+        stored, is_new = self._store_sub_point(pillar, user_input, modality="button",
+                                               dry_run=True)
+        if is_new and self._norm_bullet(stored) != self._norm_bullet(
+                self._user_wording(user_input)):
+            self.awaiting_wording_choice = True
+            self._wording_ctx = {"kind": "sub_bullet", "pillar": pillar,
+                                 "raw": user_input, "kb": stored, "revisit": revisit}
+            yield ASK_WORDING.format(user=self._user_wording(user_input), kb=stored)
+            return True
+        return False
+
+    def _render_after_add(self, concept: str, stored: str, is_new: bool, *, revisit: bool):
+        """Post-add render shared by the direct add paths and the wording-choice reply."""
+        if revisit:
+            lead = (f"Added to **{concept}**." if is_new
+                    else f"That's already covered under **{concept}** as *{stored}*.")
+            yield (
+                f"{lead}\n\n"
+                f"Anything else to add to **{concept}**? "
+                f"Click **✅ Done adding** when you're finished."
+            )
+            return
+        block  = self.concept_blocks.get(concept, "").strip()
+        points = self.user_sub_points.get(concept, [])
+        rerender = f"**{concept}**"
+        if block:
+            rerender += f"\n{block}"
+        if points:
+            rerender += "\n" + "\n".join(f"- {p}" for p in points)
+        lead = (
+            f"Added under **{concept}**. Here's how it looks now:"
+            if is_new else
+            f"That's already covered under **{concept}** as *{stored}*. Here's how it looks now:"
+        )
+        yield (
+            f"{lead}\n\n"
+            f"{rerender}\n\n"
+            f"Anything else to add under **{concept}**? "
+            f"When you're done (or have a question) click ✅ Done to exit editing mode. "
+        )
 
     # Main phase — stateful walkthrough router
     def _stream_main(self, user_input: str):
@@ -325,6 +385,31 @@ class HITLAgent(BaseAgent):
             yield from self.render_removal(outcome, pa=pa)
             return
 
+        # Wording choice (KB phrasing vs the user's own words) — a yes/no answer to
+        # ASK_WORDING armed by an add-pillar or add-sub-bullet path. Intercept BEFORE
+        # the add-mode branches so the reply is read as the answer, not a new item.
+        if self.awaiting_wording_choice:
+            ctx = self._wording_ctx or {}
+            log_user_message(self.session_id, f"[WORDING CHOICE] {user_input}")
+            decision = h._classify_confirmation(user_input)
+            if decision not in ("confirm", "decline"):
+                yield ASK_WORDING.format(user=self._user_wording(ctx.get("raw", "")),
+                                         kb=ctx.get("kb", ""))
+                return
+            self.awaiting_wording_choice = False
+            self._wording_ctx = None
+            if ctx.get("kind") == "pillar":
+                label = ctx["kb"] if decision == "confirm" else self._user_wording(ctx["raw"])
+                yield from self._go_to_pillar(ctx["raw"], chosen_label=label)
+                return
+            chosen = ctx["kb"] if decision == "confirm" else self._user_wording(ctx["raw"])
+            stored, is_new = self._store_sub_point(ctx["pillar"], ctx["raw"],
+                                                   modality="button", resolved=chosen,
+                                                   count_as=ctx["kb"])
+            yield from self._render_after_add(ctx["pillar"], stored, is_new,
+                                              revisit=ctx.get("revisit", False))
+            return
+
         if self.awaiting_sub_point:
             concept = self._current_concept() or "this concept"
             log_user_message(self.session_id, f"[SUB-POINT ADD] {user_input}")
@@ -335,27 +420,10 @@ class HITLAgent(BaseAgent):
                 log_agent_response(self.session_id, msg)
                 yield msg
                 return
+            if (yield from self._maybe_ask_wording(concept, user_input, revisit=False)):
+                return
             stored, is_new = self._store_sub_point(concept, user_input, modality="button")
-
-            block  = self.concept_blocks.get(concept, "").strip()
-            points = self.user_sub_points.get(concept, [])
-            rerender = f"**{concept}**"
-            if block:
-                rerender += f"\n{block}"
-            if points:
-                rerender += "\n" + "\n".join(f"- {p}" for p in points)
-
-            lead = (
-                f"Added under **{concept}**. Here's how it looks now:"
-                if is_new else
-                f"That's already covered under **{concept}** as *{stored}*. Here's how it looks now:"
-            )
-            yield (
-                f"{lead}\n\n"
-                f"{rerender}\n\n"
-                f"Anything else to add under **{concept}**? "
-                f"When you're done (or have a question) click ✅ Done to exit editing mode. "
-            )
+            yield from self._render_after_add(concept, stored, is_new, revisit=False)
             return
 
         if self.awaiting_revisit_add:
@@ -368,14 +436,10 @@ class HITLAgent(BaseAgent):
                 log_agent_response(self.session_id, msg)
                 yield msg
                 return
+            if (yield from self._maybe_ask_wording(target, user_input, revisit=True)):
+                return
             stored, is_new = self._store_sub_point(target, user_input, modality="button")
-            lead = (f"Added to **{target}**." if is_new
-                    else f"That's already covered under **{target}** as *{stored}*.")
-            yield (
-                f"{lead}\n\n"
-                f"Anything else to add to **{target}**? "
-                f"Click **✅ Done adding** when you're finished."
-            )
+            yield from self._render_after_add(target, stored, is_new, revisit=True)
             return
 
         if self.awaiting_justification:
@@ -526,10 +590,10 @@ class HITLAgent(BaseAgent):
         elif intent in _BUTTON_ACTION_INTENTS:
             yield from self._nudge_to_button(intent)
 
-        elif intent == "ask_agent_to_suggest":
-            yield from self._handle_suggest(user_input)
-
         else:
+            # Free-text on a pillar (not in add mode) is a question — answer it, never
+            # advance. ask_agent_to_suggest / none / doubt land here too (advancement is
+            # button-driven via the 💡 proactive-prompt button → _suggest_next).
             current  = self._current_concept()
             _on_swap = (swap_live and current is not None
                         and self._is_wrong_concept(current))
@@ -613,11 +677,16 @@ class HITLAgent(BaseAgent):
         else:
             yield from self._stream_concept(is_first=False)
 
-    def _go_to_pillar(self, concept: str):
+    def _go_to_pillar(self, concept: str, *, chosen_label: str | None = None):
         """Navigate the walkthrough to the pillar the user named: reorder an
         already-listed pillar to the front (counting it once as a pillar add), report
         an already-covered pillar in place, or surface a new/withheld one. Shared by
-        the freetext proactive path and the ➕ Add my own pillar button."""
+        the freetext proactive path and the ➕ Add my own pillar button.
+
+        When the typed name maps to a withheld KB pillar phrased differently, the new
+        path first asks the wording choice (KB name vs the user's words). `chosen_label`
+        is the resolved answer fed back on the reply — it skips the ask and is the label
+        the pillar is surfaced/counted under."""
         dup = self._check_duplicate_proactive(concept)
 
         if dup["is_duplicate"] and dup["matched_concept"]:
@@ -652,16 +721,27 @@ class HITLAgent(BaseAgent):
                 )
                 yield from self._stream_proactive_prompt()
         else:
-            if matched_withheld:
-                logging.info(f"[PROACTIVE] new pillar → withheld pillar '{matched_withheld}'")
+            if (matched_withheld and chosen_label is None
+                    and self._norm_bullet(matched_withheld)
+                        != self._norm_bullet(self._user_wording(concept))):
+                self.awaiting_wording_choice = True
+                self._wording_ctx = {"kind": "pillar", "kb": matched_withheld,
+                                     "raw": concept}
+                yield ASK_WORDING.format(user=self._user_wording(concept),
+                                         kb=matched_withheld)
+                return
+            label = chosen_label or matched_withheld or target
+            if label == matched_withheld:
+                logging.info(f"[PROACTIVE] new pillar → withheld pillar '{label}'")
                 yield (
-                    f"Good call, **{matched_withheld}** is an important pillar. "
-                    f"Let's include it.\n\n"
+                    f"Good call, **{label}** is an important pillar. Do you want to "
+                    f"include this pillar in your plan? Use the buttons below — or if "
+                    f"you'd like to add a point to consider here, use **➕ Add a bullet**.\n\n"
                 )
             else:
-                logging.info(f"[PROACTIVE] new user concept: '{target}'")
-                yield f"Great suggestion — let's explore **{target}** now.\n\n"
-            yield from self._stream_user_contributed_concept(target)
+                logging.info(f"[PROACTIVE] new user concept: '{label}'")
+                yield f"Great suggestion — let's explore **{label}** now.\n\n"
+            yield from self._stream_user_contributed_concept(label)
 
     def on_proactive_add_pillar(self):
         """➕ Add my own pillar (proactive prompt): ask for ONE pillar name, then
@@ -677,6 +757,8 @@ class HITLAgent(BaseAgent):
         """↩️ Cancel 'Add my own pillar': reset state, re-offer the proactive choice
         WITHOUT advancing prompt_index (so no proactive prompt is consumed)."""
         self.awaiting_pillar_name = False
+        self.awaiting_wording_choice = False
+        self._wording_ctx = None
         self.awaiting_user_suggestion = True
         msg = "No problem — what would you like to do next?"
         self.history.append(types.Content(role="model", parts=[types.Part(text=msg)]))
@@ -1361,9 +1443,11 @@ class HITLAgent(BaseAgent):
         )
 
     def on_done_adding(self):
-        self.awaiting_sub_point   = False
-        self.awaiting_revisit_add = False
-        self.revisit_target       = None
+        self.awaiting_sub_point      = False
+        self.awaiting_revisit_add    = False
+        self.awaiting_wording_choice = False
+        self._wording_ctx            = None
+        self.revisit_target          = None
         concept = self._current_concept() or "this concept"
         logging.info(f"[ADD] add-mode closed for concept='{concept}'")
         yield f"Got it. Back to **{concept}**, do you want to include it or exclude it from current plan?\n\n Feel free to discuss your concerns regarding the pillar or bullet .\n\n"
@@ -1486,10 +1570,14 @@ class HITLAgent(BaseAgent):
         self.user_contributed_concepts.add(name)
         self._last_surface = {"name": name, "is_new": True}
 
-    def add_sub_point(self, pillar: str, text: str) -> None:
-        stored, is_new = self._store_sub_point(pillar, text)
-        self._last_sub_add = {"pillar": self._normalize_pillar(pillar),
-                              "stored": stored, "raw": text, "is_new": is_new}
+    def add_sub_point(self, pillar: str, text: str, *, dry_run: bool = False,
+                      resolved: str | None = None, count_as: str | None = None):
+        stored, is_new = self._store_sub_point(pillar, text, resolved=resolved,
+                                               count_as=count_as, dry_run=dry_run)
+        if not dry_run:
+            self._last_sub_add = {"pillar": self._normalize_pillar(pillar),
+                                  "stored": stored, "raw": text, "is_new": is_new}
+        return stored, is_new
 
     # UI state queries
     def should_show_buttons(self) -> bool:
