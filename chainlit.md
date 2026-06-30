@@ -20,6 +20,8 @@ This is not a passive task. The AI assistant will present a starting framework, 
 - ➖ Remove something you think is not relevant
 - ❓ Challenge or change any concept suggested by the AI that does not feel right.
 
+⚠️ Framework text (concepts, pillars, wording) is fixed and should not be reworded, it reflects a deliberate design grounded in industry and research literature. You may add or remove bullets and pillars freely. If you disagree with a point, remove it rather than rephrasing it.
+
 There are no right or wrong answers. We are interested in how you think through the problem.
 
 ### Example Solution and Interaction
