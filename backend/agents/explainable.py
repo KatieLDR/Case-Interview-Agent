@@ -755,7 +755,7 @@ class ExplainableAgent(BaseAgent):
                 yield from self._stream_summary()
                 invite = ("\n\nThat's the full framework as it stands. Want to revisit any "
                           "area to add, change, or question something? Otherwise, click "
-                          "**‼️End Session** above to finish.")
+                          "**‼️End Session** to finish.")
                 self._emit(invite); yield invite
             return
         if getattr(self, "_last_intent", "none") == "doubt":
@@ -772,7 +772,7 @@ class ExplainableAgent(BaseAgent):
         if (self.walkthrough_done
                 and isinstance(outcome, handlers.AdvanceOutcome)):
             msg = ("Sounds like you're happy with the framework. When you're ready to finish, "
-                   "click **‼️End Session** above. Or if there's still something you'd like to "
+                   "click **‼️End Session**. Or if there's still something you'd like to "
                    "**add**, **remove**, or **question**, go ahead.")
             self._emit(msg); yield msg; return
         msg = ("I want to make sure I help with the right thing. You can **add** a bullet, "
@@ -913,7 +913,7 @@ class ExplainableAgent(BaseAgent):
             )
 
         if is_first:
-            prefix = "Here is the first pillar I recommend. Do you want to include it in your framework plan?\n\n" + prefix
+            prefix = "Here is the first pillar I recommend. \n\n" + prefix
 
         # Yield static text, append to history
         self.history.append(
