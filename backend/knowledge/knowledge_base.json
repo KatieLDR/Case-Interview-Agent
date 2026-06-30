@@ -49,10 +49,10 @@
       "sub_bullets_sources": "Sources: [a](https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/overcoming-two-issues-that-are-sinking-gen-ai-programs) · [b](https://www.gartner.com/en/newsroom/press-releases/2026-04-07-gartner-says-artificial-intelligence-projects-in-infrastructure-and-operations-stall-ahead-of-meaningful-roi-returns) · [c](https://gdpr-info.eu/art-4-gdpr/) · [d](https://gdpr-info.eu/art-9-gdpr/) · [e](https://www.isms.online/iso-27002/control-5-12-classification-of-information/)",
       "key_questions": [
         "Prototype scope and governability: Is the use case tightly scoped enough to be reviewable? [a][b]",
-        "Output audience: internal colleagues only, or does output reach business stakeholders or customers? [c][d]",
-        "Input data classification: public, internal, confidential, or PII [e][f][g]",
-        "Build vs. buy decision: build on prototype vs. procure enterprise tool with compliance and support built in [h][i]",
-        "Existing your company Group platform or approved vendor check: is a custom build even necessary? [j]"
+        "Output audience: Internal colleagues only, or does output reach business stakeholders or customers? [c][d]",
+        "Input data classification: Public, internal, confidential, or PII [e][f][g]",
+        "Build vs. buy decision: Build on prototype vs. procure enterprise tool with compliance and support built in [h][i]",
+        "Existing your company Group platform or approved vendor check: Is a custom build even necessary? [j]"
       ],
       "key_questions_sources": "Sources: [a](https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/overcoming-two-issues-that-are-sinking-gen-ai-programs) · [b](https://www.gartner.com/en/newsroom/press-releases/2026-04-07-gartner-says-artificial-intelligence-projects-in-infrastructure-and-operations-stall-ahead-of-meaningful-roi-returns) · [c](https://artificialintelligenceact.eu/article/6/) · [d](https://artificialintelligenceact.eu/article/50/) · [e](https://gdpr-info.eu/art-4-gdpr/) · [f](https://gdpr-info.eu/art-9-gdpr/) · [g](https://www.isms.online/iso-27002/control-5-12-classification-of-information/) · [h](https://www.gartner.com/en/articles/deploying-ai) · [i](https://www.slideshare.net/slideshow/state-of-ai-in-business-2025-mit-nanda/282804851) · [j](https://www.mckinsey.com/capabilities/tech-and-ai/our-insights/moving-past-gen-ais-honeymoon-phase-seven-hard-truths-for-cios-to-get-from-pilot-to-scale)"
     },
@@ -64,19 +64,19 @@
       "ppt_mapping": "People (talent), Process (data readiness), Technology (infrastructure)",
       "description": "This pillar evaluates the practical foundation required to implement and maintain the use case. It focuses on data quality and compliance, technical environment stability, and team capability and ownership for long-term maintenance. Many enterprise GenAI projects fail not at the design stage, but when the team tries to run and maintain them in production.",
       "sub_bullets": [
-        "Data quality and availability: is input data clean, complete, and consistently available? [a][b]",
-        "Single-developer dependency: is the tool maintainable by only one person? [c]"
+        "Data quality and availability: Is input data clean, complete, and consistently available? [a][b]",
+        "Single-developer dependency: Is the team's ability to maintain the tool dependent on just one developer? [c]"
       ],
       "sub_bullets_sources": "Sources: [a](https://www.gartner.com/en/newsroom/press-releases/2026-04-07-gartner-says-artificial-intelligence-projects-in-infrastructure-and-operations-stall-ahead-of-meaningful-roi-returns) · [b](https://artificialintelligenceact.eu/article/10/) · [c](https://arxiv.org/abs/2202.01523)",
       "key_questions": [
-        "Data quality and availability: is input data clean, complete, and consistently available? [a][b]",
-        "GDPR-restricted data processed by a third-party provider: where is data processed and stored? [c][d]",
-        "Data stability over time: will the input data stay consistent, or shift over time (for example seasonal or changing patterns) and make output worse after launch? [e]",
-        "Stable and documented technology foundation: can someone other than the original developer understand, maintain, and update the tool? [f][g]",
-        "Company system integration: does the tool work within existing IT infrastructure at team scale? [h][i]",
+        "Data quality and availability: Is input data clean, complete, and consistently available? [a][b]",
+        "GDPR-restricted data processed by a third-party provider: Where is data processed and stored? [c][d]",
+        "Data stability over time: Will the input data stay consistent, or shift over time (for example seasonal or changing patterns) and make output worse after launch? [e]",
+        "Stable and documented technology foundation: Can someone other than the original developer understand, maintain, and update the tool? [f][g]",
+        "Company system integration: Does the tool work within existing IT infrastructure at team scale? [h][i]",
         "Fallback if the underlying model or API changes or is deprecated [j][k]",
-        "Team maintenance skills: does the team have the skills to maintain the tool? [l][m][n]",
-        "Single-developer dependency: is the tool maintainable by only one person? [o]"
+        "Team maintenance skills: Does the team have the skills to maintain the tool? [l][m][n]",
+        "Single-developer dependency: Is the tool maintainable by only one person? [o]"
       ],
       "key_questions_sources": "Sources: [a](https://www.gartner.com/en/newsroom/press-releases/2026-04-07-gartner-says-artificial-intelligence-projects-in-infrastructure-and-operations-stall-ahead-of-meaningful-roi-returns) · [b](https://artificialintelligenceact.eu/article/10/) · [c](https://gdpr-info.eu/art-28-gdpr/) · [d](https://gdpr-info.eu/art-44-gdpr/) · [e](https://arxiv.org/pdf/2004.05785) · [f](https://artificialintelligenceact.eu/article/11/) · [g](https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/mlops-so-ai-can-scale) · [h](https://iso25000.com/index.php/en/iso-25000-standards/iso-25010) · [i](https://www.deloitte.com/us/en/what-we-do/capabilities/applied-artificial-intelligence/blogs/pulse-check-series-latest-ai-developments/ai-adoption-challenges-ai-trends.html) · [j](https://www.digital-operational-resilience-act.com/Article_28.html) · [k](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/) · [l](https://artificialintelligenceact.eu/article/4/) · [m](https://www.deloitte.com/content/dam/assets-shared/docs/about/2025/state-of-ai-2026-global.pdf) · [n](https://www.bcg.com/publications/2025/strategies-tackle-ai-skills-gap) · [o](https://arxiv.org/abs/2202.01523)"
     },
@@ -90,10 +90,10 @@
       "sub_bullets": [],
       "sub_bullets_sources": "",
       "key_questions": [
-        "One-time costs: governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
-        "Ongoing costs: maintenance, monitoring, model updates, tool ownership time [b]",
-        "Value creation: efficiency improvements, strategic contribution, and net financial return [c]",
-        "Payback period: how long until cumulative benefits exceed total costs [d]"
+        "One-time costs: Governance review, compliance sign-off, onboarding, training, infrastructure changes [a]",
+        "Ongoing costs: Maintenance, monitoring, model updates, tool ownership time [b]",
+        "Value creation: Efficiency improvements, strategic contribution, and net financial return [c]",
+        "Payback period: How long until cumulative benefits exceed total costs [d]"
       ],
       "key_questions_sources": "Sources: [a](https://www.mckinsey.com/capabilities/mckinsey-technology/our-insights/recalibrating-technology-budgets-for-the-ai-era) · [b](https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights/the-new-economics-of-enterprise-technology-in-an-ai-world) · [c](https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai) · [d](https://www.mckinsey.com/capabilities/quantumblack/our-insights/from-promise-to-impact-how-companies-can-measure-and-realize-the-full-value-of-ai)"
     },
@@ -107,14 +107,14 @@
       "sub_bullets": [],
       "sub_bullets_sources": "",
       "key_questions": [
-        "EU AI Act classification check: risk level assessment required even for lower-risk tools [a][b]",
-        "Approval gate: does broad rollout require internal sign-off through the organization's approval process before going live, and has the plan accounted for it? [b][c]",
-        "Accountability for poor output: if a colleague acts on a wrong GenAI output, who is responsible, and is that named before rollout? [d][e]",
-        "Over-reliance: colleagues treating GenAI output as final without reviewing it [f][g]",
-        "Mandatory human review: does the plan define when human review is required before acting on output, and is that review set up to be effective rather than a rubber stamp? [h][i]",
-        "Post-deployment output monitoring: does the plan monitor for output quality degrading after launch, including when the underlying model or API changes, updates, or is retired, so problems are caught rather than slipping by unnoticed? [j]",
-        "Designated owner and escalation path: who owns the tool after rollout, and how do issues get escalated when something goes wrong? [k]",
-        "Prompt injection and data leakage via external API: could crafted input manipulate the model, or could confidential data be exposed, when sending prompts to an external service? [l][m]"
+        "EU AI Act classification check: Risk level assessment required even for lower-risk tools [a][b]",
+        "Approval gate: Does broad rollout require internal sign-off through the organization's approval process before going live, and has the plan accounted for it? [b][c]",
+        "Accountability for poor output: If a colleague acts on a wrong GenAI output, who is responsible, and is that named before rollout? [d][e]",
+        "Over-reliance: Colleagues treating GenAI output as final without reviewing it [f][g]",
+        "Mandatory human review: Does the plan define when human review is required before acting on output, and is that review set up to be effective rather than a rubber stamp? [h][i]",
+        "Post-deployment output monitoring: Does the plan monitor for output quality degrading after launch, including when the underlying model or API changes, updates, or is retired, so problems are caught rather than slipping by unnoticed? [j]",
+        "Designated owner and escalation path: Who owns the tool after rollout, and how do issues get escalated when something goes wrong? [k]",
+        "Prompt injection and data leakage via external API: Could crafted input manipulate the model, or could confidential data be exposed, when sending prompts to an external service? [l][m]"
       ],
       "key_questions_sources": "Sources: [a](https://artificialintelligenceact.eu/article/6/) · [b](https://www.bcg.com/publications/2026/ai-risk-management-needs-a-better-model) · [c](https://kpmg.com/ch/en/insights/artificial-intelligence/iso-iec-42001.html) · [d](https://airc.nist.gov/airmf-resources/playbook/govern/) · [e](https://www.mckinsey.com/capabilities/risk-and-resilience/our-insights/trust-in-the-age-of-agents) · [f](https://doi.org/10.1145/3449287) · [g](https://genai.owasp.org/llmrisk/llm092025-misinformation/) · [h](https://artificialintelligenceact.eu/article/14/) · [i](https://www.bcg.com/publications/2025/wont-get-gen-ai-right-if-human-oversight-wrong) · [j](https://airc.nist.gov/airmf-resources/playbook/manage/) · [k](https://airc.nist.gov/airmf-resources/playbook/govern/) · [l](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) · [m](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/)"
     }
