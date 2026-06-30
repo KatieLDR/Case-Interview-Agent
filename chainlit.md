@@ -20,7 +20,7 @@ This is not a passive task. The AI assistant will present a starting framework, 
 - ➖ Remove something you think is not relevant
 - ❓ Challenge or change any concept suggested by the AI that does not feel right.
 
-⚠️ Framework text (concepts, pillars, wording) is fixed and should not be reworded, it reflects a deliberate design grounded in industry and research literature. You may add or remove bullets and pillars freely. If you disagree with a point, remove it rather than rephrasing it.
+⚠️ Framework text (bullets, pillars) is fixed and should not be reworded, it reflects a deliberate design grounded in industry and research literature. You may add or remove bullets and pillars freely. If you disagree with a point, remove it rather than rephrasing it.
 
 There are no right or wrong answers. We are interested in how you think through the problem.
 
@@ -59,7 +59,7 @@ A short practice exercise to get familiar with the interaction. You will see a s
 **Step 2 — Task presented**
 You will receive a short business case. You can ask the AI assistant clarifying questions before you begin.
 
-**Step 3 — Main task (20 min, timed)**
+**Step 3 — Main task (15 min, timed)**
 Work with the AI assistant to build a structured framework solution for the case. The timer starts when you click "Got it, show me the full analysis ✅". A notification will appear when time is up.
 
 **Step 4 — Summary**
