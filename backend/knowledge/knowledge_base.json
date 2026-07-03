@@ -378,7 +378,7 @@
       "id": "allianz_system_integration",
       "number": 15,
       "pillar_id": "feasibility",
-      "name": "your company system integration",
+      "name": "Your company system integration",
       "explanation": "Does the tool work within existing IT infrastructure at team scale? It must exchange information with and operate alongside existing systems; legacy-system integration is a primary barrier to scaling AI.",
       "shown": true,
       "swap": false,
@@ -440,7 +440,7 @@
       "number": 18,
       "pillar_id": "feasibility",
       "name": "Single-developer dependency",
-      "explanation": "Is the tool maintainable by only one person? A bus factor of one is a single point of failure; resilience comes from distributing knowledge through reviews, ownership rotation, and documentation.",
+      "explanation": "Is the team's ability to maintain the tool dependent on just one developer? A bus factor of 1 is a single point of failure; resilience comes from distributing knowledge through reviews, ownership rotation, and documentation.",
       "shown": true,
       "swap": false,
       "sources": [
