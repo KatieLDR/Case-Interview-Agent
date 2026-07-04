@@ -882,7 +882,7 @@ async def _send_summary():
                 f"✅ **Session Ended**\n"
                 f"🪪 **Session ID:** `{agent.session_id}`\n"
                 f"*Keep this ID for your records. "
-                f"Refresh the page to start a new session.*"
+                f"and paste it back to the survey.*"
             )
         ).send()
         return
