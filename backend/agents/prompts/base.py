@@ -116,6 +116,8 @@ BRING_IN = (
     "**{pillar}** isn't in your framework yet. Reply **yes** to bring it in and add your "
     "point there, or **no** to choose another pillar.\n\n"
 )
+# Acknowledge a new pillar the user brought in as a paste header/parent. {pillar}
+PILLAR_BROUGHT_IN = "✅ Added **{pillar}** as a new pillar.\n\n"
 
 
 CLARIFICATION_SYSTEM_PROMPT = """

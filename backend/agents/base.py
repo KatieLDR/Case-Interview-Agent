@@ -23,6 +23,7 @@ from backend.agents.prompts.base import (
     WALK_INTRO, WALK_ASK_UNDER, WALK_ASK_PLACE, WALK_ADDED, WALK_DUP,
     WALK_SKIPPED, WALK_DONE, WALK_REPLY_PROMPT,
     ASK_PC, PC_CLASSIFIER, ASK_WORDING, CONCEPT_PLACE, BRING_IN,
+    PILLAR_BROUGHT_IN,
 )
 
 from dotenv import load_dotenv
@@ -688,6 +689,16 @@ class BaseAgent:
         decision = handlers._classify_confirmation(user_input)
         if decision == "confirm":
             self._surface_pillar_for_add(st["cur"])       # bring it in (now)
+            # Count the pillar once — same gate as _commit_new_pillar_for_add: a
+            # not-yet-shown pillar (novel/withheld) is a real add_pillar event.
+            is_new = bool((self._last_surface or {}).get("is_new"))
+            if is_new and self._count_unshown("pillars", st["cur"]):
+                self._fire_turn(handlers.AddOutcome(action="added_new", pillar=st["cur"],
+                                level="pillar", counted=True, source="user_spontaneous"),
+                                st["cur"], False)
+            self._walk_touch(st["cur"])
+            if is_new:
+                yield self._emit_text(PILLAR_BROUGHT_IN.format(pillar=st["cur"]))
             yield from self._af_wording_step(); return    # …and still add the point
         if decision == "decline":
             st["cur"] = None                              # don't drop — ask where instead
