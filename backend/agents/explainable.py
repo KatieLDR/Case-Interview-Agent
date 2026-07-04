@@ -20,7 +20,7 @@ from backend.agents.prompts.explainable import (
     CLARIFY_DOUBT_PROMPT, CLARIFY_RESOLVE_PROMPT, REMOVAL_TARGET_PROMPT,
     ADD_CLASSIFY_PROMPT, ADD_RESOLVE_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
-from backend.agents.prompts.base import ADD_ONE_AT_A_TIME
+from backend.agents.prompts.base import ADD_ONE_AT_A_TIME, FRAMEWORK_FIXED_WARNING
 from backend.tools.concept_swap import ConceptSwap
 
 CASE_TYPE = "AI Implementation"
@@ -129,6 +129,8 @@ class ExplainableAgent(BaseAgent):
             "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
             "It can only support you when you actively engage, **not just read through it.**"
         )
+
+        yield FRAMEWORK_FIXED_WARNING
 
         yield "⏱️ Your 15-minute session has started. The timer is shown on the left."
         self.walkthrough_concepts = self._build_walkthrough_concepts()

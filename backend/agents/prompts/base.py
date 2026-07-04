@@ -9,6 +9,15 @@ ADD_ONE_AT_A_TIME = (
     "You could challenge it anytime.*"
 )
 
+# Shown once, right after the "Your goal is to build…" opener in begin_analysis
+# (identical across all three arms so the framing can't become a confound).
+FRAMEWORK_FIXED_WARNING = (
+    "However, framework text is fixed and should not be "
+    "reworded, it reflects a deliberate design grounded in industry and research "
+    "literature. If you disagree "
+    "with a point, remove it **rather than rephrasing it.**"
+)
+
 # Pillar offer (a header/theme was detected). Placeholders:
 #   {kb_clause} — " under **<pillar>**" (in KB) or " as a new area, **<pillar>**" (novel)
 #   {bullets}   — the mentioned points as a markdown list
@@ -156,7 +165,7 @@ WARMUP_PROMPT = (
     "You are moving to a new city for a new job opportunity. "
     "Before you go, you want to make sure you have a complete plan. "
     "Let's plan this together.\n\n"
-    "*This should take about 2–3 minutes, there are no right or wrong answers.*\n\n"
+    "*This should take about **2–3 minutes**, there are no right or wrong answers.*\n\n"
     "**Here's my suggestion:**\n\n"
     "🏠 **Housing**\n"
     "- Should we find temporary accommodation?\n"
@@ -164,7 +173,8 @@ WARMUP_PROMPT = (
     "📋 **Admin**\n"
     "- Should we register at the new city hall?\n"
     "- Do we need a local bank account?\n\n"
-    "*What else would you add, or is there anything you'd remove or change?*"
+    "You can shape the plan yourself: add a pillar (e.g. Housing) or a bullet (e.g. How are the neighbourhoods?)\n\n"
+    "*Now is your turn, what else would you add, or is there anything you'd remove or change?*"
 )
 
 WARMUP_MERGE_PROMPT = """You are helping a user build a moving-to-a-new-city plan.

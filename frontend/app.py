@@ -118,21 +118,21 @@ async def _init_agent(agent_type: str):
         agent = BlackBoxAgent(user_id=user_id)
         intro = (
             f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
-            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"Like any AI tool, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
             f"\n---\n"
         )
     elif agent_type == "explainable":
         agent = ExplainableAgent(user_id=user_id)
         intro = (
             f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
-            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"Like any AI tool, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
             f"\n---\n"
         )
     elif agent_type == "hitl":
         agent = HITLAgent(user_id=user_id)
         intro = (
             f"This tool is designed to support your decision-making process using established standards and best practices. While it may guide you toward certain recommendations; however, it is not intended to replace your judgment.\n\n"
-            f"Like any GenAI system, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
+            f"Like any AI tool, it may occasionally generate incomplete, inaccurate, or misleading information. Please critically assess its suggestions and rely on your own judgment when making decisions.\n\n"
             f"\n---\n"
         )
 
@@ -241,7 +241,7 @@ async def on_done_warmup(action: cl.Action):
             f"Here's your final plan:\n\n"
             f"{merged_plan}\n\n"
             f"---\n\n"
-            f"You've just practiced breaking down a problem into structured areas, "
+            f"You've just practiced breaking down a problem into structured pillars, "
             f"that's exactly what you'll do next.\n\n"
             f"Click **Let's go! 🚀** below to start the real case."
         ),
@@ -307,9 +307,13 @@ async def on_begin_analysis(action: cl.Action):
     goal_msg = next(stream)
     await cl.Message(content=goal_msg).send()
 
+    # Second yield — fixed-framework warning, follows the goal message
+    warning_msg = next(stream)
+    await cl.Message(content=warning_msg).send()
+
     await asyncio.sleep(8)
 
-    # Second yield is always the timer message — send as separate bubble
+    # Third yield is always the timer message — send as separate bubble
     timer_msg = next(stream)
     await cl.Message(content=timer_msg).send()
 

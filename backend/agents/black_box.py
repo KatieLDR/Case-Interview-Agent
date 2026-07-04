@@ -17,7 +17,7 @@ from backend.logging.sink import firestore_sink as _sink
 from backend.agents.prompts.black_box import (
     SYSTEM_PROMPT, REMOVAL_TARGET_PROMPT, SUB_BULLET_FORMAT_PROMPT,
 )
-from backend.agents.prompts.base import ADD_ONE_AT_A_TIME
+from backend.agents.prompts.base import ADD_ONE_AT_A_TIME, FRAMEWORK_FIXED_WARNING
 from backend.tools.concept_swap import ConceptSwap
 
 from dotenv import load_dotenv
@@ -110,6 +110,8 @@ class BlackBoxAgent(BaseAgent):
             "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
             "It can only support you when you actively engage, **not just read through it.**"
         )
+
+        yield FRAMEWORK_FIXED_WARNING
 
         yield "⏱️ Your 15-minute session has started. The timer is shown on the left."
 
@@ -311,7 +313,7 @@ class BlackBoxAgent(BaseAgent):
         yield from self._stream_qa(user_input)
         msg = (
             "\n\nFeel free to **add**, **remove**, or refine anything in the framework, "
-            "ask more questions, or type **show framework** if you'd like to review the current state."
+            "ask more questions."
         )
         self._emit(msg); yield msg
 

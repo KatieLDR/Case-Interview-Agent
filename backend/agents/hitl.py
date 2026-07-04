@@ -19,7 +19,7 @@ from backend.agents.prompts.hitl import (
     PROACTIVE_PROMPTS, JUSTIFICATION_ACKS, SUB_BULLET_FORMAT_PROMPT,
     HITL_CLARIFICATION_SYSTEM_PROMPT, HITL_MAIN_SYSTEM_PROMPT,
 )
-from backend.agents.prompts.base import ASK_WORDING
+from backend.agents.prompts.base import ASK_WORDING, FRAMEWORK_FIXED_WARNING
 from backend.tools.concept_swap import ConceptSwap
 
 CASE_TYPE = "AI Implementation"
@@ -139,6 +139,8 @@ class HITLAgent(BaseAgent):
             "Review each pillar below carefully. The agent is here to help you create your framework based on current industry best practices. "
             "It can only support you when you actively engage, **not just read through it.**"
         )
+
+        yield FRAMEWORK_FIXED_WARNING
 
         yield "⏱️ Your 15-minute session has started. The timer is shown on the left."
 
