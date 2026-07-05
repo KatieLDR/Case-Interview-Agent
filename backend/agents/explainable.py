@@ -116,9 +116,10 @@ class ExplainableAgent(BaseAgent):
 
     def get_pre_analysis_instruction(self) -> str:
         return (
-            "📖 *After you click the button below, I'll walk you through "
+            "📖 I've prepared four pillars to help you build the framework: strategy, use case statistics, feasibility, and solution design. \n\n"
+            "After you click the button below, I'll walk you through "
             "each pillar one at a time, you can ask questions or suggest "
-            "changes at any step.*"
+            "new ideas at any step.*"
         )
 
     def begin_analysis(self):
