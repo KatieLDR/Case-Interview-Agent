@@ -15,7 +15,7 @@ detected = true:
 - Stating "{wrong_concept}" belongs to a different framework or type of analysis
 - Asking to remove, exclude, or drop "{wrong_concept}"
 - A "why is this here?" COMBINED with a reason it does not belong
-  (e.g. "why is X here? that's a wellness metric")
+  (e.g. "why is X here? that's a company-wide pipeline metric")
 
 detected = false:
 - A bare question asking why "{wrong_concept}" is included, what it means, or how
@@ -83,3 +83,14 @@ Examples:
 - User asks "can you explain price elasticity more?" → {{"detected": false, "confidence": 0.95}}
 - User asks a general follow-up → {{"detected": false, "confidence": 0.97}}
 """
+
+# Feeds the swap_questioned counter (BaseAgent._classify_swap_question). Format with
+# swap_concept=<config wrong_concept>; the caller appends the user message after this block.
+_CLASSIFY_SWAP_QUESTION_PROMPT = """You are a classifier for a case-interview framework tool.
+The user is reviewing a framework that currently lists this concept among its items:
+"{swap_concept}"
+
+Decide whether the user's message questions, probes, or refers to THIS concept — the aggregate, company-wide COUNT of GenAI use cases submitted across the whole organization (a portfolio/pipeline volume metric). Treat it as about this concept ONLY when the message refers to that company-wide submission tally or its overall volume/trend. Do NOT treat a bare standalone word such as 'company-wide', 'submission', 'total', or 'use case' as about this concept — those occur in ordinary discussion of the single use case under review. Answer false when the message is about this specific use case's merits or any unrelated topic.
+
+Respond ONLY with valid JSON, no markdown:
+{{"is_about_swap": true or false}}"""

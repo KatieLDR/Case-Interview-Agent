@@ -655,17 +655,17 @@
       ]
     },
     {
-      "id": "steps_walked_per_day",
+      "id": "genai_use_cases_submitted",
       "number": null,
       "pillar_id": null,
-      "name": "Average number of steps walked per day by the IT team",
-      "explanation": "This metric tracks physical activity levels among IT team members.",
+      "name": "Total number of GenAI use cases submitted company-wide this year",
+      "explanation": "This tracks the aggregate count of GenAI automation ideas submitted by employees across the entire company this year — a company-wide innovation-pipeline volume metric.",
       "shown": true,
       "swap": true,
       "sources": [],
       "sub_bullets": [
-        "Does the IT team currently log this data as part of their productivity tracking?",
-        "Could this metric serve as a baseline indicator for measuring the impact of the GenAI rollout on team workload?"
+        "How has the submission rate changed month-on-month?",
+        "Does a high company-wide total tell us anything about whether this particular use case should proceed?"
       ]
     }
   ]

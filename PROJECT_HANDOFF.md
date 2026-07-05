@@ -46,7 +46,7 @@ HITLAgent(BlackBoxAgent)              ← Agent 4 (TODO)
 - Presents Ghost Restaurant case automatically on session start
 - Generates structured reference answer (framework + hypotheses + sample answer + mistakes)
 - Detects redo/dissatisfaction intent via Gemini classifier → regenerates answer
-- Injects Concept Swap (Variable Costs before Market Size) until user detects it
+- Injects the configured Concept Swap (see `SWAP_CONFIG` in `concept_swap.py`) until the user detects it
 - Logs all events to Firestore
 
 ### Agent 2 — CoachAgent
@@ -145,9 +145,11 @@ App opens at: `http://localhost:8000`
 
 | Agent | Wrong Concept Injected |
 |---|---|
-| `black_box` | Variable Costs per unit before Market Size |
-| `explainable` | Price-elasticity pricing instead of Production/Distribution Challenges |
-| `hitl` | Population segmentation by Income instead of Internal vs External risks |
+| `black_box` | Total number of GenAI use cases submitted company-wide this year |
+| `explainable` | Total number of GenAI use cases submitted company-wide this year |
+| `hitl` | Total number of GenAI use cases submitted company-wide this year |
+
+> All three arms currently inject the same swap concept; the source of truth is `SWAP_CONFIG` in `backend/tools/concept_swap.py` (kept in sync with the `"swap": true` entry in `knowledge_base.json`).
 
 Detection uses **Direction B+C** (contextual deviation + framework extraction) — **C is pending KG completion**.
 

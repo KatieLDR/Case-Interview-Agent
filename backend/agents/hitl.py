@@ -126,7 +126,7 @@ class HITLAgent(BaseAgent):
     def get_pre_analysis_instruction(self) -> str:
         return (
             "📖 I've prepared four pillars to help you build the framework: strategy, use case statistics, feasibility, and solution design. \n\n"
-            "After you click the button below, I'll walk you through each pillar "
+            "*After you click the button below, I'll walk you through each pillar "
             "one at a time. Use button to **Include**, **Exclude**, **➕ Add**, or **➖ Remove** to make your decision on each pillar. "
             "If you have any questions, feel free to ask first.*"
         )

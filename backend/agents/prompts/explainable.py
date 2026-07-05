@@ -344,7 +344,7 @@ Rules:
 - Drop filler ("I think", "we should also", "maybe", "consider").
 - No leading dash, no inline source markers. End with a question mark only if it is a question.
 - Match the style of these existing framework sub-bullets:
-    "Does the IT team currently log this data as part of their productivity tracking?"
+    "How has the submission rate changed month-on-month?"
     "Data classification is data correctly classified under company data handling standards?"
     "Single-developer dependency critical point of failure if original developer leaves or moves"
     "Prototype scope and governability is the use case tightly scoped enough to be reviewable?"

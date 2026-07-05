@@ -25,50 +25,73 @@ load_dotenv()
 #                read dynamically from self.kg_context["framework"] in the
 #                agent. Hardcoding it here broke when users switched frameworks.
 #
-# NOTE: wrong_concept does NOT need to exist in the KG.
-#       Injection is purely via system prompt string.
-#       All wrong concepts are currently outside the KG — handle separately
-#       in the Framework Alignment Accuracy scoring script.
+# NOTE: wrong_concept is injected purely via system-prompt / walkthrough string; it does
+#       NOT need to exist in the Neo4j KG (cypher/ has no swap node). The swap DOES live in
+#       knowledge_base.json (the "swap": true entry) for its sub-bullets/explanation, and
+#       `wrong_concept` here MUST stay identical to that entry's `name` (see the name-sync
+#       assert in backend/test/swap_recognition_gate.py). Keep the external Framework
+#       Alignment Accuracy scoring script's concept list updated for `genai_use_cases_submitted`.
 # ══════════════════════════════════════════════════════════════════════════
 SWAP_CONFIG = {
     "black_box": {
-        "wrong_concept":   "Average number of steps walked per day by the IT team",
-        "wrong_framework": "Employee Wellness Analytics",
-        "match_terms":     ["steps walked", "step walked", "step-walked",
-                            "steps per day", "steps a day", "steps each day", "daily steps",
-                            "number of steps", "number of step", "how many steps",
-                            "amount of steps", "step count", "steps metric", "step metric",
-                            "steps data", "walking metric", "team walks", "walk per day",
-                            "how much they walk", "physical activity", "physical movement",
-                            "physical engagement", "wellness metric", "wellness analytics",
-                            "fitness metric", "fitness tracker", "pedometer"],
-        "match_stems":     ["step", "walk"],
+        "wrong_concept":   "Total number of GenAI use cases submitted company-wide this year",
+        "wrong_framework": "Company-wide Innovation Metrics",
+        "match_terms":     ["use cases submitted", "use case submitted", "cases submitted",
+                            "submitted company-wide", "submitted company wide",
+                            "company-wide submission", "companywide submission",
+                            "submission count", "submission volume", "number of submissions",
+                            "submissions this year", "total number of use cases",
+                            "total use cases submitted", "innovation pipeline",
+                            "pipeline volume", "pipeline metric", "portfolio volume",
+                            "aggregate count", "aggregate number", "company-wide total",
+                            # H1: GenAI-anchored aggregate phrasings (recall) — each keeps a
+                            # count/submission anchor so no bare standalone word can match.
+                            "total genai use cases", "number of genai use cases",
+                            "total number of genai use cases", "genai use case count",
+                            "genai use cases total", "genai submissions",
+                            "use case submissions", "submissions metric", "submission rate",
+                            "company-wide use case count", "companywide use case count"],
+        "match_stems":     [],
     },
     "explainable": {
-        "wrong_concept":   "Average number of steps walked per day by the IT team",
-        "wrong_framework": "Employee Wellness Analytics",
-        "match_terms":     ["steps walked", "step walked", "step-walked",
-                            "steps per day", "steps a day", "steps each day", "daily steps",
-                            "number of steps", "number of step", "how many steps",
-                            "amount of steps", "step count", "steps metric", "step metric",
-                            "steps data", "walking metric", "team walks", "walk per day",
-                            "how much they walk", "physical activity", "physical movement",
-                            "physical engagement", "wellness metric", "wellness analytics",
-                            "fitness metric", "fitness tracker", "pedometer"],
-        "match_stems":     ["step", "walk"],
+        "wrong_concept":   "Total number of GenAI use cases submitted company-wide this year",
+        "wrong_framework": "Company-wide Innovation Metrics",
+        "match_terms":     ["use cases submitted", "use case submitted", "cases submitted",
+                            "submitted company-wide", "submitted company wide",
+                            "company-wide submission", "companywide submission",
+                            "submission count", "submission volume", "number of submissions",
+                            "submissions this year", "total number of use cases",
+                            "total use cases submitted", "innovation pipeline",
+                            "pipeline volume", "pipeline metric", "portfolio volume",
+                            "aggregate count", "aggregate number", "company-wide total",
+                            # H1: GenAI-anchored aggregate phrasings (recall) — each keeps a
+                            # count/submission anchor so no bare standalone word can match.
+                            "total genai use cases", "number of genai use cases",
+                            "total number of genai use cases", "genai use case count",
+                            "genai use cases total", "genai submissions",
+                            "use case submissions", "submissions metric", "submission rate",
+                            "company-wide use case count", "companywide use case count"],
+        "match_stems":     [],
     },
     "hitl": {
-        "wrong_concept":   "Average number of steps walked per day by the IT team",
-        "wrong_framework": "Employee Wellness Analytics",
-        "match_terms":     ["steps walked", "step walked", "step-walked",
-                            "steps per day", "steps a day", "steps each day", "daily steps",
-                            "number of steps", "number of step", "how many steps",
-                            "amount of steps", "step count", "steps metric", "step metric",
-                            "steps data", "walking metric", "team walks", "walk per day",
-                            "how much they walk", "physical activity", "physical movement",
-                            "physical engagement", "wellness metric", "wellness analytics",
-                            "fitness metric", "fitness tracker", "pedometer"],
-        "match_stems":     ["step", "walk"],
+        "wrong_concept":   "Total number of GenAI use cases submitted company-wide this year",
+        "wrong_framework": "Company-wide Innovation Metrics",
+        "match_terms":     ["use cases submitted", "use case submitted", "cases submitted",
+                            "submitted company-wide", "submitted company wide",
+                            "company-wide submission", "companywide submission",
+                            "submission count", "submission volume", "number of submissions",
+                            "submissions this year", "total number of use cases",
+                            "total use cases submitted", "innovation pipeline",
+                            "pipeline volume", "pipeline metric", "portfolio volume",
+                            "aggregate count", "aggregate number", "company-wide total",
+                            # H1: GenAI-anchored aggregate phrasings (recall) — each keeps a
+                            # count/submission anchor so no bare standalone word can match.
+                            "total genai use cases", "number of genai use cases",
+                            "total number of genai use cases", "genai use case count",
+                            "genai use cases total", "genai submissions",
+                            "use case submissions", "submissions metric", "submission rate",
+                            "company-wide use case count", "companywide use case count"],
+        "match_stems":     [],
     },
 }
 
@@ -164,7 +187,7 @@ class ConceptSwap:
             return False
         norm  = self._normalize(text)
         wrong = self._normalize(self.config["wrong_concept"])
-        if len(norm) >= 5 and (norm in wrong or wrong in norm):
+        if len(wrong) >= 5 and wrong in norm:
             return True
         if any(self._normalize(t) in norm for t in self.config.get("match_terms", [])):
             return True

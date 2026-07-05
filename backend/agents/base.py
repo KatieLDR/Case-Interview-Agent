@@ -15,6 +15,7 @@ from backend.logger import (
 )
 from backend.logging import events as ev
 from backend.logging.sink import firestore_sink as _sink
+from backend.tools.prompts.concept_swap import _CLASSIFY_SWAP_QUESTION_PROMPT
 from backend.agents.prompts.base import (
     CLARIFICATION_SYSTEM_PROMPT, ANSWER_CLASSIFIER_PROMPT,
     WARMUP_PROMPT, WARMUP_MERGE_PROMPT,
@@ -1225,21 +1226,10 @@ class BaseAgent:
 
     def _classify_swap_question(self, user_input: str) -> bool:
         swap_concept = self.concept_swap.config["wrong_concept"]
-        prompt = (
-            "You are a classifier for a case-interview framework tool.\n"
-            "The user is reviewing a framework that currently lists this concept among its items:\n"
-            f'"{swap_concept}"\n\n'
-            "Decide whether the user's message questions, probes, or refers to THIS concept. "
-            "Treat it as about this concept if it refers to the metric in any way \u2014 including "
-            "indirect references such as 'steps', 'walking', 'movement', 'physical activity', "
-            "'the metric', 'per day', or 'well-being'. Answer false ONLY if the message is "
-            "clearly about a different, unrelated topic.\n\n"
-            'Respond ONLY with valid JSON, no markdown:\n'
-            '{"is_about_swap": true or false}\n\n'
-            f'User message: "{user_input}"'
-        )
+        prompt = _CLASSIFY_SWAP_QUESTION_PROMPT.format(swap_concept=swap_concept)
         try:
-            return bool(classify_json(prompt).get("is_about_swap", False))
+            parsed = classify_json(f'{prompt}\n\nUser message: "{user_input}"')
+            return bool(parsed.get("is_about_swap", False))
         except Exception as e:
             print(f"[SWAP-Q] classifier error: {e}")
             return False
