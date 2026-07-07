@@ -12,3 +12,6 @@ __pycache__/
 test/
 cypher/
 docs/
+CLAUDE.md
+GAPS.md
+PROJECT.md

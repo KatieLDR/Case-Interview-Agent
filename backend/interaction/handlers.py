@@ -498,7 +498,7 @@ def removal_handler(km: m.KBMatch, session: HandlerSession, *, user_text: str) -
                 break
 
     if resolved_bullet is not None:
-        parent, target = resolved_parent, _resolve_presented_bullet
+        parent, target = resolved_parent, resolved_bullet
     elif by_construction and parent is not None:
         pass
     else:

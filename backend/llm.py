@@ -40,10 +40,10 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), vertexai=False)
 # duplicate checks (F-DET). It is gone — every classifier/matcher call now
 # resolves to CLASSIFIER_MODEL so all three arms classify identically.
 MAIN_MODEL       = "gemini-2.5-flash"        # persona generation / streamed prose
-CLASSIFIER_MODEL = "gemini-3.1-flash-lite"   # all intent / matching / duplicate / swap classifiers
+CLASSIFIER_MODEL = "gemini-2.5-flash-lite"   # all intent / matching / duplicate / swap classifiers
 # On a transient classifier failure (e.g. 503 high-demand) classify_json falls
 # through this chain in order rather than retrying the same overloaded model.
-CLASSIFIER_FALLBACKS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+CLASSIFIER_FALLBACKS = ["gemini-2.5-flash"]
 
 # ── Score thresholds (consolidated from the three modules) ──────────────────
 # black_box_agent.py
