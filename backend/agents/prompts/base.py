@@ -169,33 +169,16 @@ WARMUP_PROMPT = (
     "**Here's my suggestion:**\n\n"
     "🏠 **Housing**\n"
     "- Should we find temporary accommodation?\n"
-    "- How are the neighbourhoods?\n\n"
+    "- How are the neighbourhoods?\n"
+    "- Do we want to rent or buy?\n\n"
     "📋 **Admin**\n"
     "- Should we register at the new city hall?\n"
-    "- Do we need a local bank account?\n\n"
-    "You can shape the plan yourself: add a pillar (e.g. Housing) or a bullet (e.g. How are the neighbourhoods?)\n\n"
-    "*Now is your turn, what else would you add, or is there anything you'd remove or change?*"
+    "- Do we need a local bank account?\n"
+    "- How do we update our official address?\n\n"
+    "You can shape the plan yourself: **add** a pillar (e.g. Logistics) or a bullet (e.g. How are the neighbourhoods?), or **remove** one.\n\n"
+    "*Now it's your turn — what would you add, or is there anything you'd remove?*"
 )
 
-WARMUP_MERGE_PROMPT = """You are helping a user build a moving-to-a-new-city plan.
-
-The starting plan is:
-🏠 Housing
-- Should we find temporary accommodation?
-- How are the neighbourhoods?
-
-📋 Admin
-- Should we register at the new city hall?
-- Do we need a local bank account?
-
-The user has added the following ideas:
-{additions}
-
-Your task: produce an updated plan that incorporates the user's ideas.
-- Keep the same emoji + bold header format
-- Add new bullet points under the most relevant existing section, or create a new section if needed
-- If the user pushed back on something, remove or reframe it
-- If the user adds a new section (e.g. "Location"), generate 2 relevant sub-bullet questions for it
-- If the user's intent is ambiguous, make a reasonable interpretation and proceed
-- Keep it concise — bullet points only, no extra explanation
-- Do NOT add any intro or closing sentence — return the plan only"""
+# WARMUP_MERGE_PROMPT was removed 2026-07-17: the warm-up now runs through the
+# deterministic mini interaction engine (backend/interaction/warmup.py) instead of a
+# free-form LLM plan merge, mirroring the main-phase add/remove contract.

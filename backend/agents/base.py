@@ -5,6 +5,7 @@ from google.genai import types
 
 from backend.domain import matching, grounding
 from backend.interaction import handlers
+from backend.interaction.warmup import WarmupState, warmup_turn, render_plan
 from backend.knowledge import knowledge_base as kb
 from backend.llm import (
     client, MAIN_MODEL, classify_json, strip_fences, ANSWER_THRESHOLD,
@@ -18,7 +19,7 @@ from backend.logging.sink import firestore_sink as _sink
 from backend.tools.prompts.concept_swap import _CLASSIFY_SWAP_QUESTION_PROMPT
 from backend.agents.prompts.base import (
     CLARIFICATION_SYSTEM_PROMPT, ANSWER_CLASSIFIER_PROMPT,
-    WARMUP_PROMPT, WARMUP_MERGE_PROMPT,
+    WARMUP_PROMPT,
     ADD_ONE_AT_A_TIME, PILLAR_OFFER_TEMPLATE, PILLAR_OFFER_REASK,
     PILLAR_OFFER_DROP, PILLAR_DECLINE_PLACEMENT,
     WALK_INTRO, WALK_ASK_UNDER, WALK_ASK_PLACE, WALK_ADDED, WALK_DUP,
@@ -93,6 +94,7 @@ class BaseAgent:
         self.excluded_concepts  = []
         self.excluded_sub_bullets = {}
         self.pending_pillar_offer = None   # multi-point safeguard (pillar confirmation)
+        self.warmup_state       = WarmupState()
 
     # ── Multi-point safeguard: pillar offer + passive reminder (shared) ─────────
     def _emit_text(self, msg: str) -> str:
@@ -859,37 +861,14 @@ class BaseAgent:
     def get_warmup_message(self) -> str:
         return WARMUP_PROMPT
 
-    def merge_warmup_additions(self, additions: list[str]) -> str:
-        if not additions:
-            return WARMUP_PROMPT
+    def warmup_turn(self, user_text: str) -> str:
+        """Handle one warm-up message through the mini interaction engine (only
+        add/remove, KB-grounded reveals, confirmed removals). Returns the reply."""
+        return warmup_turn(self.warmup_state, user_text)
 
-        additions_text = "\n".join(f"- {a}" for a in additions)
-        prompt = WARMUP_MERGE_PROMPT.format(additions=additions_text)
-
-        try:
-            response = client.models.generate_content(
-                model=MAIN_MODEL,
-                contents=prompt,
-            )
-            merged = response.text.strip()
-            return (
-                "**Here's your updated plan:**\n\n"
-                + merged
-            )
-        except Exception as e:
-            print(f"[WARMUP MERGE] LLM merge failed: {e}")
-            additions_block = "\n".join(f"- {a}" for a in additions)
-            return (
-                "**Here's your updated plan:**\n\n"
-                "🏠 **Housing**\n"
-                "- Should we find temporary accommodation?\n"
-                "- How are the neighbourhoods?\n\n"
-                "📋 **Admin**\n"
-                "- Should we register at the new city hall?\n"
-                "- Do we need a local bank account?\n\n"
-                "**Your additions:**\n"
-                + additions_block
-            )
+    def warmup_rendered_plan(self) -> str:
+        """Deterministic render of the current warm-up plan (logged on Done)."""
+        return render_plan(self.warmup_state)
 
     def _start_main_phase_setup(self):
         if self.phase == "main":

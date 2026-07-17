@@ -1,0 +1,92 @@
+{
+  "pillars": [
+    {
+      "id": "housing",
+      "name": "Housing",
+      "emoji": "🏠",
+      "shown": true,
+      "sub_bullets": [
+        "Should we find temporary accommodation?",
+        "How are the neighbourhoods?",
+        "Do we want to rent or buy?"
+      ]
+    },
+    {
+      "id": "admin",
+      "name": "Admin",
+      "emoji": "📋",
+      "shown": true,
+      "sub_bullets": [
+        "Should we register at the new city hall?",
+        "Do we need a local bank account?",
+        "How do we update our official address?"
+      ]
+    },
+    {
+      "id": "logistics",
+      "name": "Logistics",
+      "emoji": "🚚",
+      "shown": false,
+      "sub_bullets": [
+        "Should we book a moving company?",
+        "What do we do with our current furniture?",
+        "When should we start packing?"
+      ]
+    },
+    {
+      "id": "social",
+      "name": "Social",
+      "emoji": "👥",
+      "shown": false,
+      "sub_bullets": [
+        "How do we meet new people?",
+        "Are there clubs or communities we could join?",
+        "How do we stay in touch with old friends?"
+      ]
+    },
+    {
+      "id": "finances",
+      "name": "Finances",
+      "emoji": "💰",
+      "shown": false,
+      "sub_bullets": [
+        "What is the cost of living in the new city?",
+        "Have we set a budget for the move?",
+        "Will our taxes or income change?"
+      ]
+    },
+    {
+      "id": "healthcare",
+      "name": "Healthcare",
+      "emoji": "🩺",
+      "shown": false,
+      "sub_bullets": [
+        "How do we find a new doctor?",
+        "Do we need to change our health insurance?",
+        "How do we transfer our prescriptions?"
+      ]
+    },
+    {
+      "id": "transport",
+      "name": "Transport",
+      "emoji": "🚌",
+      "shown": false,
+      "sub_bullets": [
+        "What are the public transport options?",
+        "Will we need a car?",
+        "How long is the commute to work?"
+      ]
+    },
+    {
+      "id": "work",
+      "name": "Work",
+      "emoji": "💼",
+      "shown": false,
+      "sub_bullets": [
+        "What is our notice period at the current job?",
+        "What do we need to sort out for the first day?",
+        "Will the new role be remote or in-office?"
+      ]
+    }
+  ]
+}

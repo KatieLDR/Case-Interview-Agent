@@ -207,12 +207,11 @@ async def on_done_warmup(action: cl.Action):
     if agent.phase != "warmup":
         return
 
-    warmup_messages = cl.user_session.get("warmup_messages", [])
-    if not warmup_messages:
+    if not agent.warmup_state.interacted:
         await cl.Message(
             content=(
-                "It looks like you haven't typed anything yet! "
-                "Give it a try — there are no right or wrong answers. 😊"
+                "It looks like you haven't shaped the plan yet! "
+                "Try adding or removing a point — there are no right or wrong answers. 😊"
             ),
             actions=[
                 cl.Action(
@@ -243,6 +242,9 @@ async def on_done_warmup(action: cl.Action):
             f"---\n\n"
             f"You've just practiced breaking down a problem into structured pillars, "
             f"that's exactly what you'll do next.\n\n"
+            f"💡 **One thing to keep in mind:** this AI assistant is a research-purpose "
+            f"tool, and it has limitations. As you experienced, some standard points "
+            f"can't be reworded — but your own contributions can keep your wording.\n\n"
             f"Click **Let's go! 🚀** below to start the real case."
         ),
         actions=[
@@ -367,21 +369,14 @@ async def on_message(message: cl.Message):
         await _send_summary()
         return
 
-    # Warmup phase
+    # Warmup phase — deterministic mini interaction engine (add/remove only)
     if hasattr(agent, "phase") and agent.phase == "warmup":
-        warmup_messages = cl.user_session.get("warmup_messages", [])
-        warmup_messages.append(message.content)
-        cl.user_session.set("warmup_messages", warmup_messages)
-
-        merged = agent.merge_warmup_additions(warmup_messages)
-        cl.user_session.set("warmup_merged_plan", merged)
+        reply = agent.warmup_turn(message.content)
+        cl.user_session.set("warmup_merged_plan", agent.warmup_rendered_plan())
 
         await cl.Message(
             content=(
-                f"Got it!\n\n"
-                f"{merged}\n\n"
-                f"---\n\n"
-                f"Anything else to add, or is there anything you'd remove or change? "
+                f"{reply}\n\n"
                 f"When you want to finish the practice, click the **✅ Done** button below."
             ),
             actions=[
