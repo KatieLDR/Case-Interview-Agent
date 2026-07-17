@@ -153,24 +153,39 @@
     console.log("[BA Timer] started — 15 minutes");
   }
 
-  // ── Qualtrics linkage ─────────────────────────────────────────────────────
+  // ── Qualtrics / Prolific linkage ──────────────────────────────────────────
   // Qualtrics appends ?qrid=<ResponseID> when redirecting to the agent link.
-  // We forward it to Python via the Chainlit window_message channel so it gets
-  // stored on the Firestore session doc as participant_id.
-  // Analysis join: Qualtrics ResponseID = Firestore session.participant_id.
+  // For the g2 (Prolific) group the redirect also carries PROLIFIC_PID / STUDY_ID
+  // / SESSION_ID (piped from Qualtrics embedded data, originally set by Prolific).
+  // We forward them to Python via the Chainlit window_message channel so they get
+  // stored on the Firestore session doc.
+  // Analysis join: Qualtrics ResponseID = Firestore session.participant_id;
+  //                Prolific PID = Firestore session.prolific_pid.
   //
   // window.postMessage fires before Chainlit's React listener is registered, so
   // we retry at 1 s and 3 s — cl.user_session.set is idempotent for same value.
-  const qrid = new URLSearchParams(window.location.search).get("qrid");
-  if (qrid) {
-    sessionStorage.setItem("ba_qrid", qrid);
-    function _sendQrid() {
-      window.postMessage({ type: "ba_pid", value: qrid }, "*");
+  // Param names are case-sensitive and must match Qualtrics/Prolific exactly.
+  const _params = new URLSearchParams(window.location.search);
+  const qrid = _params.get("qrid");
+  const prolificPid = _params.get("PROLIFIC_PID");
+  const studyId = _params.get("STUDY_ID");
+  const prolificSessionId = _params.get("SESSION_ID");
+  if (qrid || prolificPid || studyId || prolificSessionId) {
+    if (qrid) sessionStorage.setItem("ba_qrid", qrid);
+    function _sendPid() {
+      window.postMessage({
+        type: "ba_pid",
+        value: qrid,
+        prolific_pid: prolificPid,
+        study_id: studyId,
+        prolific_session_id: prolificSessionId,
+      }, "*");
     }
-    _sendQrid();
-    setTimeout(_sendQrid, 1000);
-    setTimeout(_sendQrid, 3000);
-    console.log("[BA Qualtrics] qrid forwarded to backend:", qrid);
+    _sendPid();
+    setTimeout(_sendPid, 1000);
+    setTimeout(_sendPid, 3000);
+    console.log("[BA Qualtrics] ids forwarded to backend:",
+      { qrid, prolificPid, studyId, prolificSessionId });
   }
 
   // ── MutationObserver ────────────────────────────────────────────────────

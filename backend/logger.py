@@ -39,6 +39,11 @@ def create_session(user_id: str = "anonymous", agent_type: str = "unknown") -> s
         # Qualtrics linkage: set later via set_participant_id() once the JS hook
         # forwards the pid from the survey redirect URL.
         "participant_id": None,
+        # Prolific linkage (g2 group): set later via set_prolific_ids() from the
+        # PROLIFIC_PID / STUDY_ID / SESSION_ID params on the survey redirect URL.
+        "prolific_pid": None,
+        "prolific_study_id": None,
+        "prolific_session_id": None,
         "created_at": datetime.now(timezone.utc),
         "started_at": None,
         "ended_at": None,
@@ -102,6 +107,30 @@ def set_participant_id(session_id: str, participant_id: str) -> None:
         print(f"[QUALTRICS] participant_id={participant_id} for session={session_id}")
     except Exception as e:
         print(f"[QUALTRICS] failed to set participant_id: {e}")
+
+
+def set_prolific_ids(
+    session_id: str,
+    prolific_pid: str | None = None,
+    study_id: str | None = None,
+    prolific_session_id: str | None = None,
+) -> None:
+    """Link this agent session to Prolific (g2 group). Only writes the ids that
+    are present, so a missing param never overwrites an existing value."""
+    fields = {}
+    if prolific_pid:
+        fields["prolific_pid"] = prolific_pid
+    if study_id:
+        fields["prolific_study_id"] = study_id
+    if prolific_session_id:
+        fields["prolific_session_id"] = prolific_session_id
+    if not fields:
+        return
+    try:
+        db.collection(SESSIONS_COLLECTION).document(session_id).update(fields)
+        print(f"[PROLIFIC] set {fields} for session={session_id}")
+    except Exception as e:
+        print(f"[PROLIFIC] failed to set prolific ids: {e}")
 
 
 def stamp_started_at(session_id: str) -> None:

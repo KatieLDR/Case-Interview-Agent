@@ -83,9 +83,14 @@ async def on_readme_confirmed(action: cl.Action):
 @cl.on_window_message
 async def on_window_message(data):
     if isinstance(data, dict) and data.get("type") == "ba_pid":
-        pid = str(data.get("value", "")).strip()
+        pid = str(data.get("value", "") or "").strip()
         if pid:
             cl.user_session.set("participant_id", pid)
+        # Prolific ids (g2 group) — parked here, written once session_id exists.
+        for key in ("prolific_pid", "study_id", "prolific_session_id"):
+            val = str(data.get(key, "") or "").strip()
+            if val:
+                cl.user_session.set(key, val)
 
 
 # Agent selection callbacks
@@ -144,6 +149,14 @@ async def _init_agent(agent_type: str):
     if pid:
         from backend.logger import set_participant_id
         set_participant_id(agent.session_id, pid)
+
+    # Write Prolific ids (g2 group) if the survey redirect carried them.
+    prolific_pid = cl.user_session.get("prolific_pid")
+    study_id = cl.user_session.get("study_id")
+    prolific_session_id = cl.user_session.get("prolific_session_id")
+    if prolific_pid or study_id or prolific_session_id:
+        from backend.logger import set_prolific_ids
+        set_prolific_ids(agent.session_id, prolific_pid, study_id, prolific_session_id)
 
     await cl.Message(content=intro).send()
     await cl.Message(content=agent.get_warmup_message()).send()

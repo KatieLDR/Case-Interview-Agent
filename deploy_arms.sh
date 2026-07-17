@@ -1,10 +1,12 @@
 #!/bin/bash
-# deploy_arms.sh
-# Builds the app image once and deploys 6 Cloud Run services:
-#   3 arms (bb/e/h) × 2 groups (g0=test / g1=official).
+# deploy_arms.sh [group ...]
+# Builds the app image once and deploys 3 arms (bb/e/h) per group.
+# Groups: g0=test / g1=official / g2=Prolific. Default = all three (9 services).
+#   ./deploy_arms.sh          → deploys g0, g1, g2  (9 services)
+#   ./deploy_arms.sh g2       → deploys ONLY g2     (3 services; leaves g0/g1 live)
 # Each service runs the SAME image, differentiated only by env vars:
 #   ARM                 → pins the agent, skips the selector screen
-#   SESSIONS_COLLECTION → isolates Firestore data (sessions_g0 vs sessions)
+#   SESSIONS_COLLECTION → isolates Firestore data (sessions_g0 / sessions_g1 / sessions_g2)
 #   GROUP               → stored on each session doc for convenience
 #
 # Prerequisites:
@@ -13,6 +15,7 @@
 #     Adjust --set-secrets / --set-env-vars below to MATCH that service.
 #
 # Change log: 2026-06-22 — initial build (arm × group split)
+#             2026-07-18 — added g2 (Prolific) group; groups now selectable via args
 
 set -e
 
@@ -33,8 +36,16 @@ docker buildx build --platform linux/amd64 \
 # ── Deploy matrix ───────────────────────────────────────────────────────────
 # arm key | service-name slug
 # slug: bb=black_box, e=explainable, h=hitl
-# group: g0=test, g1=official
+# group: g0=test, g1=official, g2=Prolific
 ARMS=("black_box:bb" "explainable:e" "hitl:h")
+
+# Groups to deploy: from CLI args, else all three.
+# NOTE: do NOT name this `GROUPS` — that is a read-only bash special variable
+# (the current user's group IDs); assignments to it are silently ignored.
+DEPLOY_GROUPS=("$@")
+if [ ${#DEPLOY_GROUPS[@]} -eq 0 ]; then
+  DEPLOY_GROUPS=("g0" "g1" "g2")
+fi
 
 deploy_one() {
   local arm_key="$1" slug="$2" group="$3" collection="$4"
@@ -56,10 +67,11 @@ deploy_one() {
 for entry in "${ARMS[@]}"; do
   arm_key="${entry%%:*}"
   slug="${entry##*:}"
-  deploy_one "$arm_key" "$slug" "g0" "sessions_g0"
-  deploy_one "$arm_key" "$slug" "g1" "sessions_g1"
+  for group in "${DEPLOY_GROUPS[@]}"; do
+    deploy_one "$arm_key" "$slug" "$group" "sessions_${group}"
+  done
 done
 
 echo ""
-echo "✅ Done! 6 services deployed. Get their URLs with:"
+echo "✅ Done! $(( ${#ARMS[@]} * ${#DEPLOY_GROUPS[@]} )) services deployed (groups: ${DEPLOY_GROUPS[*]}). Get their URLs with:"
 echo "  gcloud run services list --region=$REGION --project=$PROJECT_ID --format='table(metadata.name, status.url)'"
